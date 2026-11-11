@@ -1,0 +1,15 @@
+services:
+  armada:
+    build: ..
+    ports:
+      - "8080:8080"
+    environment:
+      # Set a fixed token, or leave unset and read the generated one:
+      #   docker compose exec armada cat /data/admin-token
+      ARMADA_ADMIN_TOKEN: ${ARMADA_ADMIN_TOKEN:-}
+    volumes:
+      - armada-data:/data
+    restart: unless-stopped
+
+volumes:
+  armada-data:

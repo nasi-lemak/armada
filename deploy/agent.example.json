@@ -1,0 +1,23 @@
+{
+  "server_url": "https://fleet.example.com",
+  "enrollment_token": "et_REPLACE_ME",
+  "state_dir": "/var/lib/armada",
+
+  "auto_update": true,
+  "maintenance_window": "02:00-05:00",
+
+  "allow_reboot": true,
+  "allow_exec": false,
+  "command_timeout": "10m",
+
+  "packages": {
+    "myapp": {
+      "install_command": ["/opt/myapp/hooks/install.sh"],
+      "health_command": ["/opt/myapp/hooks/health.sh"],
+      "health_retries": 5,
+      "health_interval": "5s",
+      "rollback_command": ["/opt/myapp/hooks/rollback.sh"],
+      "version_command": ["cat", "/opt/myapp/VERSION"]
+    }
+  }
+}

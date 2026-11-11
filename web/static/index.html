@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Armada Fleet</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="login" class="login hidden">
+    <form id="login-form" class="login-card">
+      <div class="brand brand-lg"><span class="logo" aria-hidden="true"></span>Armada</div>
+      <p class="muted">Sign in with the admin token. It is printed on first start and saved in <code>&lt;data-dir&gt;/admin-token</code>.</p>
+      <label>Admin token<input id="login-token" type="password" autocomplete="current-password" required></label>
+      <p id="login-error" class="error hidden"></p>
+      <button type="submit" class="btn primary">Sign in</button>
+    </form>
+  </div>
+
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <div class="brand"><span class="logo" aria-hidden="true"></span>Armada</div>
+      <nav id="nav">
+        <a href="#/" data-route="overview">Overview</a>
+        <a href="#/devices" data-route="devices">Devices</a>
+        <a href="#/deployments" data-route="deployments">Deployments</a>
+        <a href="#/releases" data-route="releases">Releases</a>
+        <a href="#/enroll" data-route="enroll">Enrollment</a>
+        <a href="#/activity" data-route="activity">Activity</a>
+      </nav>
+      <button id="logout" class="btn ghost small">Sign out</button>
+    </header>
+    <main id="view"></main>
+  </div>
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>

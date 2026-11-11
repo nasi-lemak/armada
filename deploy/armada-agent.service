@@ -1,0 +1,14 @@
+[Unit]
+Description=Armada fleet agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/armada-agent -config /etc/armada/agent.json
+Restart=always
+RestartSec=10
+# Root is needed to replace its own binary and run package install hooks.
+User=root
+
+[Install]
+WantedBy=multi-user.target

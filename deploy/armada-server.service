@@ -1,0 +1,18 @@
+[Unit]
+Description=Armada fleet management server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/armada-server -data-dir /var/lib/armada-server -listen :8080
+DynamicUser=yes
+StateDirectory=armada-server
+StateDirectoryMode=0700
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
