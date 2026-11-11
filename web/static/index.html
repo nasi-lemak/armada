@@ -11,10 +11,17 @@
   <div id="login" class="login hidden">
     <form id="login-form" class="login-card">
       <div class="brand brand-lg"><span class="logo" aria-hidden="true"></span>Armada</div>
-      <p class="muted">Sign in with the admin token. It is printed on first start and saved in <code>&lt;data-dir&gt;/admin-token</code>.</p>
-      <label>Admin token<input id="login-token" type="password" autocomplete="current-password" required></label>
-      <p id="login-error" class="error hidden"></p>
+      <div id="login-user" class="stack">
+        <label>Email<input id="login-email" type="email" autocomplete="username"></label>
+        <label>Password<input id="login-password" type="password" autocomplete="current-password"></label>
+      </div>
+      <div id="login-admin" class="stack hidden">
+        <p class="muted">The admin token is printed on first start and saved in <code>&lt;data-dir&gt;/admin-token</code>. Personal API tokens (<code>ut_…</code>) work here too.</p>
+        <label>Token<input id="login-token" type="password" autocomplete="off"></label>
+      </div>
+      <p id="login-error" class="error hidden" role="alert"></p>
       <button type="submit" class="btn primary">Sign in</button>
+      <button type="button" id="login-switch" class="btn ghost small">Sign in with a token instead</button>
     </form>
   </div>
 
@@ -24,13 +31,15 @@
       <nav id="nav">
         <a href="#/" data-route="overview">Overview</a>
         <a href="#/devices" data-route="devices">Devices</a>
-        <a href="#/deployments" data-route="deployments">Deployments</a>
-        <a href="#/releases" data-route="releases">Releases</a>
+        <a href="#/deployments" data-route="deployments" class="fleet-only">Deployments</a>
+        <a href="#/releases" data-route="releases" class="fleet-only">Releases</a>
         <a href="#/monitoring" data-route="monitoring">Monitoring</a>
-        <a href="#/apps" data-route="apps">Apps</a>
-        <a href="#/enroll" data-route="enroll">Enrollment</a>
+        <a href="#/apps" data-route="apps" class="fleet-only">Apps</a>
+        <a href="#/enroll" data-route="enroll" class="need-operator">Enrollment</a>
         <a href="#/activity" data-route="activity">Activity</a>
+        <a href="#/users" data-route="users" class="need-admin">Users</a>
       </nav>
+      <a href="#/account" id="whoami" class="whoami" title="My account"></a>
       <button id="logout" class="btn ghost small">Sign out</button>
     </header>
     <main id="view"></main>

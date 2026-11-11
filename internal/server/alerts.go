@@ -577,5 +577,5 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, nonNil(alerts))
+	writeJSON(w, http.StatusOK, nonNil(s.visibleAlerts(r.Context(), principalFrom(r.Context()), alerts)))
 }

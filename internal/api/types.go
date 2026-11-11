@@ -379,6 +379,8 @@ type Event struct {
 	DeviceID     string    `json:"device_id,omitempty"`
 	DeploymentID string    `json:"deployment_id,omitempty"`
 	Message      string    `json:"message"`
+	// Actor is who caused the event: a user's email, "admin token", or empty for the system.
+	Actor string `json:"actor,omitempty"`
 }
 
 // ---- Agent protocol ----
@@ -745,4 +747,81 @@ type FleetHistory struct {
 	To         time.Time    `json:"to"`
 	Resolution int64        `json:"resolution_seconds"`
 	Points     []FleetPoint `json:"points"`
+}
+
+// ---- users ----
+
+// Roles, from least to most privileged.
+const (
+	RoleViewer   = "viewer"   // read-only
+	RoleOperator = "operator" // device actions, rollouts, releases, monitors, enrollment
+	RoleAdmin    = "admin"    // everything, including users, apps, alerting and backups
+)
+
+// RoleRank orders roles.
+func RoleRank(r string) int {
+	switch r {
+	case RoleViewer:
+		return 1
+	case RoleOperator:
+		return 2
+	case RoleAdmin:
+		return 3
+	}
+	return 0
+}
+
+// User is a person who signs in to the dashboard or uses the CLI.
+type User struct {
+	ID    string `json:"id"`
+	Email string `json:"email"`
+	Name  string `json:"name"`
+	Role  string `json:"role"`
+	// Scope limits the user to matching devices (e.g. labels customer=acme).
+	// Empty means the whole fleet. Scoped users never see fleet-wide pages.
+	Scope       Selector   `json:"scope"`
+	Disabled    bool       `json:"disabled"`
+	CreatedAt   time.Time  `json:"created_at"`
+	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
+}
+
+// CreateUserRequest creates a user (admin only).
+type CreateUserRequest struct {
+	Email    string   `json:"email"`
+	Name     string   `json:"name"`
+	Role     string   `json:"role"`
+	Scope    Selector `json:"scope"`
+	Password string   `json:"password"`
+}
+
+// LoginRequest signs in with email and password.
+type LoginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+// LoginResponse returns a session token for the Authorization header.
+type LoginResponse struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+	User      User      `json:"user"`
+}
+
+// Me describes the signed-in principal.
+type Me struct {
+	User *User `json:"user,omitempty"` // nil for the server's admin token
+	// Name is who actions are attributed to.
+	Name   string   `json:"name"`
+	Role   string   `json:"role"`
+	Scope  Selector `json:"scope"`
+	Scoped bool     `json:"scoped"`
+}
+
+// APIToken is a personal token for scripts and the CLI.
+type APIToken struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	Token      string     `json:"token,omitempty"` // only in the create response
 }

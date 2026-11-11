@@ -65,6 +65,9 @@ It has three parts, all in Go with no external services:
 - **BLE and other peripherals** (see [below](#peripherals-ble-sensors-and-other-devices)): any agent can be a
   gateway that discovers nearby devices and rolls out their firmware. Drivers exist for MCUboot/Zephyr,
   Nordic DFU, or your own tool.
+- **Users, roles and client accounts** (see [below](#users-roles-and-client-accounts)): viewer, operator
+  and admin roles, and accounts limited to one customer's devices. Every change in the activity log names
+  who made it.
 - **Web dashboard** built into the server binary (no build step, strict CSP).
 - **One-line onboarding** with `curl …/install.sh | sh`.
 - **Android devices you provide to customers** (see [below](#android-devices)):
@@ -83,7 +86,8 @@ make build            # bin/armada-server, bin/armada-agent, bin/armadactl
 ```
 
 On first start the server generates an admin token, prints it, and saves it to
-`./data/admin-token`. Open http://localhost:8080 and sign in with it.
+`./data/admin-token`. Open http://localhost:8080, choose **Sign in with a token instead**, and
+paste it. Then add a user for yourself under **Users**, and sign in with email and password from then on.
 
 Point the CLI at the server:
 
@@ -500,6 +504,53 @@ end with simulated devices, including a bootloader rollback and a sensor of the 
 scanner and the example driver scripts haven't been run against real Bluetooth hardware yet, so pilot
 them with one gateway first.
 
+## Users, roles and client accounts
+
+The admin token is for bootstrapping and automation. Give each person their own account, so their
+actions are attributed to them and their access can be removed on its own.
+
+```bash
+armadactl users create --email ops@yourco.com --name "Dana" --role admin         # password read from stdin
+armadactl users create --email it@acme.com --role operator --scope customer=acme  # a client account
+```
+
+Or use **Users** in the dashboard. People sign in with their email and password.
+
+| Role | Can |
+|---|---|
+| `viewer` | See everything their scope allows. Change nothing. |
+| `operator` | Also edit devices, run actions, create enrollment tokens, and (fleet-wide only) upload releases, run rollouts and manage monitors. |
+| `admin` | Everything: users, alert channels and rules, Android apps, backups. Admins are always fleet-wide. |
+
+**Client accounts.** A *scope* limits a user to devices with matching labels (and optionally a channel),
+for example `customer=acme`. A scoped user:
+
+- sees only matching devices, their alerts, history and activity. Other devices answer 404, as if they
+  didn't exist;
+- never sees releases, deployments, enrollment-token lists, monitors, alert rules or fleet-wide history,
+  which are shared across customers;
+- can only create enrollment tokens that put new devices in their scope (the scope labels are forced
+  onto the token);
+- can't move a device out of their scope by relabelling it, and can't change app licensing (that is
+  your anti-redistribution control).
+
+So a customer can watch and manage their own devices, while you decide what software they run.
+
+**Tokens for scripts.** Each user can create personal API tokens (`ut_…`) on **My account** or with
+`armadactl me tokens create --name ci`. A token acts as its owner with the same role and scope, and
+stops working when it is revoked or the user is disabled or deleted. Pass it to the CLI with `--token`
+or `ARMADA_TOKEN`.
+
+**Sessions and safety.**
+- Dashboard sessions last 12 hours without activity (`-session-ttl`).
+- Changing or resetting a password signs that user out everywhere.
+- Disabling a user takes effect on their next request.
+- Five failed sign-ins for an email lock that email for 15 minutes; twenty from one address lock the
+  address. Behind a reverse proxy, every user shares the proxy's address.
+- Passwords are stored as bcrypt hashes; sessions and tokens as SHA-256 hashes.
+- Users can't change their own role, disable themselves, or delete themselves, so an admin can't
+  lock the last admin out by accident. The admin token keeps working regardless.
+
 ## Agent configuration
 
 `/etc/armada/agent.json` (see [`deploy/agent.example.json`](deploy/agent.example.json)):
@@ -591,7 +642,13 @@ armadactl deployments create --release <id> [--channel C] [--label K=V] [--devic
                              [--min-samples 3] [--manual] [--allow-downgrade]
 armadactl deployments list|get|pause|resume|advance|retry|complete|abort
 armadactl events [--device ID] [--deployment ID]
+armadactl whoami
+armadactl users list|create|set|delete
+armadactl me password
+armadactl me tokens [list|create --name N|revoke ID]
 ```
+
+Authenticate with `--token` or `ARMADA_TOKEN`: a personal token, or the admin token.
 
 Add `--json` to any command for machine-readable output.
 
@@ -613,6 +670,7 @@ Add `--json` to any command for machine-readable output.
 | `-history-resolution` | `ARMADA_HISTORY_RESOLUTION` | `5m` (0 disables history) |
 | `-history-raw-retention` | `ARMADA_HISTORY_RAW_RETENTION` | `72h` |
 | `-history-retention` | `ARMADA_HISTORY_RETENTION` | `2160h` (90 days) |
+| `-session-ttl` | `ARMADA_SESSION_TTL` | `12h` (dashboard sign-in, sliding) |
 
 The data directory holds `armada.db` (SQLite), `artifacts/`, `signing.key`, `license.key` and
 `admin-token`. **Back it up**, for example nightly from cron:
@@ -634,8 +692,10 @@ behind TLS, either with `-tls-cert`/`-tls-key` or a reverse proxy.
 
 ## API
 
-All admin endpoints need `Authorization: Bearer <admin token>`. Agent endpoints use the
-per-device key issued at enrollment.
+Admin endpoints need `Authorization: Bearer <token>`: the admin token, a dashboard session from
+`POST /api/v1/auth/login`, or a personal API token. Each endpoint requires a minimum role, and
+client accounts get `403` on fleet-wide endpoints and `404` for devices outside their scope. Agent
+endpoints use the per-device key issued at enrollment.
 
 | Method & path | Purpose |
 |---|---|
@@ -663,11 +723,18 @@ per-device key issued at enrollment.
 | `GET /api/v1/history/fleet?range=…` | Devices online, health problems and firing alerts over time |
 | `GET /api/v1/history/checks`, `GET /api/v1/history/compare?check=…&label=…` | One check across devices (worst eight) |
 | `GET /api/v1/backup` | Full backup (`.tar.gz`: database snapshot, keys, artifacts) |
+| `POST /api/v1/auth/login`, `POST /api/v1/auth/logout` | Email and password sign-in; returns a session token |
+| `GET /api/v1/me`, `POST /api/v1/me/password` | Who is signed in (role, scope); change password |
+| `GET/POST /api/v1/me/tokens`, `DELETE /api/v1/me/tokens/{id}` | Personal API tokens |
+| `GET/POST /api/v1/users`, `PATCH/DELETE /api/v1/users/{id}` | Users (admin) |
 
 ## Security model
 
-- Admin and device credentials are random 256-bit secrets. The server stores only their
-  SHA-256 hashes. Deleting a device revokes its key immediately.
+- Admin, session, personal and device credentials are random 256-bit secrets. The server stores
+  only their SHA-256 hashes. Deleting a device revokes its key immediately. User passwords are
+  bcrypt hashes.
+- Roles and client scopes are enforced by the server on every request. The dashboard only hides
+  what a user can't use.
 - Enrollment tokens can expire, have a use limit, and be revoked.
 - A device can download only the artifacts it has been offered. The only public download
   is the newest `armada-agent` binary, which `install.sh` uses.
@@ -716,7 +783,8 @@ deploy/, examples/  service units, compose file, sample agent config and hooks
 
 - A single server with SQLite comfortably handles thousands of devices at a 30s
   heartbeat. Larger fleets would need Postgres and several server replicas.
-- There is one admin token, with no per-user accounts, roles or audit attribution.
+- There is no single sign-on (OIDC/SAML) or two-factor sign-in yet. Put the dashboard behind your
+  identity-aware proxy if you need either.
 - Agents poll; there is no push channel, so actions run on the next check-in (30s by default).
 - There are no delta updates; every update downloads the full artifact.
 - The agent's metrics are richest on Linux. Other platforms report the basics.

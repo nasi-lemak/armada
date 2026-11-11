@@ -32,7 +32,11 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sum := api.FleetSummary{PackageVersions: map[string]map[string]int{}, Channels: map[string]int{}}
+	p := principalFrom(ctx)
 	for _, d := range devs {
+		if !p.sees(d) {
+			continue
+		}
 		s.decorate(d)
 		sum.Devices++
 		if d.Status == api.DeviceOnline {
@@ -74,7 +78,10 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	sum.FiringAlerts = len(firing)
+	sum.FiringAlerts = len(s.visibleAlerts(ctx, p, firing))
+	if p.scoped() {
+		sum.ActiveDeployments, sum.Releases = 0, 0 // fleet-wide; not shown to client accounts
+	}
 	writeJSON(w, http.StatusOK, sum)
 }
 
@@ -116,7 +123,7 @@ func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 	out := []*api.Device{}
 	for _, d := range devs {
 		s.decorate(d)
-		if !rollout.Matches(sel, d) || (status != "" && d.Status != status) || (health != "" && d.Health != health) {
+		if !principalFrom(r.Context()).sees(d) || !rollout.Matches(sel, d) || (status != "" && d.Status != status) || (health != "" && d.Health != health) {
 			continue
 		}
 		out = append(out, d)
@@ -159,7 +166,7 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, p := range all {
-		if p.ParentID == d.ID {
+		if p.ParentID == d.ID && principalFrom(ctx).sees(p) {
 			s.decorate(p)
 			det.Peripherals = append(det.Peripherals, p)
 		}
@@ -170,6 +177,9 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) loadDevice(w http.ResponseWriter, r *http.Request) (*api.Device, bool) {
 	d, err := s.store.GetDevice(r.Context(), r.PathValue("id"))
+	if err == nil && !principalFrom(r.Context()).sees(d) {
+		err = store.ErrNotFound // out of scope looks the same as missing
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "device not found")
 		return nil, false
@@ -213,6 +223,12 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
+	// Licensing is the vendor's anti-redistribution control: client accounts
+	// can't lift a revocation (or impose one) on their own devices.
+	if req.LicenseRevoked != nil && *req.LicenseRevoked != d.LicenseRevoked && principalFrom(r.Context()).scoped() {
+		writeError(w, http.StatusForbidden, "only fleet-wide accounts can change app licensing")
+		return
+	}
 	if req.Name != nil {
 		d.Name = truncate(strings.TrimSpace(*req.Name), 128)
 	}
@@ -234,6 +250,10 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validLabels(d.Labels); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !principalFrom(r.Context()).sees(d) {
+		writeError(w, http.StatusForbidden, "this change would move the device out of the devices you can manage")
 		return
 	}
 	if err := s.store.UpdateDeviceMeta(r.Context(), d.ID, d.Name, d.Channel, d.Labels); err != nil {
@@ -272,7 +292,11 @@ func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
 // ---- actions ----
 
 func (s *Server) handleListActions(w http.ResponseWriter, r *http.Request) {
-	acts, err := s.store.ListActions(r.Context(), r.PathValue("id"), 100)
+	d, ok := s.loadDevice(w, r)
+	if !ok {
+		return
+	}
+	acts, err := s.store.ListActions(r.Context(), d.ID, 100)
 	if err != nil {
 		s.internalError(w, err)
 		return
@@ -351,6 +375,17 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Labels == nil {
 		req.Labels = map[string]string{}
+	}
+	// Client accounts can only enroll devices into their own scope.
+	if p := principalFrom(r.Context()); p.scoped() {
+		for k, v := range p.scope.Labels {
+			if v != "*" {
+				req.Labels[k] = v
+			}
+		}
+		if p.scope.Channel != "" {
+			req.Channel = p.scope.Channel
+		}
 	}
 	if err := validLabels(req.Labels); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -825,10 +860,29 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	evs, err := s.store.ListEvents(r.Context(), q.Get("device_id"), q.Get("deployment_id"), limit)
+	p := principalFrom(r.Context())
+	fetch := limit
+	if p.scoped() {
+		fetch = limit * 10 // filtered below
+	}
+	evs, err := s.store.ListEvents(r.Context(), q.Get("device_id"), q.Get("deployment_id"), fetch)
 	if err != nil {
 		s.internalError(w, err)
 		return
+	}
+	if p.scoped() {
+		visible, err := s.visibleDeviceIDs(r.Context(), p)
+		if err != nil {
+			s.internalError(w, err)
+			return
+		}
+		kept := evs[:0]
+		for _, e := range evs {
+			if visible[e.DeviceID] && len(kept) < limit {
+				kept = append(kept, e)
+			}
+		}
+		evs = kept
 	}
 	if evs == nil {
 		evs = []*api.Event{}
@@ -844,7 +898,45 @@ func (s *Server) event(ctx context.Context, typ, deviceID, deploymentID, msg str
 
 // logEvent only records an activity-log entry.
 func (s *Server) logEvent(ctx context.Context, typ, deviceID, deploymentID, msg string) {
-	if err := s.store.AddEvent(context.WithoutCancel(ctx), api.Event{Time: s.now(), Type: typ, DeviceID: deviceID, DeploymentID: deploymentID, Message: msg}); err != nil {
+	actor := ""
+	if p := principalFrom(ctx); p != nil {
+		actor = p.name
+	}
+	if err := s.store.AddEvent(context.WithoutCancel(ctx), api.Event{Time: s.now(), Type: typ, DeviceID: deviceID, DeploymentID: deploymentID, Message: msg, Actor: actor}); err != nil {
 		s.log.Error("record event", "err", err)
 	}
+}
+
+// visibleDeviceIDs is the set of devices a principal may see.
+func (s *Server) visibleDeviceIDs(ctx context.Context, p *principal) (map[string]bool, error) {
+	devs, err := s.store.ListDevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, d := range devs {
+		if p.sees(d) {
+			out[d.ID] = true
+		}
+	}
+	return out, nil
+}
+
+// visibleAlerts drops alerts about devices outside the principal's scope
+// (and fleet-wide alerts, for client accounts).
+func (s *Server) visibleAlerts(ctx context.Context, p *principal, alerts []*api.Alert) []*api.Alert {
+	if !p.scoped() {
+		return alerts
+	}
+	visible, err := s.visibleDeviceIDs(ctx, p)
+	if err != nil {
+		return nil
+	}
+	var out []*api.Alert
+	for _, a := range alerts {
+		if visible[a.DeviceID] {
+			out = append(out, a)
+		}
+	}
+	return out
 }

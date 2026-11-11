@@ -31,7 +31,9 @@ Usage:
 
 Connection (flags or environment):
   --server   ARMADA_SERVER        server URL (default http://localhost:8080)
-  --token    ARMADA_ADMIN_TOKEN   admin token
+  --token    ARMADA_TOKEN         a personal API token (ut_..., from the dashboard's My account
+                                  page or "armadactl me tokens create") or the admin token;
+                                  ARMADA_ADMIN_TOKEN is also read
 
 Commands:
   status                                     fleet overview
@@ -80,6 +82,19 @@ Monitoring and alerts:
   history checks                             check names with history, and how many devices have each
   history compare --check NAME [--range 7d] [--label K=V]... [--channel C] [--csv]
 
+Users and access:
+  whoami                                     who the token belongs to, role and scope
+  users list
+  users create --email E --role viewer|operator|admin [--name N] [--scope K=V]...
+               [--password P]                password is read from stdin if omitted
+  users set <id|email> [--role R] [--name N] [--scope K=V]... [--whole-fleet]
+                       [--disable|--enable] [--reset-password]
+  users delete <id|email>
+  me password                                change your password (prompts on stdin)
+  me tokens [list]
+  me tokens create --name N                  prints the token once
+  me tokens revoke <id>
+
 Android:
   apps list
   apps set <package> --signer SHA256 [--signer ...] [--name N] [--license] [--license-ttl 1h]
@@ -101,7 +116,7 @@ func main() {
 	fs := flag.NewFlagSet("armadactl", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	fs.StringVar(&c.server, "server", envOr("ARMADA_SERVER", "http://localhost:8080"), "")
-	fs.StringVar(&c.token, "token", os.Getenv("ARMADA_ADMIN_TOKEN"), "")
+	fs.StringVar(&c.token, "token", envOr("ARMADA_TOKEN", os.Getenv("ARMADA_ADMIN_TOKEN")), "")
 	fs.BoolVar(&c.json, "json", false, "")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
@@ -157,6 +172,12 @@ func (c *cli) run(args []string) error {
 		return c.backup(append([]string{verb}, rest...))
 	case "android":
 		return c.android(verb, rest)
+	case "whoami":
+		return c.whoami()
+	case "users", "user":
+		return c.users(verb, rest)
+	case "me":
+		return c.meCmd(verb, rest)
 	case "deployments", "deployment", "deploy":
 		return c.deployments(verb, rest)
 	case "help", "-h", "--help":

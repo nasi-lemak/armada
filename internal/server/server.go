@@ -7,7 +7,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
@@ -51,6 +50,8 @@ type Config struct {
 	HistoryRawRetention time.Duration
 	// HistoryRetention is how long hourly summaries are kept.
 	HistoryRetention time.Duration
+	// SessionTTL is how long a dashboard sign-in lasts without activity.
+	SessionTTL time.Duration
 	// DefaultStrategy is used for deployments created without one (including auto-deploys).
 	DefaultStrategy api.Strategy
 	Logger          *slog.Logger
@@ -99,6 +100,7 @@ func DefaultConfig() Config {
 		HistoryResolution:      5 * time.Minute,
 		HistoryRawRetention:    72 * time.Hour,
 		HistoryRetention:       90 * 24 * time.Hour,
+		SessionTTL:             12 * time.Hour,
 		DefaultStrategy: api.Strategy{
 			Stages:               []int{5, 25, 50, 100},
 			StageDurationSeconds: 15 * 60,
@@ -133,6 +135,7 @@ type Server struct {
 	challenges  *challengeStore
 
 	history      historyState
+	logins       loginLimiter
 	notifyQueue  chan notifyJob
 	notifyClient *http.Client
 }
@@ -255,51 +258,75 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/agent/license", s.deviceAuth(s.handleLicense))
 
 	// Admin API.
-	admin := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, s.adminAuth(h)) }
-	admin("GET /api/v1/summary", s.handleSummary)
+	// Admin API. Each route states the least role it needs and whether users
+	// limited to some devices (client accounts) may use it.
+	const scopedOK, fleetOnly = true, false
+	route := func(minRole string, scoped bool, pattern string, h http.HandlerFunc) {
+		mux.Handle(pattern, s.guard(minRole, scoped, h))
+	}
+	viewer := func(scoped bool, pattern string, h http.HandlerFunc) { route(api.RoleViewer, scoped, pattern, h) }
+	operator := func(scoped bool, pattern string, h http.HandlerFunc) { route(api.RoleOperator, scoped, pattern, h) }
+	admin := func(pattern string, h http.HandlerFunc) { route(api.RoleAdmin, fleetOnly, pattern, h) }
+
+	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
+	viewer(scopedOK, "POST /api/v1/auth/logout", s.handleLogout)
+	viewer(scopedOK, "GET /api/v1/me", s.handleMe)
+	viewer(scopedOK, "POST /api/v1/me/password", s.handleChangePassword)
+	viewer(scopedOK, "GET /api/v1/me/tokens", s.handleListMyTokens)
+	viewer(scopedOK, "POST /api/v1/me/tokens", s.handleCreateMyToken)
+	viewer(scopedOK, "DELETE /api/v1/me/tokens/{id}", s.handleDeleteMyToken)
+
+	viewer(scopedOK, "GET /api/v1/summary", s.handleSummary)
+	viewer(scopedOK, "GET /api/v1/devices", s.handleListDevices)
+	viewer(scopedOK, "GET /api/v1/devices/{id}", s.handleGetDevice)
+	viewer(scopedOK, "GET /api/v1/devices/{id}/history", s.handleDeviceHistory)
+	viewer(scopedOK, "GET /api/v1/devices/{id}/actions", s.handleListActions)
+	operator(scopedOK, "PATCH /api/v1/devices/{id}", s.handlePatchDevice)
+	operator(scopedOK, "POST /api/v1/devices/{id}/actions", s.handleCreateAction)
+	operator(fleetOnly, "DELETE /api/v1/devices/{id}", s.handleDeleteDevice)
+	viewer(scopedOK, "GET /api/v1/events", s.handleListEvents)
+	viewer(scopedOK, "GET /api/v1/alerts", s.handleListAlerts)
+	viewer(scopedOK, "GET /api/v1/history/checks", s.handleHistoryChecks)
+	viewer(scopedOK, "GET /api/v1/history/compare", s.handleHistoryCompare)
+	viewer(fleetOnly, "GET /api/v1/history/fleet", s.handleFleetHistory)
+
+	operator(scopedOK, "POST /api/v1/tokens", s.handleCreateToken)
+	operator(fleetOnly, "GET /api/v1/tokens", s.handleListTokens)
+	operator(fleetOnly, "DELETE /api/v1/tokens/{id}", s.handleRevokeToken)
+	operator(fleetOnly, "POST /api/v1/android/provisioning", s.handleProvisioning)
+
+	viewer(fleetOnly, "GET /api/v1/releases", s.handleListReleases)
+	viewer(fleetOnly, "GET /api/v1/releases/{id}", s.handleGetRelease)
+	operator(fleetOnly, "GET /api/v1/releases/{id}/artifact", s.handleAdminArtifact)
+	operator(fleetOnly, "POST /api/v1/releases", s.handleUploadRelease)
+	operator(fleetOnly, "DELETE /api/v1/releases/{id}", s.handleDeleteRelease)
+	viewer(fleetOnly, "GET /api/v1/deployments", s.handleListDeployments)
+	viewer(fleetOnly, "GET /api/v1/deployments/{id}", s.handleGetDeployment)
+	operator(fleetOnly, "POST /api/v1/deployments", s.handleCreateDeployment)
+	operator(fleetOnly, "POST /api/v1/deployments/{id}/{op}", s.handleDeploymentOp)
+	viewer(fleetOnly, "GET /api/v1/monitors", s.handleListMonitors)
+	operator(fleetOnly, "POST /api/v1/monitors", s.handleCreateMonitor)
+	operator(fleetOnly, "PUT /api/v1/monitors/{id}", s.handleUpdateMonitor)
+	operator(fleetOnly, "DELETE /api/v1/monitors/{id}", s.handleDeleteMonitor)
+	viewer(fleetOnly, "GET /api/v1/alert-rules", s.handleListAlertRules)
+	viewer(fleetOnly, "GET /api/v1/apps", s.handleListApps)
+
 	admin("GET /api/v1/signing-key", s.handleSigningKey)
-	admin("GET /api/v1/devices", s.handleListDevices)
-	admin("GET /api/v1/devices/{id}", s.handleGetDevice)
-	admin("GET /api/v1/devices/{id}/history", s.handleDeviceHistory)
-	admin("GET /api/v1/history/fleet", s.handleFleetHistory)
-	admin("GET /api/v1/history/checks", s.handleHistoryChecks)
 	admin("GET /api/v1/backup", s.handleBackup)
-	admin("GET /api/v1/history/compare", s.handleHistoryCompare)
-	admin("PATCH /api/v1/devices/{id}", s.handlePatchDevice)
-	admin("DELETE /api/v1/devices/{id}", s.handleDeleteDevice)
-	admin("GET /api/v1/devices/{id}/actions", s.handleListActions)
-	admin("POST /api/v1/devices/{id}/actions", s.handleCreateAction)
-	admin("GET /api/v1/tokens", s.handleListTokens)
-	admin("POST /api/v1/tokens", s.handleCreateToken)
-	admin("DELETE /api/v1/tokens/{id}", s.handleRevokeToken)
-	admin("GET /api/v1/releases", s.handleListReleases)
-	admin("POST /api/v1/releases", s.handleUploadRelease)
-	admin("GET /api/v1/releases/{id}", s.handleGetRelease)
-	admin("GET /api/v1/releases/{id}/artifact", s.handleAdminArtifact)
-	admin("DELETE /api/v1/releases/{id}", s.handleDeleteRelease)
-	admin("GET /api/v1/deployments", s.handleListDeployments)
-	admin("POST /api/v1/deployments", s.handleCreateDeployment)
-	admin("GET /api/v1/deployments/{id}", s.handleGetDeployment)
-	admin("POST /api/v1/deployments/{id}/{op}", s.handleDeploymentOp)
-	admin("GET /api/v1/events", s.handleListEvents)
-	admin("GET /api/v1/monitors", s.handleListMonitors)
-	admin("POST /api/v1/monitors", s.handleCreateMonitor)
-	admin("PUT /api/v1/monitors/{id}", s.handleUpdateMonitor)
-	admin("DELETE /api/v1/monitors/{id}", s.handleDeleteMonitor)
 	admin("GET /api/v1/channels", s.handleListChannels)
 	admin("POST /api/v1/channels", s.handleSaveChannel)
 	admin("PUT /api/v1/channels/{id}", s.handleSaveChannel)
 	admin("DELETE /api/v1/channels/{id}", s.handleDeleteChannel)
 	admin("POST /api/v1/channels/{id}/test", s.handleTestChannel)
-	admin("GET /api/v1/alert-rules", s.handleListAlertRules)
 	admin("POST /api/v1/alert-rules", s.handleSaveAlertRule)
 	admin("PUT /api/v1/alert-rules/{id}", s.handleSaveAlertRule)
 	admin("DELETE /api/v1/alert-rules/{id}", s.handleDeleteAlertRule)
-	admin("GET /api/v1/alerts", s.handleListAlerts)
-	admin("GET /api/v1/apps", s.handleListApps)
 	admin("PUT /api/v1/apps/{package}", s.handlePutApp)
 	admin("DELETE /api/v1/apps/{package}", s.handleDeleteApp)
-	admin("POST /api/v1/android/provisioning", s.handleProvisioning)
+	admin("GET /api/v1/users", s.handleListUsers)
+	admin("POST /api/v1/users", s.handleCreateUser)
+	admin("PATCH /api/v1/users/{id}", s.handlePatchUser)
+	admin("DELETE /api/v1/users/{id}", s.handleDeleteUser)
 
 	// Dashboard.
 	static, _ := fs.Sub(web.FS, "static")
@@ -320,23 +347,6 @@ func bearer(r *http.Request) string {
 		return strings.TrimSpace(t)
 	}
 	return ""
-}
-
-func (s *Server) adminAuth(next http.HandlerFunc) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tok := bearer(r)
-		ok := false
-		for _, t := range s.cfg.AdminTokens {
-			if subtle.ConstantTimeCompare([]byte(tok), []byte(t)) == 1 {
-				ok = true
-			}
-		}
-		if !ok {
-			writeError(w, http.StatusUnauthorized, "admin token required")
-			return
-		}
-		next(w, r)
-	})
 }
 
 func (s *Server) deviceAuth(next func(http.ResponseWriter, *http.Request, *api.Device)) http.Handler {
@@ -438,6 +448,9 @@ func (s *Server) Tick(ctx context.Context) error {
 		}
 	}
 	if err := s.evaluateAlerts(ctx, now); err != nil {
+		return err
+	}
+	if err := s.store.PruneSessions(ctx, now); err != nil {
 		return err
 	}
 	return s.historyTick(ctx, now)

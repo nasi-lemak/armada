@@ -187,6 +187,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if _, err := db.Exec(usersSchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate users: %w", err)
+	}
 	if _, err := db.Exec(historySchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate history: %w", err)
@@ -207,6 +211,7 @@ func (s *Store) addColumns() error {
 		{"devices", "license_revoked", "INTEGER NOT NULL DEFAULT 0"},
 		{"devices", "health", "TEXT NOT NULL DEFAULT '[]'"},
 		{"devices", "parent_id", "TEXT NOT NULL DEFAULT ''"},
+		{"events", "actor", "TEXT NOT NULL DEFAULT ''"},
 		{"releases", "version_code", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, c := range cols {
@@ -920,14 +925,14 @@ func (s *Store) AddEvent(ctx context.Context, e api.Event) error {
 	if e.Time.IsZero() {
 		e.Time = time.Now()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO events (time, type, device_id, deployment_id, message) VALUES (?,?,?,?,?)`,
-		ts(e.Time), e.Type, e.DeviceID, e.DeploymentID, e.Message)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO events (time, type, device_id, deployment_id, message, actor) VALUES (?,?,?,?,?,?)`,
+		ts(e.Time), e.Type, e.DeviceID, e.DeploymentID, e.Message, e.Actor)
 	return err
 }
 
 // ListEvents returns recent events, optionally filtered.
 func (s *Store) ListEvents(ctx context.Context, deviceID, deploymentID string, limit int) ([]*api.Event, error) {
-	q := `SELECT id, time, type, device_id, deployment_id, message FROM events WHERE 1=1`
+	q := `SELECT id, time, type, device_id, deployment_id, message, actor FROM events WHERE 1=1`
 	var args []any
 	if deviceID != "" {
 		q += ` AND device_id=?`
@@ -947,7 +952,7 @@ func (s *Store) ListEvents(ctx context.Context, deviceID, deploymentID string, l
 	for rows.Next() {
 		var e api.Event
 		var t int64
-		if err := rows.Scan(&e.ID, &t, &e.Type, &e.DeviceID, &e.DeploymentID, &e.Message); err != nil {
+		if err := rows.Scan(&e.ID, &t, &e.Type, &e.DeviceID, &e.DeploymentID, &e.Message, &e.Actor); err != nil {
 			return nil, err
 		}
 		e.Time = fromTS(t)

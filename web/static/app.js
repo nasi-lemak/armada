@@ -10,6 +10,12 @@ const store = {
   del(k) { try { localStorage.removeItem(k); } catch { /* ignore */ } },
 };
 let token = store.get('armada.token') || '';
+// Who is signed in (GET /api/v1/me). Role and scope only hide UI; the server
+// enforces both on every request.
+let me = null;
+const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
+const atLeast = role => !!me && ROLE_RANK[me.role] >= ROLE_RANK[role];
+const fleetWide = () => !!me && !me.scoped;
 
 class APIError extends Error {
   constructor(status, msg) { super(msg); this.status = status; }
@@ -24,7 +30,7 @@ async function api(method, path, body) {
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(path, opts);
-  if (res.status === 401) { showLogin('Your session expired or the token is invalid.'); throw new APIError(401, 'unauthorized'); }
+  if (res.status === 401) { me = null; showLogin('Your session expired or the token is invalid.'); throw new APIError(401, 'unauthorized'); }
   if (!res.ok) {
     let msg = res.statusText;
     try { msg = (await res.json()).error || msg; } catch { /* not JSON */ }
@@ -219,23 +225,28 @@ const routes = [
   [/^#?\/?$/, 'overview', viewOverview],
   [/^#\/devices$/, 'devices', viewDevices],
   [/^#\/devices\/([\w-]+)$/, 'devices', viewDevice],
-  [/^#\/deployments$/, 'deployments', viewDeployments],
-  [/^#\/deployments\/([\w-]+)$/, 'deployments', viewDeployment],
-  [/^#\/releases$/, 'releases', viewReleases],
-  [/^#\/enroll$/, 'enroll', viewEnroll],
-  [/^#\/apps$/, 'apps', viewApps],
+  [/^#\/deployments$/, 'deployments', viewDeployments, 'fleet'],
+  [/^#\/deployments\/([\w-]+)$/, 'deployments', viewDeployment, 'fleet'],
+  [/^#\/releases$/, 'releases', viewReleases, 'fleet'],
+  [/^#\/enroll$/, 'enroll', viewEnroll, 'operator'],
+  [/^#\/apps$/, 'apps', viewApps, 'fleet'],
   [/^#\/monitoring$/, 'monitoring', viewMonitoring],
   [/^#\/activity$/, 'activity', viewActivity],
+  [/^#\/users$/, 'users', viewUsers, 'admin'],
+  [/^#\/account$/, 'account', viewAccount],
 ];
+const allowed = need => !need || (need === 'fleet' ? fleetWide() : atLeast(need));
 
 async function route() {
   if (!token) return showLogin();
+  if (!me && await guard(loadMe) === undefined) return;
   clearInterval(refreshTimer);
   currentRefresh = null;
   const hash = location.hash || '#/';
-  for (const [re, nav, view] of routes) {
+  for (const [re, nav, view, need] of routes) {
     const m = hash.match(re);
     if (!m) continue;
+    if (!allowed(need)) break;
     document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('active', a.dataset.route === nav));
     const root = $('#view');
     root.replaceChildren();
@@ -259,6 +270,7 @@ function pageHead(title, sub, ...actions) {
 
 async function viewOverview(root) {
   const fleetHist = fleetHistorySection();
+  fleetHist.el.classList.add('fleet-only');
   const stats = h('div', { class: 'grid cols-4' });
   const deps = h('div', {});
   const dist = h('div', {});
@@ -269,15 +281,15 @@ async function viewOverview(root) {
     fleetHist.el,
     h('div', { class: 'grid side mt' },
       h('div', { class: 'stack' },
-        h('div', { class: 'card' }, h('h2', {}, 'Active deployments'), deps),
+        h('div', { class: 'card fleet-only' }, h('h2', {}, 'Active deployments'), deps),
         h('div', { class: 'card' }, h('h2', {}, 'Installed versions'), dist)),
       h('div', { class: 'card flush' }, h('h2', {}, 'Recent activity'), feed)));
 
   async function refresh() {
-    fleetHist.load();
+    if (fleetWide()) fleetHist.load();
     const [sum, active, events] = await Promise.all([
       api('GET', '/api/v1/summary'),
-      api('GET', '/api/v1/deployments?status=running,paused'),
+      fleetWide() ? api('GET', '/api/v1/deployments?status=running,paused') : [],
       api('GET', '/api/v1/events?limit=15'),
     ]);
     const tile = (label, value, hint, href) => h(href ? 'a' : 'div', { class: 'card stat', href },
@@ -290,7 +302,7 @@ async function viewOverview(root) {
       tile('Health issues', sum.health_critical + sum.health_warning,
         sum.health_critical + sum.health_warning ? `${sum.health_critical} critical · ${sum.health_warning} warning` : 'all healthy', '#/devices'),
       tile('Firing alerts', sum.firing_alerts, sum.firing_alerts ? 'see Monitoring' : 'nothing firing', '#/monitoring'),
-      tile('Active rollouts', sum.active_deployments, `${sum.releases} releases available`, '#/deployments'));
+      fleetWide() ? tile('Active rollouts', sum.active_deployments, `${sum.releases} releases available`, '#/deployments') : null);
 
     const shown = active.slice(0, 5);
     replace(deps, active.length
@@ -338,7 +350,7 @@ async function viewDevices(root) {
   const kindSel = h('select', { 'aria-label': 'Kind filter' }, [['', 'All kinds'], ['agent', 'Agents'], ['peripheral', 'Peripherals']].map(([v, l]) => h('option', { value: v }, l)));
   const list = h('div', { class: 'card flush' });
   const count = h('span', {});
-  append(root, pageHead('Devices', count, h('a', { class: 'btn primary', href: '#/enroll' }, 'Enroll devices')),
+  append(root, pageHead('Devices', count, h('a', { class: 'btn primary need-operator', href: '#/enroll' }, 'Enroll devices')),
     h('div', { class: 'toolbar' }, search, status, healthSel, kindSel), h('div', { class: 'spacer' }), list);
   let devices = [];
   function render() {
@@ -375,8 +387,8 @@ async function viewDevices(root) {
 async function viewDevice(root, id) {
   const head = h('div', {});
   const info = h('div', { class: 'card' });
-  const meta = h('div', { class: 'card' });
-  const actions = h('div', { class: 'card' });
+  const meta = h('div', { class: 'card need-operator' });
+  const actions = h('div', { class: 'card need-operator' });
   const updates = h('div', { class: 'card flush' });
   const actionLog = h('div', { class: 'card flush' });
   const events = h('div', { class: 'card flush' });
@@ -426,7 +438,7 @@ async function viewDevice(root, id) {
     h('p', { class: 'muted' }, 'Commands run without a shell, only on devices with allow_exec enabled.'),
     h('hr', { class: 'sep' }),
     licenseBox,
-    h('button', { class: 'btn danger', onclick: async () => {
+    h('button', { class: 'btn danger fleet-only', onclick: async () => {
       if (!confirm(`Remove ${dev ? dev.name : id} from the fleet? Its key stops working immediately.`)) return;
       if (await guard(() => api('DELETE', '/api/v1/devices/' + id), 'Device removed') !== undefined) location.hash = '#/devices';
     } }, 'Remove device'));
@@ -446,7 +458,7 @@ async function viewDevice(root, id) {
       if (!confirm(msg)) return;
       if (await guard(() => api('PATCH', '/api/v1/devices/' + id, { license_revoked: revoked }), revoked ? 'Licenses revoked' : 'Licenses reinstated')) refresh();
     };
-    replace(licenseBox, android || d.attestation ? h('div', { class: 'mb' },
+    replace(licenseBox, android || d.attestation ? h('div', { class: 'mb fleet-only' },
       h('h2', {}, 'App licenses'),
       h('p', { class: 'muted' }, d.license_revoked
         ? 'Revoked: this device gets no new licenses, so your apps stop working on it.'
@@ -598,7 +610,7 @@ async function viewDeployments(root) {
       h('button', { class: 'btn ghost', type: 'button', onclick: () => form.classList.add('hidden') }, 'Cancel'))));
 
   append(root, pageHead('Deployments', 'Staged rollouts of releases to devices',
-    h('button', { class: 'btn primary', onclick: async () => {
+    h('button', { class: 'btn primary need-operator', onclick: async () => {
       const rels = await guard(() => api('GET', '/api/v1/releases'));
       if (!rels) return;
       if (!rels.length) return toast('Upload a release first.', true);
@@ -644,7 +656,7 @@ async function viewDeployment(root, id) {
     if (open && last) buttons.push(h('button', { class: 'btn', title: 'Stop offering this release, including to devices enrolled later', onclick: () => confirm('Mark this rollout complete? It stops offering the release to devices that have not updated yet.') && op('complete', 'Marked complete') }, 'Complete'));
     if (open) buttons.push(h('button', { class: 'btn danger', onclick: () => confirm('Abort this rollout? Devices that already updated keep the new version.') && op('abort', 'Aborted') }, 'Abort'));
     replace(head, h('div', { class: 'crumb' }, h('a', { href: '#/deployments' }, 'Deployments'), ' / ', d.id),
-      pageHead(d.name, h('span', {}, badge(d.status), ' ', d.status_reason || ''), ...buttons));
+      pageHead(d.name, h('span', {}, badge(d.status), ' ', d.status_reason || ''), ...buttons.map(b => (b.classList.add('need-operator'), b))));
 
     const sel = d.selector;
     const selParts = [sel.channel && 'channel ' + sel.channel, ...sortedEntries(sel.labels).map(([k, v]) => k + '=' + v),
@@ -692,7 +704,7 @@ async function viewReleases(root) {
   const submit = h('button', { class: 'btn primary', type: 'submit' }, 'Upload');
 
   append(root, pageHead('Releases', 'Signed artifacts that can be rolled out'),
-    h('div', { class: 'card' }, h('h2', {}, 'Upload a release'),
+    h('div', { class: 'card need-operator' }, h('h2', {}, 'Upload a release'),
       h('form', { class: 'stack', onsubmit: async e => {
         e.preventDefault();
         const fd = new FormData();
@@ -742,7 +754,7 @@ async function viewReleases(root) {
         h('td', { class: 'nowrap' }, (r.os || 'any') + '/' + (r.arch || 'any')),
         h('td', { class: 'nowrap' }, bytes(r.size)),
         h('td', { class: 'nowrap' }, ago(r.created_at)),
-        h('td', {}, h('div', { class: 'btn-row' },
+        h('td', {}, h('div', { class: 'btn-row need-operator' },
           h('button', { class: 'btn small', onclick: () => guard(() => downloadArtifact(r)) }, 'Download'),
           h('button', { class: 'btn small danger', onclick: async () => {
             if (!confirm(`Delete ${r.package} ${r.version}?`)) return;
@@ -792,7 +804,7 @@ async function viewApps(root) {
     pkgIn.focus();
   };
   append(root, pageHead('Apps', 'Android apps Armada installs, and licenses to enrolled devices only'),
-    h('div', { class: 'card' }, h('h2', {}, 'Register or update an app'),
+    h('div', { class: 'card need-admin' }, h('h2', {}, 'Register or update an app'),
       h('form', { class: 'stack', onsubmit: async e => {
         e.preventDefault();
         const body = {
@@ -818,7 +830,7 @@ async function viewApps(root) {
         h('td', {}, h('strong', { class: 'mono' }, a.package), a.name ? h('div', { class: 'muted' }, a.name) : null),
         h('td', { class: 'mono' }, a.signers.map(sg => h('div', { title: sg }, sg.slice(0, 16) + '…'))),
         h('td', {}, a.licensing ? [badge('active'), h('div', { class: 'muted' }, `${Math.round(a.license_ttl_seconds / 60)} min licenses`)] : h('span', { class: 'muted' }, 'off')),
-        h('td', {}, h('div', { class: 'btn-row' },
+        h('td', {}, h('div', { class: 'btn-row need-admin' },
           h('button', { class: 'btn small', onclick: () => fill(a) }, 'Edit'),
           h('button', { class: 'btn small danger', onclick: async () => {
             if (!confirm(`Unregister ${a.package}? Devices will stop receiving its updates and licenses.`)) return;
@@ -870,6 +882,11 @@ async function viewEnroll(root) {
       h('div', { class: 'mt' }, created)),
     h('div', { class: 'spacer' }), list);
 
+  if (!fleetWide()) {
+    list.classList.add('hidden');
+    created.before(h('p', { class: 'muted' }, 'Devices enrolled with these tokens are added to your account automatically.'));
+    return;
+  }
   async function refresh() {
     const toks = await api('GET', '/api/v1/tokens');
     const now = Date.now();
@@ -902,6 +919,32 @@ async function viewActivity(root) {
 
 // ---------- auth ----------
 
+async function loadMe() {
+  me = await api('GET', '/api/v1/me');
+  document.body.dataset.role = me.role;
+  document.body.dataset.scoped = String(!!me.scoped);
+  const who = me.user ? (me.user.name || me.user.email) : me.name;
+  replace($('#whoami'), who, h('span', { class: 'role muted' }, ' · ' + me.role + (me.scoped ? ' · ' + scopeText(me.scope) : '')));
+  return me;
+}
+
+function scopeText(sel) {
+  if (!sel) return '';
+  return [sel.channel && 'channel ' + sel.channel, ...sortedEntries(sel.labels || {}).map(([k, v]) => k + '=' + v)].filter(Boolean).join(' ');
+}
+
+let tokenMode = false;
+function syncLoginMode() {
+  $('#login-user').classList.toggle('hidden', tokenMode);
+  $('#login-admin').classList.toggle('hidden', !tokenMode);
+  $('#login-switch').textContent = tokenMode ? 'Sign in with email instead' : 'Sign in with a token instead';
+}
+$('#login-switch').addEventListener('click', () => {
+  tokenMode = !tokenMode;
+  syncLoginMode();
+  (tokenMode ? $('#login-token') : $('#login-email')).focus();
+});
+
 function showLogin(msg) {
   clearInterval(refreshTimer);
   $('#app').classList.add('hidden');
@@ -909,29 +952,179 @@ function showLogin(msg) {
   const err = $('#login-error');
   err.textContent = msg || '';
   err.classList.toggle('hidden', !msg);
-  $('#login-token').focus();
+  syncLoginMode();
+  (tokenMode ? $('#login-token') : $('#login-email')).focus();
 }
 
 $('#login-form').addEventListener('submit', async e => {
   e.preventDefault();
-  token = $('#login-token').value.trim();
-  const res = await fetch('/api/v1/summary', { headers: { Authorization: 'Bearer ' + token } }).catch(() => null);
-  if (!res || !res.ok) {
-    token = '';
-    return showLogin(res ? 'That token was not accepted.' : 'Could not reach the server.');
+  let candidate;
+  if (tokenMode) {
+    candidate = $('#login-token').value.trim();
+    if (!candidate) return showLogin('Enter a token.');
+  } else {
+    const email = $('#login-email').value.trim(), password = $('#login-password').value;
+    if (!email || !password) return showLogin('Enter your email and password.');
+    const res = await fetch('/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) }).catch(() => null);
+    if (!res) return showLogin('Could not reach the server.');
+    if (res.status === 429) return showLogin('Too many failed attempts. Wait 15 minutes and try again.');
+    if (!res.ok) return showLogin('Wrong email or password.');
+    candidate = (await res.json()).token;
   }
+  const res = await fetch('/api/v1/me', { headers: { Authorization: 'Bearer ' + candidate } }).catch(() => null);
+  if (!res || !res.ok) return showLogin(res ? 'That token was not accepted.' : 'Could not reach the server.');
+  token = candidate;
   store.set('armada.token', token);
   $('#login-token').value = '';
+  $('#login-password').value = '';
   $('#login').classList.add('hidden');
   $('#app').classList.remove('hidden');
+  me = null;
   route();
 });
 
 $('#logout').addEventListener('click', () => {
+  // Sessions are ended server-side too; tokens just stop being remembered here.
+  if (token.startsWith('st_')) fetch('/api/v1/auth/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + token } }).catch(() => {});
   token = '';
+  me = null;
   store.del('armada.token');
   showLogin();
 });
+
+// ---------- users (admin) ----------
+
+const ROLE_HELP = {
+  viewer: 'Read-only',
+  operator: 'Manage devices, rollouts and monitors',
+  admin: 'Everything, including users, alert channels and signing keys',
+};
+
+async function viewUsers(root) {
+  const list = h('div', { class: 'card flush' });
+  const emailIn = h('input', { type: 'email', required: true, placeholder: 'it@customer.com', 'aria-label': 'Email' });
+  const nameIn = h('input', { placeholder: 'optional', 'aria-label': 'Name' });
+  const roleIn = h('select', { 'aria-label': 'Role' }, Object.keys(ROLE_HELP).map(r => h('option', { value: r }, r)));
+  const roleHint = h('span', { class: 'muted' });
+  const scopeIn = h('input', { placeholder: 'empty = whole fleet, or customer=acme', 'aria-label': 'Scope labels' });
+  const passIn = h('input', { type: 'password', required: true, minlength: '10', autocomplete: 'new-password', 'aria-label': 'Initial password' });
+  roleIn.value = 'operator';
+  const syncRole = () => { roleHint.textContent = ROLE_HELP[roleIn.value]; scopeIn.disabled = roleIn.value === 'admin'; if (scopeIn.disabled) scopeIn.value = ''; };
+  roleIn.addEventListener('change', syncRole);
+
+  append(root, pageHead('Users', 'People who can sign in to this dashboard and the API'),
+    h('div', { class: 'card' }, h('h2', {}, 'Add a user'),
+      h('form', { class: 'stack', onsubmit: async e => {
+        e.preventDefault();
+        let labels;
+        try { labels = parseLabels(scopeIn.value); } catch (err) { return toast(err.message, true); }
+        const body = { email: emailIn.value.trim(), name: nameIn.value.trim(), role: roleIn.value, scope: { labels }, password: passIn.value };
+        if (await guard(() => api('POST', '/api/v1/users', body), 'User added — share the password with them privately')) {
+          emailIn.value = nameIn.value = scopeIn.value = passIn.value = '';
+          refresh();
+        }
+      } },
+      h('div', { class: 'form-grid' }, h('label', {}, 'Email', emailIn), h('label', {}, 'Name', nameIn), h('label', {}, 'Role', roleIn, roleHint),
+        h('label', {}, 'Only devices with labels (client accounts)', scopeIn), h('label', {}, 'Initial password (10+ characters)', passIn)),
+      h('p', { class: 'muted' }, 'A scoped user sees only matching devices, their alerts, history and activity. They never see releases, deployments, other customers or fleet-wide settings, and devices they enroll get the scope labels.'),
+      h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Add user')))),
+    h('div', { class: 'spacer' }), list);
+  syncRole();
+
+  async function refresh() {
+    const users = await api('GET', '/api/v1/users');
+    const patch = (u, body, msg) => guard(() => api('PATCH', '/api/v1/users/' + u.id, body), msg).then(r => r && refresh());
+    replace(list, table(['User', 'Role', 'Scope', 'Last sign-in', ''],
+      users.map(u => {
+        const self = me.user && me.user.id === u.id;
+        const roleSel = h('select', { 'aria-label': 'Role for ' + u.email, disabled: self || undefined },
+          Object.keys(ROLE_HELP).map(r => h('option', { value: r }, r)));
+        roleSel.value = u.role;
+        roleSel.addEventListener('change', () => patch(u, { role: roleSel.value }, 'Role changed').then(r => r === undefined && (roleSel.value = u.role)));
+        return h('tr', {},
+          h('td', {}, h('strong', {}, u.name || u.email), u.name ? h('div', { class: 'muted' }, u.email) : null,
+            u.disabled ? h('div', {}, badge('disabled')) : null, self ? h('div', { class: 'muted' }, 'you') : null),
+          h('td', {}, roleSel),
+          h('td', {}, scopeText(u.scope) ? labelChips(u.scope.labels) : h('span', { class: 'muted' }, 'whole fleet')),
+          h('td', { class: 'nowrap' }, u.last_login_at ? ago(u.last_login_at) : h('span', { class: 'muted' }, 'never')),
+          h('td', {}, self ? null : h('div', { class: 'btn-row' },
+            h('button', { class: 'btn small', onclick: () => {
+              const scope = prompt(`Scope for ${u.email} as labels (empty = whole fleet):`, sortedEntries(u.scope.labels || {}).map(([k, v]) => k + '=' + v).join(' '));
+              if (scope === null) return;
+              let labels;
+              try { labels = parseLabels(scope); } catch (err) { return toast(err.message, true); }
+              patch(u, { scope: { labels } }, 'Scope updated');
+            } }, 'Scope'),
+            h('button', { class: 'btn small', onclick: () => {
+              const pw = prompt(`New password for ${u.email} (10+ characters). Their sessions are signed out.`);
+              if (pw) patch(u, { password: pw }, 'Password reset');
+            } }, 'Reset password'),
+            h('button', { class: 'btn small', onclick: () => patch(u, { disabled: !u.disabled }, u.disabled ? 'Enabled' : 'Disabled — signed out everywhere') },
+              u.disabled ? 'Enable' : 'Disable'),
+            h('button', { class: 'btn small danger', onclick: async () => {
+              if (confirm(`Delete ${u.email}? Their personal API tokens stop working.`) && await guard(() => api('DELETE', '/api/v1/users/' + u.id), 'User deleted') !== undefined) refresh();
+            } }, 'Delete'))));
+      }), 'No users yet. Until you add one, sign in with the admin token.'));
+  }
+  await guard(refresh);
+  return async () => { if (!root.contains(document.activeElement) || document.activeElement === document.body) await refresh(); };
+}
+
+// ---------- my account ----------
+
+async function viewAccount(root) {
+  const tokens = h('div', { class: 'card flush' });
+  const created = h('div', {});
+  append(root, pageHead('My account', [me.user ? me.user.email : me.name, ' · ', me.role, me.scoped ? ' · devices with ' + scopeText(me.scope) : ' · whole fleet']));
+  if (!me.user) {
+    append(root, h('div', { class: 'card' }, h('p', {}, 'You are signed in with the server admin token. ',
+      atLeast('admin') ? [h('a', { href: '#/users' }, 'Add a user'), ' for each person, so actions are attributed to them and access can be revoked individually.'] : null)));
+    return;
+  }
+  const cur = h('input', { type: 'password', required: true, autocomplete: 'current-password', 'aria-label': 'Current password' });
+  const nw = h('input', { type: 'password', required: true, minlength: '10', autocomplete: 'new-password', 'aria-label': 'New password' });
+  const tokName = h('input', { required: true, placeholder: 'e.g. CI pipeline', 'aria-label': 'Token name' });
+  append(root,
+    h('div', { class: 'grid cols-2' },
+      h('div', { class: 'card' }, h('h2', {}, 'Change password'),
+        h('form', { class: 'stack', onsubmit: async e => {
+          e.preventDefault();
+          if (await guard(() => api('POST', '/api/v1/me/password', { current: cur.value, new: nw.value })) === undefined) return;
+          // Changing the password signs out every session, including this one.
+          token = ''; me = null; store.del('armada.token');
+          showLogin('Password changed. Sign in again with the new password.');
+        } },
+        h('label', {}, 'Current password', cur), h('label', {}, 'New password (10+ characters)', nw),
+        h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Change password')))),
+      h('div', { class: 'card' }, h('h2', {}, 'Personal API tokens'),
+        h('p', { class: 'muted' }, 'For scripts and armadactl (--token). A token acts as you, with your role and scope.'),
+        h('form', { class: 'inline', onsubmit: async e => {
+          e.preventDefault();
+          const t = await guard(() => api('POST', '/api/v1/me/tokens', { name: tokName.value.trim() }));
+          if (!t) return;
+          tokName.value = '';
+          replace(created, h('div', { class: 'callout mt' },
+            h('div', {}, h('strong', {}, 'Copy this token now'), ' — it will not be shown again.'),
+            h('div', { class: 'secret' }, t.token)));
+          refresh();
+        } }, tokName, h('button', { class: 'btn', type: 'submit' }, 'Create')),
+        created)),
+    h('div', { class: 'spacer' }), tokens);
+
+  async function refresh() {
+    const toks = await api('GET', '/api/v1/me/tokens');
+    replace(tokens, table(['Token', 'Created', 'Last used', ''],
+      toks.map(t => h('tr', {},
+        h('td', {}, h('strong', {}, t.name), h('div', { class: 'muted mono' }, t.id)),
+        h('td', { class: 'nowrap' }, ago(t.created_at)),
+        h('td', { class: 'nowrap' }, t.last_used_at ? ago(t.last_used_at) : h('span', { class: 'muted' }, 'never')),
+        h('td', {}, h('button', { class: 'btn small danger', onclick: async () => {
+          if (confirm(`Revoke ${t.name}?`) && await guard(() => api('DELETE', '/api/v1/me/tokens/' + t.id), 'Token revoked') !== undefined) refresh();
+        } }, 'Revoke')))),
+      'No personal tokens.'));
+  }
+  await guard(refresh);
+}
 
 window.addEventListener('hashchange', route);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && currentRefresh) guard(currentRefresh); });
@@ -1021,11 +1214,14 @@ async function viewMonitoring(root) {
     emailFields.classList.toggle('hidden', cType.value !== 'email');
   });
 
-  const section = (title, sub) => h('div', { class: 'page-head mt' }, h('div', {}, h('h2', {}, title), h('div', { class: 'muted' }, sub)));
+  const section = (title, sub, cls) => h('div', { class: 'page-head mt ' + (cls || '') }, h('div', {}, h('h2', {}, title), h('div', { class: 'muted' }, sub)));
+  monitorsBox.classList.add('fleet-only');
+  rulesBox.classList.add('fleet-only');
+  channelsBox.classList.add('need-admin');
   append(root, pageHead('Monitoring', 'Health checks on devices, and who gets told when something goes wrong'),
     alertsBox,
-    section('Health monitors', 'Program checks run by every matching device. Hardware checks (storage, temperature, power, battery) run automatically.'),
-    h('div', { class: 'card mb' }, h('form', { class: 'stack', onsubmit: async e => {
+    section('Health monitors', 'Program checks run by every matching device. Hardware checks (storage, temperature, power, battery) run automatically.', 'fleet-only'),
+    h('div', { class: 'card mb need-operator fleet-only' }, h('form', { class: 'stack', onsubmit: async e => {
       e.preventDefault();
       let labels;
       try { labels = parseLabels(mLabels.value); } catch (err) { return toast(err.message, true); }
@@ -1041,8 +1237,8 @@ async function viewMonitoring(root) {
       h('label', {}, 'Must contain', mContains), h('label', {}, 'Every (seconds)', mInterval), h('label', {}, 'Devices (labels)', mLabels)),
     h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Add monitor')))),
     monitorsBox,
-    section('Alert rules', 'When to notify, and which channels to use.'),
-    h('div', { class: 'card mb' }, h('form', { class: 'stack', onsubmit: async e => {
+    section('Alert rules', 'When to notify, and which channels to use.', 'fleet-only'),
+    h('div', { class: 'card mb need-admin' }, h('form', { class: 'stack', onsubmit: async e => {
       e.preventDefault();
       let labels;
       try { labels = parseLabels(rLabels.value); } catch (err) { return toast(err.message, true); }
@@ -1060,8 +1256,8 @@ async function viewMonitoring(root) {
     h('div', {}, h('div', { class: 'muted mb' }, 'Notify:'), rChannels),
     h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Add rule')))),
     rulesBox,
-    section('Notification channels', 'Webhooks reach any service (PagerDuty, Opsgenie, Teams, Discord, your own API) using an optional body template.'),
-    h('div', { class: 'card mb' }, h('form', { class: 'stack', onsubmit: async e => {
+    section('Notification channels', 'Webhooks reach any service (PagerDuty, Opsgenie, Teams, Discord, your own API) using an optional body template.', 'need-admin'),
+    h('div', { class: 'card mb need-admin' }, h('form', { class: 'stack', onsubmit: async e => {
       e.preventDefault();
       const body = { name: cName.value.trim(), type: cType.value };
       try {
@@ -1080,7 +1276,10 @@ async function viewMonitoring(root) {
 
   async function refresh() {
     const [alerts, monitors, rules, chs] = await Promise.all([
-      api('GET', '/api/v1/alerts'), api('GET', '/api/v1/monitors'), api('GET', '/api/v1/alert-rules'), api('GET', '/api/v1/channels')]);
+      api('GET', '/api/v1/alerts'),
+      fleetWide() ? api('GET', '/api/v1/monitors') : [],
+      fleetWide() ? api('GET', '/api/v1/alert-rules') : [],
+      atLeast('admin') ? api('GET', '/api/v1/channels') : []]);
     channels = chs;
     const chName = Object.fromEntries(chs.map(c => [c.id, c.name]));
     const firing = alerts.filter(a => a.status === 'firing');
@@ -1098,7 +1297,7 @@ async function viewMonitoring(root) {
         h('td', {}, h('strong', {}, m.name), ' ', badge(m.enabled ? 'enabled' : 'disabled')),
         h('td', { class: 'mono' }, m.check.type + ' ' + (m.check.target || (m.check.command || []).join(' '))),
         h('td', {}, labelChips(m.selector.labels)),
-        h('td', {}, h('div', { class: 'btn-row' },
+        h('td', {}, h('div', { class: 'btn-row need-operator' },
           h('button', { class: 'btn small', onclick: async () => {
             if (await guard(() => api('PUT', '/api/v1/monitors/' + m.id, { ...m, enabled: !m.enabled }))) refresh();
           } }, m.enabled ? 'Disable' : 'Enable'),
@@ -1113,7 +1312,7 @@ async function viewMonitoring(root) {
           r.condition === 'device_offline' ? h('div', { class: 'muted' }, `${r.offline_minutes || 10} min`) : null),
         h('td', {}, labelChips(r.selector.labels)),
         h('td', {}, r.channels.map(id => chName[id] || id).join(', ')),
-        h('td', {}, h('div', { class: 'btn-row' },
+        h('td', {}, h('div', { class: 'btn-row need-admin' },
           h('button', { class: 'btn small', onclick: async () => {
             if (await guard(() => api('PUT', '/api/v1/alert-rules/' + r.id, { ...r, enabled: !r.enabled }))) refresh();
           } }, r.enabled ? 'Disable' : 'Enable'),

@@ -312,7 +312,7 @@ func (s *Server) handleHistoryCompare(w http.ResponseWriter, r *http.Request) {
 	var keep []ranked
 	for i, sr := range series {
 		d := byID[sr.DeviceID]
-		if d == nil || !rollout.Matches(sel, d) || len(sr.Points) == 0 {
+		if d == nil || !principalFrom(ctx).sees(d) || !rollout.Matches(sel, d) || len(sr.Points) == 0 {
 			continue
 		}
 		sr.DeviceName = d.Name
