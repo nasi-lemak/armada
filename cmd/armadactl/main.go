@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -44,7 +45,7 @@ Commands:
   tokens revoke <id>
   releases list [--package P]
   releases upload --package P --version V [--channel C] [--os O] [--arch A]
-                  [--notes N] [--auto-deploy] <file>
+                  [--notes N] [--version-code N] [--auto-deploy] <file>
   releases delete <id>
   deployments list [--status running,paused]
   deployments get <id>
@@ -54,6 +55,14 @@ Commands:
                   [--allow-downgrade]
   deployments pause|resume|advance|retry|complete|abort <id>
   events [--device ID] [--deployment ID] [--limit N]
+
+Android:
+  apps list
+  apps set <package> --signer SHA256 [--signer ...] [--name N] [--license] [--license-ttl 1h]
+  apps delete <package>
+  devices revoke <id>                        stop issuing app licenses to a device
+  devices reinstate <id>
+  android qr --token et_... [--wifi-ssid S --wifi-password P] [--out qr.png]
 `
 
 type cli struct {
@@ -108,6 +117,10 @@ func (c *cli) run(args []string) error {
 		return c.tokens(verb, rest)
 	case "releases", "release":
 		return c.releases(verb, rest)
+	case "apps", "app":
+		return c.apps(verb, rest)
+	case "android":
+		return c.android(verb, rest)
 	case "deployments", "deployment", "deploy":
 		return c.deployments(verb, rest)
 	case "help", "-h", "--help":
@@ -427,6 +440,23 @@ func (c *cli) devices(verb string, args []string) error {
 		}
 		fmt.Fprintln(c.out, "deleted", args[0])
 		return nil
+	case "revoke", "reinstate":
+		if err := need(args, 1, "device id"); err != nil {
+			return err
+		}
+		var d api.Device
+		if err := c.do("PATCH", "/api/v1/devices/"+url.PathEscape(args[0]), map[string]any{"license_revoked": verb == "revoke"}, &d); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(d)
+		}
+		if d.LicenseRevoked {
+			fmt.Fprintf(c.out, "%s: licenses revoked; its apps stop working when their current license expires\n", d.ID)
+		} else {
+			fmt.Fprintf(c.out, "%s: licenses reinstated\n", d.ID)
+		}
+		return nil
 	case "action", "run":
 		if err := need(args, 2, "device id and action type"); err != nil {
 			return err
@@ -552,7 +582,7 @@ func (c *cli) releases(verb string, args []string) error {
 	case "upload", "create", "push":
 		fs := flag.NewFlagSet("releases upload", flag.ContinueOnError)
 		fields := map[string]*string{}
-		for _, f := range []string{"package", "version", "channel", "os", "arch", "notes"} {
+		for _, f := range []string{"package", "version", "channel", "os", "arch", "notes", "version-code"} {
 			fields[f] = fs.String(f, "", "")
 		}
 		autoDeploy := fs.Bool("auto-deploy", false, "")
@@ -590,10 +620,10 @@ func (c *cli) upload(fields map[string]*string, autoDeploy bool, path string) er
 	mw := multipart.NewWriter(pw)
 	go func() {
 		err := func() error {
-			keys := []string{"package", "version", "channel", "os", "arch", "notes"}
+			keys := []string{"package", "version", "channel", "os", "arch", "notes", "version-code"}
 			for _, k := range keys {
 				if v := *fields[k]; v != "" {
-					if err := mw.WriteField(k, v); err != nil {
+					if err := mw.WriteField(strings.ReplaceAll(k, "-", "_"), v); err != nil {
 						return err
 					}
 				}
@@ -814,4 +844,111 @@ func bytesH(n uint64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+func (c *cli) apps(verb string, args []string) error {
+	switch verb {
+	case "", "list", "ls":
+		var apps []api.App
+		if err := c.do("GET", "/api/v1/apps", nil, &apps); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(apps)
+		}
+		var rows [][]string
+		for _, a := range apps {
+			lic := "off"
+			if a.Licensing {
+				lic = (time.Duration(a.LicenseTTLSeconds) * time.Second).String() + " licenses"
+			}
+			var short []string
+			for _, s := range a.Signers {
+				short = append(short, s[:16]+"…")
+			}
+			rows = append(rows, []string{a.Package, dash(a.Name), strings.Join(short, ","), lic})
+		}
+		c.table("PACKAGE\tNAME\tSIGNERS\tLICENSING", rows)
+		return nil
+	case "set", "register", "put":
+		fs := flag.NewFlagSet("apps set", flag.ContinueOnError)
+		name := fs.String("name", "", "")
+		lic := fs.Bool("license", false, "")
+		ttl := fs.Duration("license-ttl", time.Hour, "")
+		var signers multiFlag
+		fs.Var(&signers, "signer", "")
+		pos, err := parse(fs, args)
+		if err != nil {
+			return err
+		}
+		if err := need(pos, 1, "package name"); err != nil {
+			return err
+		}
+		if len(signers) == 0 {
+			return errors.New("at least one --signer (SHA-256 of the signing certificate) is required")
+		}
+		var a api.App
+		body := api.App{Name: *name, Signers: signers, Licensing: *lic, LicenseTTLSeconds: int64(ttl.Seconds())}
+		if err := c.do("PUT", "/api/v1/apps/"+url.PathEscape(pos[0]), body, &a); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(a)
+		}
+		fmt.Fprintf(c.out, "%s registered (%d signer(s), licensing %v)\n", a.Package, len(a.Signers), a.Licensing)
+		return nil
+	case "delete", "rm":
+		if err := need(args, 1, "package name"); err != nil {
+			return err
+		}
+		if err := c.do("DELETE", "/api/v1/apps/"+url.PathEscape(args[0]), nil, nil); err != nil {
+			return err
+		}
+		fmt.Fprintln(c.out, "removed", args[0])
+		return nil
+	}
+	return fmt.Errorf("unknown apps command %q", verb)
+}
+
+func (c *cli) android(verb string, args []string) error {
+	if verb != "qr" {
+		return fmt.Errorf("unknown android command %q (try: android qr)", verb)
+	}
+	fs := flag.NewFlagSet("android qr", flag.ContinueOnError)
+	token := fs.String("token", "", "")
+	ssid := fs.String("wifi-ssid", "", "")
+	pass := fs.String("wifi-password", "", "")
+	sec := fs.String("wifi-security", "", "")
+	out := fs.String("out", "armada-android-qr.png", "")
+	if _, err := parse(fs, args); err != nil {
+		return err
+	}
+	if *token == "" {
+		return errors.New("--token is required (create one with: armadactl tokens create)")
+	}
+	var r struct {
+		Payload     string   `json:"payload"`
+		QRPNG       string   `json:"qr_png"`
+		DownloadURL string   `json:"download_url"`
+		Warnings    []string `json:"warnings"`
+	}
+	body := map[string]string{"enrollment_token": *token, "wifi_ssid": *ssid, "wifi_password": *pass, "wifi_security": *sec}
+	if err := c.do("POST", "/api/v1/android/provisioning", body, &r); err != nil {
+		return err
+	}
+	if c.json {
+		return c.printJSON(r)
+	}
+	png, err := base64.StdEncoding.DecodeString(r.QRPNG)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(*out, png, 0o600); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "Wrote %s. On a new or factory-reset Android device, tap the welcome screen six times and scan it.\n", *out)
+	for _, w := range r.Warnings {
+		fmt.Fprintln(c.out, "warning:", w)
+	}
+	return nil
 }

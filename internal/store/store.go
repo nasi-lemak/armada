@@ -116,6 +116,16 @@ CREATE TABLE IF NOT EXISTS actions (
 );
 CREATE INDEX IF NOT EXISTS actions_device_status ON actions(device_id, status);
 
+CREATE TABLE IF NOT EXISTS apps (
+	package TEXT PRIMARY KEY,
+	name TEXT NOT NULL DEFAULT '',
+	signers TEXT NOT NULL DEFAULT '[]',
+	licensing INTEGER NOT NULL DEFAULT 0,
+	license_ttl_seconds INTEGER NOT NULL DEFAULT 3600,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS events (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	time INTEGER NOT NULL,
@@ -145,7 +155,46 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	return &Store{db: db}, nil
+	st := &Store{db: db}
+	if err := st.addColumns(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	return st, nil
+}
+
+// addColumns upgrades databases created by earlier versions in place.
+func (s *Store) addColumns() error {
+	cols := []struct{ table, name, def string }{
+		{"devices", "hw_key", "TEXT NOT NULL DEFAULT ''"},
+		{"devices", "attestation", "TEXT NOT NULL DEFAULT ''"},
+		{"devices", "license_revoked", "INTEGER NOT NULL DEFAULT 0"},
+		{"releases", "version_code", "INTEGER NOT NULL DEFAULT 0"},
+	}
+	for _, c := range cols {
+		rows, err := s.db.Query(`SELECT name FROM pragma_table_info(?)`, c.table)
+		if err != nil {
+			return err
+		}
+		exists := false
+		for rows.Next() {
+			var n string
+			if err := rows.Scan(&n); err != nil {
+				rows.Close()
+				return err
+			}
+			if n == c.name {
+				exists = true
+			}
+		}
+		rows.Close()
+		if !exists {
+			if _, err := s.db.Exec(`ALTER TABLE ` + c.table + ` ADD COLUMN ` + c.name + ` ` + c.def); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // Close closes the database.
@@ -178,13 +227,14 @@ type scanner interface{ Scan(dest ...any) error }
 
 // ---- devices ----
 
-const deviceCols = `id, name, channel, labels, info, metrics, packages, agent_status, enrolled_at, last_seen_at`
+const deviceCols = `id, name, channel, labels, info, metrics, packages, agent_status, enrolled_at, last_seen_at, attestation, license_revoked`
 
 func scanDevice(sc scanner) (*api.Device, error) {
 	var d api.Device
-	var labels, info, metrics, packages string
+	var labels, info, metrics, packages, attestation string
 	var enrolled, seen int64
-	if err := sc.Scan(&d.ID, &d.Name, &d.Channel, &labels, &info, &metrics, &packages, &d.AgentStatus, &enrolled, &seen); err != nil {
+	var revoked int
+	if err := sc.Scan(&d.ID, &d.Name, &d.Channel, &labels, &info, &metrics, &packages, &d.AgentStatus, &enrolled, &seen, &attestation, &revoked); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -201,18 +251,31 @@ func scanDevice(sc scanner) (*api.Device, error) {
 		d.Packages = map[string]string{}
 	}
 	d.EnrolledAt, d.LastSeenAt = fromTS(enrolled), fromTS(seen)
+	if attestation != "" {
+		d.Attestation = &api.DeviceAttestation{}
+		_ = json.Unmarshal([]byte(attestation), d.Attestation)
+	}
+	d.LicenseRevoked = revoked != 0
 	return &d, nil
 }
 
-// CreateDevice inserts a newly enrolled device.
-func (s *Store) CreateDevice(ctx context.Context, d *api.Device, keyHash string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		d.ID, d.Name, d.Channel, mustJSON(d.Labels), mustJSON(d.Info), mustJSON(d.Metrics), mustJSON(d.Packages),
-		d.AgentStatus, ts(d.EnrolledAt), ts(d.LastSeenAt), keyHash)
-	if isUnique(err) {
-		return ErrConflict
+// DeviceHardwareKey returns the device's attested public key (base64 PKIX DER), if any.
+func (s *Store) DeviceHardwareKey(ctx context.Context, id string) (string, error) {
+	var k string
+	err := s.db.QueryRowContext(ctx, `SELECT hw_key FROM devices WHERE id=?`, id).Scan(&k)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
 	}
-	return err
+	return k, err
+}
+
+// SetLicenseRevoked revokes or reinstates a device's app licenses.
+func (s *Store) SetLicenseRevoked(ctx context.Context, id string, revoked bool) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE devices SET license_revoked=? WHERE id=?`, boolInt(revoked), id)
+	if err != nil {
+		return err
+	}
+	return expectOne(res)
 }
 
 // GetDevice loads a device by ID.
@@ -351,7 +414,8 @@ var ErrTokenInvalid = errors.New("enrollment token is invalid, expired, revoked 
 
 // Enroll atomically consumes an enrollment token and creates the device.
 // The device's channel and labels default to the token's.
-func (s *Store) Enroll(ctx context.Context, tokenHash string, d *api.Device, keyHash string, now time.Time) error {
+// hwKey is the base64 PKIX public key of an attested hardware key, or "".
+func (s *Store) Enroll(ctx context.Context, tokenHash string, d *api.Device, keyHash, hwKey string, now time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -376,9 +440,13 @@ func (s *Store) Enroll(ctx context.Context, tokenHash string, d *api.Device, key
 	for k, v := range t.Labels {
 		d.Labels[k] = v
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+	attestation := ""
+	if d.Attestation != nil {
+		attestation = mustJSON(d.Attestation)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash, hw_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		d.ID, d.Name, d.Channel, mustJSON(d.Labels), mustJSON(d.Info), mustJSON(d.Metrics), mustJSON(d.Packages),
-		d.AgentStatus, ts(d.EnrolledAt), ts(d.LastSeenAt), keyHash); err != nil {
+		d.AgentStatus, ts(d.EnrolledAt), ts(d.LastSeenAt), attestation, boolInt(d.LicenseRevoked), keyHash, hwKey); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -393,12 +461,12 @@ func boolInt(b bool) int {
 
 // ---- releases ----
 
-const releaseCols = `id, package, version, channel, os, arch, sha256, size, signature, notes, created_at`
+const releaseCols = `id, package, version, channel, os, arch, sha256, size, signature, notes, created_at, version_code`
 
 func scanRelease(sc scanner) (*api.Release, error) {
 	var r api.Release
 	var created int64
-	if err := sc.Scan(&r.ID, &r.Package, &r.Version, &r.Channel, &r.OS, &r.Arch, &r.SHA256, &r.Size, &r.Signature, &r.Notes, &created); err != nil {
+	if err := sc.Scan(&r.ID, &r.Package, &r.Version, &r.Channel, &r.OS, &r.Arch, &r.SHA256, &r.Size, &r.Signature, &r.Notes, &created, &r.VersionCode); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -410,8 +478,8 @@ func scanRelease(sc scanner) (*api.Release, error) {
 
 // CreateRelease stores release metadata.
 func (s *Store) CreateRelease(ctx context.Context, r *api.Release) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO releases (`+releaseCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		r.ID, r.Package, r.Version, r.Channel, r.OS, r.Arch, r.SHA256, r.Size, r.Signature, r.Notes, ts(r.CreatedAt))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO releases (`+releaseCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		r.ID, r.Package, r.Version, r.Channel, r.OS, r.Arch, r.SHA256, r.Size, r.Signature, r.Notes, ts(r.CreatedAt), r.VersionCode)
 	if isUnique(err) {
 		return ErrConflict
 	}
@@ -843,4 +911,69 @@ func (s *Store) ListEvents(ctx context.Context, deviceID, deploymentID string, l
 func (s *Store) PruneEvents(ctx context.Context, before time.Time) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM events WHERE time < ?`, ts(before))
 	return err
+}
+
+// ---- apps ----
+
+const appCols = `package, name, signers, licensing, license_ttl_seconds, created_at, updated_at`
+
+func scanApp(sc scanner) (*api.App, error) {
+	var a api.App
+	var signers string
+	var licensing int
+	var created, updated int64
+	if err := sc.Scan(&a.Package, &a.Name, &signers, &licensing, &a.LicenseTTLSeconds, &created, &updated); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	_ = json.Unmarshal([]byte(signers), &a.Signers)
+	if a.Signers == nil {
+		a.Signers = []string{}
+	}
+	a.Licensing = licensing != 0
+	a.CreatedAt, a.UpdatedAt = fromTS(created), fromTS(updated)
+	return &a, nil
+}
+
+// UpsertApp creates or replaces an app registration.
+func (s *Store) UpsertApp(ctx context.Context, a *api.App) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO apps (`+appCols+`) VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(package) DO UPDATE SET name=excluded.name, signers=excluded.signers, licensing=excluded.licensing,
+		license_ttl_seconds=excluded.license_ttl_seconds, updated_at=excluded.updated_at`,
+		a.Package, a.Name, mustJSON(a.Signers), boolInt(a.Licensing), a.LicenseTTLSeconds, ts(a.CreatedAt), ts(a.UpdatedAt))
+	return err
+}
+
+// GetApp loads an app registration.
+func (s *Store) GetApp(ctx context.Context, pkg string) (*api.App, error) {
+	return scanApp(s.db.QueryRowContext(ctx, `SELECT `+appCols+` FROM apps WHERE package=?`, pkg))
+}
+
+// ListApps returns all registered apps.
+func (s *Store) ListApps(ctx context.Context) ([]*api.App, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+appCols+` FROM apps ORDER BY package`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*api.App
+	for rows.Next() {
+		a, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// DeleteApp removes an app registration.
+func (s *Store) DeleteApp(ctx context.Context, pkg string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM apps WHERE package=?`, pkg)
+	if err != nil {
+		return err
+	}
+	return expectOne(res)
 }

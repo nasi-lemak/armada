@@ -163,7 +163,7 @@ const STATUS_TONE = {
   online: 'ok', offline: 'bad',
   running: 'info', paused: 'warn', aborted: 'bad', completed: 'ok',
   succeeded: 'ok', failed: 'bad', rolled_back: 'warn', pending: '', downloading: 'info', installing: 'info',
-  queued: '', sent: 'info', rejected: 'warn',
+  queued: '', sent: 'info', rejected: 'warn', revoked: 'bad', active: 'ok', attested: 'ok', 'attested (unlocked)': 'warn',
 };
 function badge(status) {
   const tone = STATUS_TONE[status] || '';
@@ -220,6 +220,7 @@ const routes = [
   [/^#\/deployments\/([\w-]+)$/, 'deployments', viewDeployment],
   [/^#\/releases$/, 'releases', viewReleases],
   [/^#\/enroll$/, 'enroll', viewEnroll],
+  [/^#\/apps$/, 'apps', viewApps],
   [/^#\/activity$/, 'activity', viewActivity],
 ];
 
@@ -339,7 +340,7 @@ async function viewDevices(root) {
       shown.map(d => h('tr', { class: 'clickable', onclick: () => { location.hash = '#/devices/' + d.id; } },
         h('td', {}, h('div', {}, h('strong', {}, d.name)), h('div', { class: 'muted mono' }, d.id),
           d.agent_status ? h('div', { class: 'muted' }, d.agent_status) : null),
-        h('td', {}, badge(d.status)),
+        h('td', {}, badge(d.status), d.license_revoked ? h('div', {}, badge('revoked')) : null),
         h('td', {}, d.channel),
         h('td', { class: 'nowrap' }, `${d.info.os || '?'}/${d.info.arch || '?'}`),
         h('td', {}, pkgChips(d.packages)),
@@ -389,6 +390,7 @@ async function viewDevice(root, id) {
       if (await guard(() => api('PATCH', '/api/v1/devices/' + id, { set_labels: set }))) { labelIn.value = ''; refresh(); }
     } }, labelIn, h('button', { class: 'btn', type: 'submit' }, 'Add')));
 
+  const licenseBox = h('div', {});
   const execIn = h('input', { placeholder: 'e.g. systemctl status myapp', 'aria-label': 'Command' });
   const queue = (type, args) => guard(() => api('POST', `/api/v1/devices/${id}/actions`, { type, args }), `${type} queued; runs at next check-in`).then(r => r && refresh());
   append(actions, h('h2', {}, 'Actions'),
@@ -403,6 +405,7 @@ async function viewDevice(root, id) {
     } }, execIn, h('button', { class: 'btn', type: 'submit' }, 'Run')),
     h('p', { class: 'muted' }, 'Commands run without a shell, only on devices with allow_exec enabled.'),
     h('hr', { class: 'sep' }),
+    licenseBox,
     h('button', { class: 'btn danger', onclick: async () => {
       if (!confirm(`Remove ${dev ? dev.name : id} from the fleet? Its key stops working immediately.`)) return;
       if (await guard(() => api('DELETE', '/api/v1/devices/' + id), 'Device removed') !== undefined) location.hash = '#/devices';
@@ -414,11 +417,28 @@ async function viewDevice(root, id) {
     const d = dev, m = d.metrics;
     if (document.activeElement !== nameIn) nameIn.value = d.name;
     if (document.activeElement !== chanIn) chanIn.value = d.channel;
+    const android = (d.info.os || '').toLowerCase() === 'android';
+    const setRevoked = async revoked => {
+      const msg = revoked
+        ? `Revoke app licenses for ${d.name}? Your apps on it stop working when their current license expires.`
+        : `Reinstate app licenses for ${d.name}?`;
+      if (!confirm(msg)) return;
+      if (await guard(() => api('PATCH', '/api/v1/devices/' + id, { license_revoked: revoked }), revoked ? 'Licenses revoked' : 'Licenses reinstated')) refresh();
+    };
+    replace(licenseBox, android || d.attestation ? h('div', { class: 'mb' },
+      h('h2', {}, 'App licenses'),
+      h('p', { class: 'muted' }, d.license_revoked
+        ? 'Revoked: this device gets no new licenses, so your apps stop working on it.'
+        : d.attestation ? 'Active: apps on this device can get licenses.' : 'This device has no attested hardware key, so it cannot get licenses.'),
+      d.license_revoked
+        ? h('button', { class: 'btn', onclick: () => setRevoked(false) }, 'Reinstate licenses')
+        : d.attestation ? h('button', { class: 'btn danger', onclick: () => setRevoked(true) }, 'Revoke licenses') : null,
+      h('hr', { class: 'sep' })) : null);
     replace(labelBox, labelChips(d.labels, async k => {
       if (await guard(() => api('PATCH', '/api/v1/devices/' + id, { remove_labels: [k] }))) refresh();
     }));
     replace(head, h('div', { class: 'crumb' }, h('a', { href: '#/devices' }, 'Devices'), ' / ', d.id),
-      pageHead(d.name, h('span', {}, badge(d.status), ' last seen ', ago(d.last_seen_at),
+      pageHead(d.name, h('span', {}, badge(d.status), d.license_revoked ? [' ', badge('revoked')] : null, ' last seen ', ago(d.last_seen_at),
         d.agent_status ? ' · ' + d.agent_status : '')));
     const usage = (free, total, usedBytes) => {
       if (!total) return h('span', { class: 'muted' }, '—');
@@ -434,6 +454,11 @@ async function viewDevice(root, id) {
           h('dt', {}, 'Platform'), h('dd', {}, `${d.info.os}/${d.info.arch}`, d.info.kernel ? ` · ${d.info.kernel}` : ''),
           h('dt', {}, 'IP addresses'), h('dd', { class: 'mono' }, (d.info.ips || []).join(', ') || '—'),
           h('dt', {}, 'Packages'), h('dd', {}, pkgChips(d.packages)),
+          h('dt', {}, 'Hardware key'), h('dd', {}, d.attestation
+            ? [badge(d.attestation.boot_state === 'verified' && d.attestation.device_locked ? 'attested' : 'attested (unlocked)'),
+              ` ${d.attestation.security_level.toUpperCase()}, boot ${d.attestation.boot_state}`,
+              d.attestation.os_patch_level ? `, patch ${String(d.attestation.os_patch_level).replace(/^(\d{4})(\d{2}).*/, '$1-$2')}` : '']
+            : h('span', { class: 'muted' }, 'none')),
           h('dt', {}, 'Enrolled'), h('dd', {}, new Date(d.enrolled_at).toLocaleString())),
         h('dl', { class: 'kv' },
           h('dt', {}, 'Uptime'), h('dd', {}, duration(m.uptime_seconds)),
@@ -603,7 +628,10 @@ async function viewReleases(root) {
   const pkgIn = h('input', { required: true, placeholder: 'myapp or armada-agent', 'aria-label': 'Package' });
   const verIn = h('input', { required: true, placeholder: '1.4.2', 'aria-label': 'Version' });
   const chanIn = h('input', { value: 'stable', 'aria-label': 'Channel' });
-  const osIn = h('select', { 'aria-label': 'OS' }, ['', 'linux', 'darwin', 'windows', 'freebsd'].map(o => h('option', { value: o }, o || 'any')));
+  const osIn = h('select', { 'aria-label': 'OS' }, ['', 'linux', 'android', 'darwin', 'windows', 'freebsd'].map(o => h('option', { value: o }, o || 'any')));
+  const vcIn = h('input', { type: 'number', min: '1', placeholder: 'e.g. 210', 'aria-label': 'Android versionCode' });
+  const vcLabel = h('label', { class: 'hidden' }, 'Android versionCode', vcIn);
+  osIn.addEventListener('change', () => vcLabel.classList.toggle('hidden', osIn.value !== 'android'));
   const archIn = h('select', { 'aria-label': 'Architecture' }, ['', 'amd64', 'arm64', 'arm', '386', 'riscv64'].map(o => h('option', { value: o }, o || 'any')));
   const notesIn = h('textarea', { placeholder: 'What changed (optional)', 'aria-label': 'Notes' });
   const fileIn = h('input', { type: 'file', required: true, 'aria-label': 'Artifact' });
@@ -621,6 +649,7 @@ async function viewReleases(root) {
         fd.append('channel', chanIn.value.trim());
         fd.append('os', osIn.value);
         fd.append('arch', archIn.value);
+        if (osIn.value === 'android' && vcIn.value) fd.append('version_code', vcIn.value);
         fd.append('notes', notesIn.value);
         fd.append('auto_deploy', autoIn.checked ? 'true' : 'false');
         fd.append('file', fileIn.files[0]);
@@ -642,7 +671,7 @@ async function viewReleases(root) {
       } },
       h('div', { class: 'form-grid' },
         h('label', {}, 'Package', pkgIn), h('label', {}, 'Version', verIn), h('label', {}, 'Channel', chanIn),
-        h('label', {}, 'OS', osIn), h('label', {}, 'Architecture', archIn),
+        h('label', {}, 'OS', osIn), h('label', {}, 'Architecture', archIn), vcLabel,
         h('label', { class: 'wide' }, 'Artifact file', fileIn),
         h('label', { class: 'wide' }, 'Notes', notesIn)),
       h('label', { class: 'check' }, autoIn, 'Automatically roll out to every device on this channel (staged, auto-pauses on failures)'),
@@ -668,6 +697,82 @@ async function viewReleases(root) {
             if (await guard(() => api('DELETE', '/api/v1/releases/' + r.id), 'Release deleted') !== undefined) refresh();
           } }, 'Delete'))))),
       'No releases yet.'));
+  }
+  await guard(refresh);
+  return refresh;
+}
+
+// Android setup: a QR code scanned on a factory-reset device's welcome screen
+// installs the Armada agent as Device Owner and enrolls it with this token.
+function androidQR(enrollmentToken) {
+  const ssid = h('input', { placeholder: 'optional', 'aria-label': 'Wi-Fi network' });
+  const pass = h('input', { type: 'password', placeholder: 'optional', 'aria-label': 'Wi-Fi password' });
+  const out = h('div', {});
+  return h('div', { class: 'stack mt' },
+    h('div', {}, h('strong', {}, 'Android devices'), ' — on a new or factory-reset device, tap the welcome screen six times and scan:'),
+    h('form', { class: 'inline', onsubmit: async e => {
+      e.preventDefault();
+      const r = await guard(() => api('POST', '/api/v1/android/provisioning', {
+        enrollment_token: enrollmentToken, wifi_ssid: ssid.value.trim(), wifi_password: pass.value,
+      }));
+      if (!r) return;
+      $('#toast').classList.add('hidden'); // clear any earlier error
+      replace(out, h('div', { class: 'stack' },
+        h('img', { src: 'data:image/png;base64,' + r.qr_png, alt: 'Android provisioning QR code', class: 'qr', width: '256', height: '256' }),
+        (r.warnings || []).map(w => h('div', { class: 'muted' }, '⚠ ' + w)),
+        h('details', {}, h('summary', {}, 'QR payload'), h('pre', { class: 'out' }, JSON.stringify(JSON.parse(r.payload), null, 2)))));
+    } },
+    h('label', {}, 'Wi-Fi network', ssid), h('label', {}, 'Wi-Fi password', pass),
+    h('button', { class: 'btn', type: 'submit' }, 'Show Android setup QR')),
+    out);
+}
+
+async function viewApps(root) {
+  const list = h('div', { class: 'card flush' });
+  const pkgIn = h('input', { required: true, placeholder: 'com.yourco.app', 'aria-label': 'Package' });
+  const nameIn = h('input', { placeholder: 'optional', 'aria-label': 'App name' });
+  const signersIn = h('textarea', { required: true, placeholder: 'SHA-256 of the signing certificate, e.g. from: keytool -list -v -keystore release.jks\nAB:CD:…', 'aria-label': 'Signers' });
+  const licIn = h('input', { type: 'checkbox', checked: true });
+  const ttlIn = h('input', { type: 'number', min: '1', value: '60', 'aria-label': 'License lifetime (minutes)' });
+  const fill = a => {
+    pkgIn.value = a.package; nameIn.value = a.name; signersIn.value = a.signers.join('\n');
+    licIn.checked = a.licensing; ttlIn.value = Math.round(a.license_ttl_seconds / 60);
+    pkgIn.focus();
+  };
+  append(root, pageHead('Apps', 'Android apps Armada installs, and licenses to enrolled devices only'),
+    h('div', { class: 'card' }, h('h2', {}, 'Register or update an app'),
+      h('form', { class: 'stack', onsubmit: async e => {
+        e.preventDefault();
+        const body = {
+          name: nameIn.value.trim(), licensing: licIn.checked,
+          license_ttl_seconds: Math.round(parseFloat(ttlIn.value || '60') * 60),
+          signers: signersIn.value.split(/[\s,]+/).filter(Boolean),
+        };
+        if (await guard(() => api('PUT', '/api/v1/apps/' + encodeURIComponent(pkgIn.value.trim()), body), 'App saved')) refresh();
+      } },
+      h('div', { class: 'form-grid' },
+        h('label', {}, 'Package name', pkgIn), h('label', {}, 'Display name', nameIn),
+        h('label', {}, 'License lifetime (minutes)', ttlIn),
+        h('label', { class: 'wide' }, 'Signing certificate SHA-256 (one per line)', signersIn)),
+      h('label', { class: 'check' }, licIn, 'Issue licenses: the app only works on devices you enrolled'),
+      h('p', { class: 'muted' }, 'Register the Android agent here too (without licensing) so devices can verify its updates and the setup QR can be generated.'),
+      h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Save')))),
+    h('div', { class: 'spacer' }), list);
+
+  async function refresh() {
+    const apps = await api('GET', '/api/v1/apps');
+    replace(list, table(['App', 'Signing certificates', 'Licensing', ''],
+      apps.map(a => h('tr', {},
+        h('td', {}, h('strong', { class: 'mono' }, a.package), a.name ? h('div', { class: 'muted' }, a.name) : null),
+        h('td', { class: 'mono' }, a.signers.map(sg => h('div', { title: sg }, sg.slice(0, 16) + '…'))),
+        h('td', {}, a.licensing ? [badge('active'), h('div', { class: 'muted' }, `${Math.round(a.license_ttl_seconds / 60)} min licenses`)] : h('span', { class: 'muted' }, 'off')),
+        h('td', {}, h('div', { class: 'btn-row' },
+          h('button', { class: 'btn small', onclick: () => fill(a) }, 'Edit'),
+          h('button', { class: 'btn small danger', onclick: async () => {
+            if (!confirm(`Unregister ${a.package}? Devices will stop receiving its updates and licenses.`)) return;
+            if (await guard(() => api('DELETE', '/api/v1/apps/' + encodeURIComponent(a.package)), 'App removed') !== undefined) refresh();
+          } }, 'Remove'))))),
+      'No apps registered yet.'));
   }
   await guard(refresh);
   return refresh;
@@ -702,7 +807,8 @@ async function viewEnroll(root) {
           h('div', {}, 'Run on a device (Linux, as root):'),
           h('div', { class: 'secret' }, `curl -fsSL ${origin}/install.sh | sudo ARMADA_SERVER_URL=${origin} ARMADA_ENROLLMENT_TOKEN=${t.token} sh`),
           h('div', { class: 'muted' }, 'or run the agent directly:'),
-          h('div', { class: 'secret' }, `armada-agent --server ${origin} --token ${t.token}`)));
+          h('div', { class: 'secret' }, `armada-agent --server ${origin} --token ${t.token}`),
+          androidQR(t.token)));
         refresh();
       } },
       h('div', { class: 'form-grid' },

@@ -6,7 +6,7 @@ export CGO_ENABLED = 0
 # Platforms the agent is cross-compiled for by `make agents`.
 AGENT_PLATFORMS := linux/amd64 linux/arm64 linux/arm linux/386 linux/riscv64 darwin/amd64 darwin/arm64 windows/amd64
 
-.PHONY: all build test test-race vet agents clean run
+.PHONY: all build test test-race vet agents android clean run
 
 all: vet test build
 
@@ -32,6 +32,11 @@ agents:
 		GOOS=$$os GOARCH=$$arch GOARM=7 $(GO) build -trimpath -ldflags '$(LDFLAGS)' \
 			-o dist/armada-agent_$(VERSION)_$${os}_$${arch}$$ext ./cmd/armada-agent || exit 1; \
 	done
+
+# Android agent APK and client library (needs the Android SDK; set ANDROID_HOME
+# or android/local.properties). Release builds must be signed with your key.
+android:
+	cd android && ./gradlew assembleDebug testDebugUnitTest lintDebug
 
 run: build
 	./bin/armada-server -data-dir ./data

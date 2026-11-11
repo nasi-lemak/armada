@@ -31,16 +31,23 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = "device"
 	}
+	att, hwKey, err := s.verifyEnrollment(r.Context(), &req)
+	if err != nil {
+		s.log.Warn("enrollment rejected", "host", req.Info.Hostname, "err", err)
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	key := newSecret("dk")
 	dev := &api.Device{
-		ID:         newID("dev"),
-		Name:       truncate(name, 128),
-		Info:       req.Info,
-		Packages:   map[string]string{api.AgentPackage: req.Info.AgentVersion},
-		EnrolledAt: now,
-		LastSeenAt: now,
+		ID:          newID("dev"),
+		Name:        truncate(name, 128),
+		Info:        req.Info,
+		Packages:    map[string]string{s.agentPackageFor(req.Info): req.Info.AgentVersion},
+		EnrolledAt:  now,
+		LastSeenAt:  now,
+		Attestation: att,
 	}
-	err := s.store.Enroll(r.Context(), hashSecret(req.Token), dev, hashSecret(key), now)
+	err = s.store.Enroll(r.Context(), hashSecret(req.Token), dev, hashSecret(key), hwKey, now)
 	if errors.Is(err, store.ErrTokenInvalid) {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
@@ -48,7 +55,11 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	s.event(r.Context(), "device.enrolled", dev.ID, "", fmt.Sprintf("%s enrolled (%s/%s, agent %s)", dev.Name, dev.Info.OS, dev.Info.Arch, dev.Info.AgentVersion))
+	msg := fmt.Sprintf("%s enrolled (%s/%s, agent %s)", dev.Name, dev.Info.OS, dev.Info.Arch, dev.Info.AgentVersion)
+	if att != nil {
+		msg += fmt.Sprintf(", hardware key in %s, boot %s", att.SecurityLevel, att.BootState)
+	}
+	s.event(r.Context(), "device.enrolled", dev.ID, "", msg)
 	writeJSON(w, http.StatusOK, api.EnrollResponse{
 		DeviceID:                 dev.ID,
 		DeviceKey:                key,
@@ -68,7 +79,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, dev *ap
 		req.Packages = map[string]string{}
 	}
 	if req.Info.AgentVersion != "" {
-		req.Packages[api.AgentPackage] = req.Info.AgentVersion
+		req.Packages[s.agentPackageFor(req.Info)] = req.Info.AgentVersion
 	}
 	wasOffline := now.Sub(dev.LastSeenAt) > s.cfg.OfflineAfter
 	if err := s.store.RecordHeartbeat(ctx, dev.ID, req.Info, req.Metrics, req.Packages, truncate(req.Status, 512), now); err != nil {
@@ -95,6 +106,10 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, dev *ap
 		return
 	}
 	resp.Actions = actions
+	if strings.EqualFold(dev.Info.OS, "android") {
+		resp.ManagedPackages = s.managedPackages(r)
+		resp.Policy = &api.DevicePolicy{DisableDebugging: s.cfg.Android.DisableDebugging, BlockUninstall: true}
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -105,11 +120,32 @@ func (s *Server) decideUpdate(ctx context.Context, dev *api.Device, busy bool) (
 	if err != nil {
 		return nil, err
 	}
+	isAndroid := strings.EqualFold(dev.Info.OS, "android")
+	var androidApps map[string]bool
+	if isAndroid {
+		apps, err := s.store.ListApps(ctx)
+		if err != nil {
+			return nil, err
+		}
+		androidApps = map[string]bool{}
+		for _, a := range apps {
+			androidApps[a.Package] = true
+		}
+	}
 	var cands []*rollout.Candidate
 	for _, d := range deps {
 		rel, err := s.store.GetRelease(ctx, d.ReleaseID)
 		if err != nil {
 			return nil, err
+		}
+		// Android devices can only verify and install registered apps (the
+		// agent needs their signing certificates); other devices never get
+		// Android releases, even ones uploaded without an OS.
+		if isAndroid && !androidApps[rel.Package] {
+			continue
+		}
+		if !isAndroid && strings.EqualFold(rel.OS, "android") {
+			continue
 		}
 		prog, err := s.store.GetDeviceUpdate(ctx, d.ID, dev.ID)
 		if errors.Is(err, store.ErrNotFound) {
@@ -150,7 +186,13 @@ func (s *Server) decideUpdate(ctx context.Context, dev *api.Device, busy bool) (
 			return nil, err
 		}
 	}
+	var signers []string
+	if app, err := s.store.GetApp(ctx, c.Release.Package); err == nil {
+		signers = app.Signers
+	}
 	return &api.UpdateInstruction{
+		VersionCode:  c.Release.VersionCode,
+		Signers:      signers,
 		DeploymentID: c.Deployment.ID,
 		ReleaseID:    c.Release.ID,
 		Package:      c.Release.Package,
@@ -283,32 +325,36 @@ func (s *Server) handleActionResult(w http.ResponseWriter, r *http.Request, dev 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleAgentDownload serves the newest armada-agent release for a platform,
-// so new devices can bootstrap with install.sh.
+// handleAgentDownload serves the newest agent release for a platform, so new
+// devices can bootstrap: install.sh for Linux, the provisioning QR for Android.
+// Only agent packages are served without authentication.
 func (s *Server) handleAgentDownload(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	dev := &api.Device{Info: api.DeviceInfo{OS: q.Get("os"), Arch: q.Get("arch")}}
-	channel := q.Get("channel")
-	if channel == "" {
-		channel = "stable"
+	pkg := q.Get("package")
+	if pkg == "" {
+		pkg = api.AgentPackage
 	}
-	rels, err := s.store.ListReleases(r.Context(), api.AgentPackage)
-	if err != nil {
+	if pkg != api.AgentPackage && pkg != s.cfg.Android.AgentPackage {
+		writeError(w, http.StatusNotFound, "only agent packages can be downloaded without authentication")
+		return
+	}
+	best, err := s.newestRelease(r, pkg, q.Get("os"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "no "+pkg+" release for this platform and channel")
+		return
+	} else if err != nil {
 		s.internalError(w, err)
 		return
 	}
-	var best *api.Release
-	for _, rel := range rels {
-		if rel.Channel != channel || !rollout.PlatformMatches(rel, dev) {
-			continue
-		}
-		if best == nil || rollout.Compare(rel.Version, best.Version) > 0 {
-			best = rel
-		}
-	}
-	if best == nil {
-		writeError(w, http.StatusNotFound, "no armada-agent release for this platform and channel")
-		return
-	}
 	s.serveArtifact(w, r, best.ID)
+}
+
+// agentPackageFor is the package name under which a device's agent version is
+// tracked: the Linux agent and the Android agent are different packages, so a
+// rollout of one is never offered to devices running the other.
+func (s *Server) agentPackageFor(info api.DeviceInfo) string {
+	if strings.EqualFold(info.OS, "android") {
+		return s.cfg.Android.AgentPackage
+	}
+	return api.AgentPackage
 }

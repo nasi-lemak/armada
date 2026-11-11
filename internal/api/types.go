@@ -1,7 +1,10 @@
 // Package api defines the wire types shared by the Armada server, agent and CLI.
 package api
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // AgentPackage is the reserved package name for the Armada agent itself.
 // Releases of this package are applied by the agent as a self-update.
@@ -43,6 +46,19 @@ type Device struct {
 	EnrolledAt  time.Time         `json:"enrolled_at"`
 	LastSeenAt  time.Time         `json:"last_seen_at"`
 	AgentStatus string            `json:"agent_status,omitempty"` // free-form note from the agent, e.g. "update deferred"
+	// Attestation is set for devices that proved a hardware-backed key at enrollment.
+	Attestation *DeviceAttestation `json:"attestation,omitempty"`
+	// LicenseRevoked stops the device from receiving new app licenses.
+	LicenseRevoked bool `json:"license_revoked"`
+}
+
+// DeviceAttestation summarises a verified Android key attestation.
+type DeviceAttestation struct {
+	SecurityLevel string    `json:"security_level"` // tee | strongbox
+	BootState     string    `json:"boot_state"`     // verified | self-signed | unverified | failed
+	DeviceLocked  bool      `json:"device_locked"`
+	OSPatchLevel  int64     `json:"os_patch_level,omitempty"`
+	VerifiedAt    time.Time `json:"verified_at"`
 }
 
 // Device statuses.
@@ -77,17 +93,19 @@ type CreateTokenRequest struct {
 
 // Release is a versioned, signed artifact for a package.
 type Release struct {
-	ID        string    `json:"id"`
-	Package   string    `json:"package"`
-	Version   string    `json:"version"`
-	Channel   string    `json:"channel"`
-	OS        string    `json:"os,omitempty"`   // empty = any
-	Arch      string    `json:"arch,omitempty"` // empty = any
-	SHA256    string    `json:"sha256"`
-	Size      int64     `json:"size"`
-	Signature string    `json:"signature"` // base64 ed25519 over SigningPayload
-	Notes     string    `json:"notes,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string `json:"id"`
+	Package   string `json:"package"`
+	Version   string `json:"version"`
+	Channel   string `json:"channel"`
+	OS        string `json:"os,omitempty"`   // empty = any
+	Arch      string `json:"arch,omitempty"` // empty = any
+	SHA256    string `json:"sha256"`
+	Size      int64  `json:"size"`
+	Signature string `json:"signature"` // base64 ed25519 over SigningPayload
+	Notes     string `json:"notes,omitempty"`
+	// VersionCode is the Android versionCode for APK releases (0 otherwise).
+	VersionCode int64     `json:"version_code,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // SigningPayload is the canonical message the server signs for a release.
@@ -270,6 +288,77 @@ type EnrollRequest struct {
 	Token string     `json:"token"`
 	Name  string     `json:"name,omitempty"`
 	Info  DeviceInfo `json:"info"`
+	// Attestation proves a hardware-backed key. Required for Android devices
+	// unless the server is configured otherwise.
+	Attestation *AttestationEvidence `json:"attestation,omitempty"`
+}
+
+// ChallengeResponse is a single-use nonce for attestation and license requests.
+type ChallengeResponse struct {
+	Challenge string `json:"challenge"` // base64
+	ExpiresIn int    `json:"expires_in"`
+}
+
+// AttestationEvidence is an Android Keystore attestation certificate chain.
+type AttestationEvidence struct {
+	// Challenge is the base64 challenge from POST /api/v1/agent/challenge that
+	// was passed to setAttestationChallenge.
+	Challenge string `json:"challenge"`
+	// Chain is the base64 DER certificate chain, leaf first.
+	Chain []string `json:"chain"`
+}
+
+// App is an Android app Armada manages: it installs it, and may license it.
+type App struct {
+	Package string `json:"package"`
+	Name    string `json:"name"`
+	// Signers are SHA-256 digests (hex) of the app's signing certificates.
+	// Devices refuse to install an APK signed by anyone else, and licenses are
+	// only issued to callers signed with one of these.
+	Signers []string `json:"signers"`
+	// Licensing enables device licenses for this app.
+	Licensing bool `json:"licensing"`
+	// LicenseTTLSeconds is how long a license lasts; revocation takes effect
+	// within this time.
+	LicenseTTLSeconds int64     `json:"license_ttl_seconds"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// LicenseRequest is sent by the Android agent on behalf of an app on the device.
+type LicenseRequest struct {
+	AppPackage string `json:"app_package"`
+	// AppSigner is the SHA-256 (hex) of the calling app's signing certificate,
+	// as read by the agent from the package manager.
+	AppSigner string `json:"app_signer"`
+	// AppKeyJWK optionally binds the license to the app's own EC P-256 key
+	// (DPoP). Its RFC 7638 thumbprint goes in the license's cnf.jkt claim.
+	AppKeyJWK json.RawMessage `json:"app_key_jwk,omitempty"`
+	Challenge string          `json:"challenge"`
+	// Signature is the hardware key's signature (SHA256withECDSA or
+	// SHA256withRSA) over LicenseSigningInput.
+	Signature string `json:"signature"`
+}
+
+// LicenseSigningInput is the exact byte string the device's hardware key signs
+// in a LicenseRequest.
+func LicenseSigningInput(deviceID, challenge, appPackage, appSigner, jkt string) []byte {
+	return []byte("armada-license-request-v1\n" + deviceID + "\n" + challenge + "\n" + appPackage + "\n" + appSigner + "\n" + jkt + "\n")
+}
+
+// LicenseResponse carries a signed license (a JWT).
+type LicenseResponse struct {
+	License   string    `json:"license"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// DevicePolicy is applied by the Android agent on every check-in.
+type DevicePolicy struct {
+	// DisableDebugging turns off USB debugging (adb), the usual way to pull
+	// APKs and data off a device.
+	DisableDebugging bool `json:"disable_debugging"`
+	// BlockUninstall stops users uninstalling managed apps.
+	BlockUninstall bool `json:"block_uninstall"`
 }
 
 // EnrollResponse hands the agent its identity and the release-signing key.
@@ -296,6 +385,10 @@ type HeartbeatResponse struct {
 	HeartbeatIntervalSeconds int                `json:"heartbeat_interval_seconds"`
 	Update                   *UpdateInstruction `json:"update,omitempty"`
 	Actions                  []Action           `json:"actions,omitempty"`
+	// ManagedPackages lists registered Android apps whose versions the agent should report.
+	ManagedPackages []string `json:"managed_packages,omitempty"`
+	// Policy is sent to Android devices.
+	Policy *DevicePolicy `json:"policy,omitempty"`
 }
 
 // UpdateInstruction asks the agent to install a release.
@@ -308,6 +401,10 @@ type UpdateInstruction struct {
 	Size         int64  `json:"size"`
 	Signature    string `json:"signature"`
 	ArtifactPath string `json:"artifact_path"` // relative to the server URL
+	// VersionCode and Signers let an Android agent check the APK itself
+	// (package name, versionCode, signing certificate) before installing it.
+	VersionCode int64    `json:"version_code,omitempty"`
+	Signers     []string `json:"signers,omitempty"`
 }
 
 // UpdateReport is sent by the agent as an update progresses.

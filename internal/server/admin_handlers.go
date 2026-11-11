@@ -154,6 +154,8 @@ type patchDeviceRequest struct {
 	Labels       map[string]string `json:"labels"`        // replaces all labels when non-nil
 	SetLabels    map[string]string `json:"set_labels"`    // merged into labels
 	RemoveLabels []string          `json:"remove_labels"` // deleted from labels
+	// LicenseRevoked revokes (true) or reinstates (false) the device's app licenses.
+	LicenseRevoked *bool `json:"license_revoked"`
 }
 
 var labelKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,62}$`)
@@ -205,6 +207,18 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.UpdateDeviceMeta(r.Context(), d.ID, d.Name, d.Channel, d.Labels); err != nil {
 		s.internalError(w, err)
 		return
+	}
+	if req.LicenseRevoked != nil && *req.LicenseRevoked != d.LicenseRevoked {
+		if err := s.store.SetLicenseRevoked(r.Context(), d.ID, *req.LicenseRevoked); err != nil {
+			s.internalError(w, err)
+			return
+		}
+		d.LicenseRevoked = *req.LicenseRevoked
+		verb := "reinstated"
+		if d.LicenseRevoked {
+			verb = "revoked; apps stop working when their current license expires"
+		}
+		s.event(r.Context(), "device.license", d.ID, "", fmt.Sprintf("%s: licenses %s", d.Name, verb))
 	}
 	s.decorate(d)
 	writeJSON(w, http.StatusOK, d)
@@ -349,7 +363,7 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
 // ---- releases ----
 
 var (
-	packageRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	packageRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	versionRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
 	platRe    = regexp.MustCompile(`^[a-z0-9_]{0,32}$`)
 )
@@ -471,6 +485,15 @@ func (s *Server) handleUploadRelease(w http.ResponseWriter, r *http.Request) {
 			rel.Notes = truncate(v, 8192)
 		case "auto_deploy":
 			autoDeploy, _ = strconv.ParseBool(v)
+		case "version_code":
+			if v != "" {
+				n, err := strconv.ParseInt(v, 10, 64)
+				if err != nil || n <= 0 {
+					writeError(w, http.StatusBadRequest, "version_code must be a positive integer")
+					return
+				}
+				rel.VersionCode = n
+			}
 		}
 	}
 	switch {
@@ -478,7 +501,7 @@ func (s *Server) handleUploadRelease(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing file part")
 		return
 	case !packageRe.MatchString(rel.Package):
-		writeError(w, http.StatusBadRequest, "invalid or missing package name (lowercase letters, digits, . _ -)")
+		writeError(w, http.StatusBadRequest, "invalid or missing package name (letters, digits, . _ -)")
 		return
 	case !versionRe.MatchString(rel.Version):
 		writeError(w, http.StatusBadRequest, "invalid or missing version")

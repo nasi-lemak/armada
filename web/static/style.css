@@ -224,3 +224,6 @@ pre.out {
 .dep-row + .dep-row { margin-top: 20px; }
 .dist + .dist { margin-top: 14px; }
 hr.sep { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
+
+img.qr { image-rendering: pixelated; background: #fff; padding: 8px; border-radius: 8px; border: 1px solid var(--border); }
+details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }

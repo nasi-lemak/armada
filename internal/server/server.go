@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/nasi-lemak/armada/internal/api"
+	"github.com/nasi-lemak/armada/internal/attestation"
 	"github.com/nasi-lemak/armada/internal/rollout"
 	"github.com/nasi-lemak/armada/internal/store"
 	"github.com/nasi-lemak/armada/web"
@@ -45,6 +46,35 @@ type Config struct {
 	// DefaultStrategy is used for deployments created without one (including auto-deploys).
 	DefaultStrategy api.Strategy
 	Logger          *slog.Logger
+
+	// Android.
+	Android AndroidConfig
+}
+
+// AndroidConfig controls Android enrollment, licensing and provisioning.
+type AndroidConfig struct {
+	// AgentPackage is the Android agent's application ID. Its attested keys
+	// must be created by this package, and it is the only Android package
+	// served publicly for provisioning downloads.
+	AgentPackage string
+	// AdminReceiver is the agent's DeviceAdminReceiver class, used in the
+	// provisioning QR code (e.g. ".AdminReceiver").
+	AdminReceiver string
+	// RequireAttestation rejects Android enrollments without hardware key attestation.
+	RequireAttestation bool
+	// RequireVerifiedBoot rejects devices with an unlocked bootloader or modified OS.
+	RequireVerifiedBoot bool
+	// RequireStrongBox requires keys in a dedicated security chip rather than the TEE.
+	RequireStrongBox bool
+	// ExtraRootsPEM adds attestation roots (tests or private PKI).
+	ExtraRootsPEM []byte
+	// StatusURL is Google's attestation revocation list; empty disables checking.
+	StatusURL string
+	// DisableDebugging tells agents to turn off USB debugging.
+	DisableDebugging bool
+	// PublicURL is the server URL devices use (for provisioning QR codes).
+	// If empty it is derived from the request.
+	PublicURL string
 }
 
 // DefaultConfig returns sensible defaults.
@@ -64,6 +94,14 @@ func DefaultConfig() Config {
 			MaxFailureRate:       0.2,
 			MinSamples:           3,
 		},
+		Android: AndroidConfig{
+			AgentPackage:        "dev.armada.agent",
+			AdminReceiver:       ".AdminReceiver",
+			RequireAttestation:  true,
+			RequireVerifiedBoot: true,
+			StatusURL:           attestation.GoogleStatusURL,
+			DisableDebugging:    true,
+		},
 	}
 }
 
@@ -76,6 +114,11 @@ type Server struct {
 	log         *slog.Logger
 	now         func() time.Time
 	artifactDir string
+
+	licenseKey  ed25519.PrivateKey
+	verifier    *attestation.Verifier
+	revocations *attestation.RevocationList
+	challenges  *challengeStore
 }
 
 // New opens the data directory (creating the database and signing key if
@@ -106,6 +149,18 @@ func New(cfg Config) (*Server, error) {
 		st.Close()
 		return nil, err
 	}
+	// Licenses use their own key so a leak of one key does not compromise the other.
+	licKey, err := loadOrCreateSigningKey(filepath.Join(cfg.DataDir, "license.key"))
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+	revocations := &attestation.RevocationList{}
+	verifier, err := attestation.NewVerifier(cfg.Android.ExtraRootsPEM, revocations.IsRevoked)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
 	return &Server{
 		cfg:         cfg,
 		store:       st,
@@ -114,6 +169,10 @@ func New(cfg Config) (*Server, error) {
 		log:         cfg.Logger,
 		now:         func() time.Time { return time.Now().UTC() },
 		artifactDir: artifactDir,
+		licenseKey:  licKey,
+		verifier:    verifier,
+		revocations: revocations,
+		challenges:  newChallengeStore(),
 	}, nil
 }
 
@@ -160,6 +219,8 @@ func (s *Server) Handler() http.Handler {
 		_, _ = w.Write(web.InstallScript)
 	})
 	mux.HandleFunc("GET /api/v1/agent/download", s.handleAgentDownload)
+	mux.HandleFunc("POST /api/v1/agent/challenge", s.handleChallenge)
+	mux.HandleFunc("GET /api/v1/license/jwks", s.handleJWKS)
 
 	// Agent protocol.
 	mux.HandleFunc("POST /api/v1/agent/enroll", s.handleEnroll)
@@ -167,6 +228,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/agent/updates", s.deviceAuth(s.handleUpdateReport))
 	mux.Handle("GET /api/v1/agent/releases/{id}/artifact", s.deviceAuth(s.handleAgentArtifact))
 	mux.Handle("POST /api/v1/agent/actions/{id}/result", s.deviceAuth(s.handleActionResult))
+	mux.Handle("POST /api/v1/agent/license", s.deviceAuth(s.handleLicense))
 
 	// Admin API.
 	admin := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, s.adminAuth(h)) }
@@ -191,6 +253,10 @@ func (s *Server) Handler() http.Handler {
 	admin("GET /api/v1/deployments/{id}", s.handleGetDeployment)
 	admin("POST /api/v1/deployments/{id}/{op}", s.handleDeploymentOp)
 	admin("GET /api/v1/events", s.handleListEvents)
+	admin("GET /api/v1/apps", s.handleListApps)
+	admin("PUT /api/v1/apps/{package}", s.handlePutApp)
+	admin("DELETE /api/v1/apps/{package}", s.handleDeleteApp)
+	admin("POST /api/v1/android/provisioning", s.handleProvisioning)
 
 	// Dashboard.
 	static, _ := fs.Sub(web.FS, "static")
@@ -279,7 +345,19 @@ func (s *Server) Run(ctx context.Context) {
 	t := time.NewTicker(s.cfg.EngineInterval)
 	defer t.Stop()
 	lastPrune := time.Time{}
+	lastRevocations := time.Time{}
 	for {
+		if s.cfg.Android.StatusURL != "" && time.Since(lastRevocations) > 12*time.Hour {
+			lastRevocations = time.Now()
+			fctx, cancel := context.WithTimeout(ctx, time.Minute)
+			if err := s.revocations.Fetch(fctx, http.DefaultClient, s.cfg.Android.StatusURL); err != nil && ctx.Err() == nil {
+				s.log.Warn("could not refresh attestation revocation list; will retry", "err", err)
+				lastRevocations = time.Now().Add(-11 * time.Hour) // retry in an hour
+			} else if err == nil {
+				s.log.Info("attestation revocation list refreshed", "revoked", s.revocations.Len())
+			}
+			cancel()
+		}
 		if err := s.Tick(ctx); err != nil && ctx.Err() == nil {
 			s.log.Error("rollout engine tick failed", "err", err)
 		}
