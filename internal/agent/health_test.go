@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -96,5 +97,31 @@ func TestHealthRunnerScheduling(t *testing.T) {
 	h.setMonitors(nil) // a removed monitor's result disappears
 	if snap := h.snapshot(); len(snap) != 1 {
 		t.Fatalf("stale monitor result kept: %+v", snap)
+	}
+}
+
+func TestStorageScanWithFakeSmartctl(t *testing.T) {
+	dir := t.TempDir()
+	fake := dir + "/smartctl"
+	script := `#!/bin/sh
+case "$*" in
+  *--scan-open*) echo '{"devices":[{"name":"/dev/disk0","type":"nvme"},{"name":"/dev/disk4","type":"sat"},{"name":"/dev/disk9","type":"sat"}]}';;
+  */dev/disk0) echo '{"smartctl":{"exit_status":0},"smart_status":{"passed":true},"nvme_smart_health_information_log":{"available_spare":100,"available_spare_threshold":10,"percentage_used":85}}';;
+  */dev/disk4) echo '{"smartctl":{"exit_status":2}}';;
+  */dev/disk9) echo '{"smartctl":{"exit_status":0},"smart_status":{"passed":false}}';;
+esac`
+	os.WriteFile(fake, []byte(script), 0o755)
+	res := checkStorageScan(context.Background(), &HealthConfig{Smartctl: fake, IgnoreDevices: []string{"disk9"}})
+	if len(res) != 1 || res[0].Name != "storage /dev/disk0" || res[0].Status != api.HealthWarning {
+		t.Fatalf("scan: %+v", res) // disk4 has no SMART (USB bridge), disk9 is ignored
+	}
+	res = checkStorageScan(context.Background(), &HealthConfig{Smartctl: dir + "/missing"})
+	if len(res) != 1 || res[0].Status != api.HealthUnknown {
+		t.Fatalf("missing smartctl: %+v", res)
+	}
+	cfg := &HealthConfig{}
+	cfg.defaults()
+	if r := diskSpaceResult(cfg, `C:\`, 100, 4); r.Status != api.HealthCritical || *r.Value != 96 {
+		t.Fatalf("disk space: %+v", r)
 	}
 }

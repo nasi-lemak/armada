@@ -313,3 +313,17 @@ table.data-table td, table.data-table th { padding: 4px 12px; font-size: 12px; }
 .sw.unknown-gap { background: var(--panel-2); border: 1px solid var(--border); }
 .loading { opacity: .55; transition: opacity .15s; }
 .viz-note { color: var(--muted); font-size: 12px; margin-top: 4px; }
+/* categorical slots (dataviz reference order; dark steps selected for the dark surface) */
+:root { --c1:#2a78d6; --c2:#eb6834; --c3:#1baf7a; --c4:#eda100; --c5:#e87ba4; --c6:#008300; --c7:#6250d6; --c8:#e34948; }
+@media (prefers-color-scheme: dark) {
+  :root { --c1:#3987e5; --c2:#d95926; --c3:#199e70; --c4:#c98500; --c5:#d55181; --c6:#008300; --c7:#9085e9; --c8:#e66767; }
+}
+.viz-line.c1{stroke:var(--c1)} .viz-line.c2{stroke:var(--c2)} .viz-line.c3{stroke:var(--c3)} .viz-line.c4{stroke:var(--c4)}
+.viz-line.c5{stroke:var(--c5)} .viz-line.c6{stroke:var(--c6)} .viz-line.c7{stroke:var(--c7)} .viz-line.c8{stroke:var(--c8)}
+.viz-end.c1,.viz-dot.c1,.viz-key.c1,.sw.c1{fill:var(--c1);background:var(--c1)} .viz-end.c2,.viz-dot.c2,.viz-key.c2,.sw.c2{fill:var(--c2);background:var(--c2)}
+.viz-end.c3,.viz-dot.c3,.viz-key.c3,.sw.c3{fill:var(--c3);background:var(--c3)} .viz-end.c4,.viz-dot.c4,.viz-key.c4,.sw.c4{fill:var(--c4);background:var(--c4)}
+.viz-end.c5,.viz-dot.c5,.viz-key.c5,.sw.c5{fill:var(--c5);background:var(--c5)} .viz-end.c6,.viz-dot.c6,.viz-key.c6,.sw.c6{fill:var(--c6);background:var(--c6)}
+.viz-end.c7,.viz-dot.c7,.viz-key.c7,.sw.c7{fill:var(--c7);background:var(--c7)} .viz-end.c8,.viz-dot.c8,.viz-key.c8,.sw.c8{fill:var(--c8);background:var(--c8)}
+.viz-band.c1,.viz-band.c2,.viz-band.c3,.viz-band.c4,.viz-band.c5,.viz-band.c6,.viz-band.c7,.viz-band.c8{fill:none}
+.legend a { color: var(--text); }
+.filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }

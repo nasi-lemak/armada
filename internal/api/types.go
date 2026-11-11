@@ -706,9 +706,12 @@ type HistoryPoint struct {
 
 // HistorySeries is the history of one check or metric on one device.
 type HistorySeries struct {
-	Name string `json:"name"`
-	Kind string `json:"kind"`
-	Unit string `json:"unit,omitempty"`
+	DeviceID string `json:"device_id,omitempty"`
+	// DeviceName is filled in by fleet-wide queries.
+	DeviceName string `json:"device_name,omitempty"`
+	Name       string `json:"name"`
+	Kind       string `json:"kind"`
+	Unit       string `json:"unit,omitempty"`
 	// Numeric is true when the series has values worth charting.
 	Numeric bool `json:"numeric"`
 	// Availability is the share of the range the check was ok (0..1); for the

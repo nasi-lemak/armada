@@ -23,6 +23,18 @@ type PendingSelfUpdate struct {
 	StartedAt    time.Time `json:"started_at"`
 }
 
+// PendingRebootUpdate is a package update waiting for the reboot that activates it.
+type PendingRebootUpdate struct {
+	DeploymentID     string    `json:"deployment_id"`
+	ReleaseID        string    `json:"release_id"`
+	Package          string    `json:"package"`
+	Version          string    `json:"version"`
+	PreviousVersion  string    `json:"previous_version"`
+	Artifact         string    `json:"artifact"`
+	PreviousArtifact string    `json:"previous_artifact"`
+	At               time.Time `json:"at"`
+}
+
 // InstalledPackage records what the agent last installed for a package.
 type InstalledPackage struct {
 	Version          string `json:"version"`
@@ -38,6 +50,7 @@ type State struct {
 	SigningPublicKey string                      `json:"signing_public_key"`
 	Installed        map[string]InstalledPackage `json:"installed"`
 	SelfUpdate       *PendingSelfUpdate          `json:"self_update,omitempty"`
+	PendingReboot    *PendingRebootUpdate        `json:"pending_reboot,omitempty"`
 	// Outbox holds update reports that could not be delivered yet.
 	Outbox []api.UpdateReport `json:"outbox,omitempty"`
 }
@@ -88,6 +101,10 @@ func (sf *stateFile) get() State {
 	if sf.s.SelfUpdate != nil {
 		p := *sf.s.SelfUpdate
 		s.SelfUpdate = &p
+	}
+	if sf.s.PendingReboot != nil {
+		p := *sf.s.PendingReboot
+		s.PendingReboot = &p
 	}
 	return s
 }

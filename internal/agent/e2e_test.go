@@ -487,3 +487,85 @@ func TestEndToEndHealthMonitoring(t *testing.T) {
 		t.Fatalf("disabled monitor still reported: %+v", det.Device.Checks)
 	}
 }
+
+// TestRebootActivatedUpdates simulates A/B OS image updates: install writes
+// the inactive slot, the reboot (faked) may or may not switch to it, and the
+// agent finishes the update when it starts again.
+func TestRebootActivatedUpdates(t *testing.T) {
+	cases := []struct {
+		name      string
+		bootsNew  bool
+		healthy   bool
+		want      string
+		wantMsg   string
+		confirmed bool
+	}{
+		{"boots and is healthy", true, true, api.UpdateSucceeded, "booted and confirmed", true},
+		{"bootloader fell back", false, true, api.UpdateRolledBack, "booted 1.0 instead of 2.0", false},
+		{"unhealthy after reboot", true, false, api.UpdateRolledBack, "health check failed after reboot", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			img := t.TempDir()
+			os.WriteFile(img+"/booted", []byte("1.0"), 0o644)
+			healthy := "true"
+			if !c.healthy {
+				healthy = "false"
+			}
+			sh := func(s string) []string { return []string{"/bin/sh", "-c", s} }
+			cfg := &Config{EnrollmentToken: h.token(), StateDir: t.TempDir(), Health: HealthConfig{Disabled: true},
+				Packages: map[string]PackageConfig{"os": withFastHealth(PackageConfig{
+					InstallCommand:  sh(`echo "$ARMADA_VERSION" > ` + img + `/inactive`),
+					VersionCommand:  []string{"cat", img + "/booted"},
+					HealthCommand:   []string{healthy},
+					HealthRetries:   1,
+					RebootRequired:  true,
+					ConfirmCommand:  sh(`touch ` + img + `/confirmed`),
+					RollbackCommand: sh(`touch ` + img + `/marked-bad`),
+				})}}
+			bootloader := func(ctx context.Context) error {
+				if c.bootsNew {
+					b, _ := os.ReadFile(img + "/inactive")
+					os.WriteFile(img+"/booted", b, 0o644)
+				}
+				return nil
+			}
+			a := newTestAgent(t, h, cfg)
+			a.Reboot = bootloader
+			if err := a.Enroll(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			checkIn(t, a)
+			dep := h.deploy(h.upload("os", "2.0", []byte("image 2.0")))
+			checkIn(t, a) // installs and "reboots"
+			if a.state.get().PendingReboot == nil {
+				t.Fatal("pending reboot not recorded")
+			}
+			// The device comes back up: a fresh agent process on the same state.
+			a2 := newTestAgent(t, h, cfg)
+			a2.Reboot = bootloader
+			if err := a2.Enroll(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			checkIn(t, a2)
+			var det struct{ Updates []*api.DeviceUpdate }
+			h.admin("GET", "/api/v1/deployments/"+dep.ID, nil, &det)
+			if len(det.Updates) != 1 || det.Updates[0].Status != c.want || !strings.Contains(det.Updates[0].Message, c.wantMsg) {
+				t.Fatalf("got %+v", det.Updates[0])
+			}
+			_, err := os.Stat(img + "/confirmed")
+			if (err == nil) != c.confirmed {
+				t.Fatalf("confirmed=%v, want %v", err == nil, c.confirmed)
+			}
+			if !c.healthy {
+				if _, err := os.Stat(img + "/marked-bad"); err != nil {
+					t.Fatal("rollback command not run")
+				}
+			}
+			if a2.state.get().PendingReboot != nil {
+				t.Fatal("pending reboot not cleared")
+			}
+		})
+	}
+}

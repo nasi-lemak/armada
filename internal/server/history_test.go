@@ -1,6 +1,13 @@
 package server
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -126,5 +133,120 @@ func TestHistoryRecordingRollupAndRetention(t *testing.T) {
 	e.s.store.DB().QueryRow(`SELECT COUNT(*) FROM series`).Scan(&n)
 	if n != 0 {
 		t.Fatalf("history kept for deleted device: %d series", n)
+	}
+}
+
+func TestHistoryCompare(t *testing.T) {
+	s, ts := setup(t)
+	clock := time.Now().UTC()
+	s.now = func() time.Time { return clock }
+	keys := map[string]string{}
+	for _, d := range []struct{ name, site string }{{"cool", "sg"}, {"hot", "sg"}, {"warm", "kl"}} {
+		var tok api.EnrollmentToken
+		call(t, ts, admin, "POST", "/api/v1/tokens", api.CreateTokenRequest{Labels: map[string]string{"site": d.site}}, &tok)
+		var er api.EnrollResponse
+		call(t, ts, "", "POST", "/api/v1/agent/enroll", api.EnrollRequest{Token: tok.Token, Name: d.name, Info: api.DeviceInfo{OS: "linux"}}, &er)
+		keys[d.name] = er.DeviceKey
+	}
+	temps := map[string]float64{"cool": 40, "hot": 85, "warm": 60}
+	for m := 0; m < 30; m += 5 {
+		clock = clock.Add(5 * time.Minute)
+		for name, key := range keys {
+			v := temps[name] + float64(m)/10
+			call(t, ts, key, "POST", "/api/v1/agent/heartbeat", api.HeartbeatRequest{Info: api.DeviceInfo{OS: "linux"},
+				Health: []api.CheckResult{{Name: "temperature cpu", Kind: "temperature", Status: api.HealthOK, Value: &v, Unit: "°C"}}}, nil)
+		}
+	}
+	var checks []checkName
+	call(t, ts, admin, "GET", "/api/v1/history/checks", nil, &checks)
+	if len(checks) == 0 || checks[0].Devices != 3 {
+		t.Fatalf("checks: %+v", checks)
+	}
+	var c CompareResponse
+	call(t, ts, admin, "GET", "/api/v1/history/compare?check=temperature+cpu&range=24h", nil, &c)
+	if c.Matching != 3 || len(c.Series) != 3 || c.Series[0].DeviceName != "hot" || c.Series[2].DeviceName != "cool" {
+		t.Fatalf("compare order: matching %d %+v", c.Matching, names(c.Series))
+	}
+	call(t, ts, admin, "GET", "/api/v1/history/compare?check=temperature+cpu&label=site=sg&limit=1", nil, &c)
+	if c.Matching != 2 || len(c.Series) != 1 || c.Series[0].DeviceName != "hot" {
+		t.Fatalf("filtered compare: %d %+v", c.Matching, names(c.Series))
+	}
+	call(t, ts, admin, "GET", "/api/v1/history/compare?check=temperature+cpu&limit=99", nil, &c)
+	if len(c.Series) != 3 {
+		t.Fatalf("limit clamp: %d", len(c.Series))
+	}
+	if code := call(t, ts, admin, "GET", "/api/v1/history/compare", nil, nil); code != 400 {
+		t.Fatalf("missing check: %d", code)
+	}
+}
+
+func names(ss []api.HistorySeries) []string {
+	out := []string{}
+	for _, s := range ss {
+		out = append(out, s.DeviceName)
+	}
+	return out
+}
+
+func TestBackupRestore(t *testing.T) {
+	s, ts := setup(t)
+	var tok api.EnrollmentToken
+	call(t, ts, admin, "POST", "/api/v1/tokens", api.CreateTokenRequest{}, &tok)
+	var er api.EnrollResponse
+	call(t, ts, "", "POST", "/api/v1/agent/enroll", api.EnrollRequest{Token: tok.Token, Name: "keeper", Info: api.DeviceInfo{OS: "linux"}}, &er)
+	rel := upload(t, ts, "app", "1.0.0")
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/backup", nil)
+	req.Header.Set("Authorization", "Bearer "+admin)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("backup: %v %v", err, resp.Status)
+	}
+	dir := t.TempDir()
+	gz, _ := gzip.NewReader(resp.Body)
+	tr := tar.NewReader(gz)
+	var got []string
+	for {
+		hd, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, hd.Name)
+		os.MkdirAll(filepath.Join(dir, filepath.Dir(hd.Name)), 0o700)
+		f, _ := os.Create(filepath.Join(dir, hd.Name))
+		io.Copy(f, tr)
+		f.Close()
+	}
+	resp.Body.Close()
+	if len(got) != 4 {
+		t.Fatalf("archive contents: %v", got)
+	}
+	// A server started from the restored directory has the same devices,
+	// releases, artifacts and signing key.
+	cfg := s.cfg
+	cfg.DataDir = dir
+	restored, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	rts := httptest.NewServer(restored.Handler())
+	defer rts.Close()
+	var devs []api.Device
+	call(t, rts, admin, "GET", "/api/v1/devices", nil, &devs)
+	if len(devs) != 1 || devs[0].Name != "keeper" {
+		t.Fatalf("restored devices: %+v", devs)
+	}
+	if code := call(t, rts, er.DeviceKey, "POST", "/api/v1/agent/heartbeat", api.HeartbeatRequest{}, nil); code != 200 {
+		t.Fatalf("device key not valid after restore: %d", code)
+	}
+	if restored.PublicKey() != s.PublicKey() {
+		t.Fatal("signing key changed after restore")
+	}
+	if code := call(t, rts, admin, "GET", "/api/v1/releases/"+rel.ID+"/artifact", nil, nil); code != 200 {
+		t.Fatalf("artifact missing after restore: %d", code)
 	}
 }

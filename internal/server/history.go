@@ -5,12 +5,14 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/nasi-lemak/armada/internal/api"
+	"github.com/nasi-lemak/armada/internal/rollout"
 	"github.com/nasi-lemak/armada/internal/store"
 )
 
@@ -223,4 +225,125 @@ func roundBucket(sec int64) int64 {
 		}
 	}
 	return 86400
+}
+
+// CompareResponse is GET /api/v1/history/compare: one check across devices.
+type CompareResponse struct {
+	Check      string              `json:"check"`
+	From       time.Time           `json:"from"`
+	To         time.Time           `json:"to"`
+	Resolution int64               `json:"resolution_seconds"`
+	Matching   int                 `json:"matching"` // devices with this check (after filters)
+	Series     []api.HistorySeries `json:"series"`   // at most `limit`, worst first
+}
+
+type checkName struct {
+	Name    string `json:"name"`
+	Devices int    `json:"devices"`
+}
+
+func (s *Server) handleHistoryChecks(w http.ResponseWriter, r *http.Request) {
+	names, err := s.store.SeriesNames(r.Context())
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	out := make([]checkName, 0, len(names))
+	for n, c := range names {
+		out = append(out, checkName{n, c})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Devices != out[j].Devices {
+			return out[i].Devices > out[j].Devices
+		}
+		return out[i].Name < out[j].Name
+	})
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleHistoryCompare returns one check's history on the devices that need
+// attention most: highest peak for measured values, least time ok otherwise.
+func (s *Server) handleHistoryCompare(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	check := q.Get("check")
+	if check == "" {
+		writeError(w, http.StatusBadRequest, "check is required")
+		return
+	}
+	rng, err := parseRange(q.Get("range"), 24*time.Hour, s.cfg.HistoryRetention)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 || limit > 8 {
+		limit = 8 // the categorical palette has eight distinguishable colors
+	}
+	sel := api.Selector{Channel: q.Get("channel"), Labels: map[string]string{}}
+	for _, l := range q["label"] {
+		k, v, ok := strings.Cut(l, "=")
+		if !ok {
+			v = "*"
+		}
+		sel.Labels[k] = v
+	}
+	now := s.now()
+	from := now.Add(-rng)
+	hourly := rng > s.cfg.HistoryRawRetention
+	series, oks, ns, err := s.store.CheckHistory(ctx, check, from, hourly)
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	devs, err := s.store.ListDevices(ctx)
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	byID := map[string]*api.Device{}
+	for _, d := range devs {
+		byID[d.ID] = d
+	}
+	type ranked struct {
+		s     api.HistorySeries
+		score float64
+	}
+	var keep []ranked
+	for i, sr := range series {
+		d := byID[sr.DeviceID]
+		if d == nil || !rollout.Matches(sel, d) || len(sr.Points) == 0 {
+			continue
+		}
+		sr.DeviceName = d.Name
+		if ns[i] > 0 {
+			a := float64(oks[i]) / float64(ns[i])
+			sr.Availability = &a
+		}
+		score := 0.0
+		if sr.Numeric {
+			for _, p := range sr.Points {
+				v := p.V
+				if p.Max != nil {
+					v = p.Max
+				}
+				if v != nil && *v > score {
+					score = *v
+				}
+			}
+		} else if sr.Availability != nil {
+			score = 1 - *sr.Availability
+		}
+		keep = append(keep, ranked{sr, score})
+	}
+	sort.SliceStable(keep, func(i, j int) bool { return keep[i].score > keep[j].score })
+	resp := CompareResponse{Check: check, From: from, To: now, Matching: len(keep), Series: []api.HistorySeries{}}
+	resp.Resolution = int64(s.cfg.HistoryResolution.Seconds())
+	if hourly {
+		resp.Resolution = 3600
+	}
+	for i := 0; i < len(keep) && i < limit; i++ {
+		resp.Series = append(resp.Series, keep[i].s)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

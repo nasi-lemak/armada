@@ -352,3 +352,31 @@ func truncateStr(s string, n int) string {
 }
 
 func float(v float64) *float64 { return &v }
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func round1(v float64) float64 { return float64(int64(v*10+0.5)) / 10 }
+
+// diskSpaceResult rates one filesystem's fullness.
+func diskSpaceResult(cfg *HealthConfig, mountPoint string, total, avail uint64) api.CheckResult {
+	used := 100 * float64(total-avail) / float64(total)
+	r := api.CheckResult{Name: "disk-space " + mountPoint, Kind: "disk_space", Value: float(round1(used)), Unit: "%",
+		Details: map[string]string{"free_gb": fmt.Sprintf("%.1f", float64(avail)/1e9)}}
+	switch {
+	case used >= cfg.DiskCritPercent:
+		r.Status = api.HealthCritical
+	case used >= cfg.DiskWarnPercent:
+		r.Status = api.HealthWarning
+	default:
+		r.Status = api.HealthOK
+	}
+	r.Message = fmt.Sprintf("%s is %.0f%% full", mountPoint, used)
+	return r
+}

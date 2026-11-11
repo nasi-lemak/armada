@@ -44,6 +44,8 @@ type Agent struct {
 	Reexec func(exe string) error
 	// Now is the clock used for maintenance windows. Overridable for tests.
 	Now func() time.Time
+	// Reboot restarts the device (default: the configured reboot_command). Overridable for tests.
+	Reboot func(ctx context.Context) error
 
 	mu       sync.Mutex
 	busy     bool
@@ -71,6 +73,15 @@ func New(cfg *Config, log *slog.Logger) (*Agent, error) {
 		health: newHealthRunner(cfg.Health)}
 	if cfg.Peripherals != nil {
 		a.gw = newGateway(a, cfg.Peripherals)
+	}
+	a.Reboot = func(ctx context.Context) error {
+		cctx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		out, code, err := runCommand(cctx, a.cfg.RebootCommand, nil)
+		if err != nil || code != 0 {
+			return errors.New(describeRun(out, code, err))
+		}
+		return nil
 	}
 	a.client, err = newClient(cfg, func() string { return a.state.get().DeviceKey })
 	if err != nil {
@@ -185,7 +196,11 @@ func (a *Agent) Enroll(ctx context.Context) error {
 	if err := a.enroll(ctx); err != nil {
 		return err
 	}
-	return a.checkSelfUpdateOnStart()
+	if err := a.checkSelfUpdateOnStart(); err != nil {
+		return err
+	}
+	a.finishRebootUpdate(ctx)
+	return nil
 }
 
 func (a *Agent) enroll(ctx context.Context) error {
@@ -235,6 +250,10 @@ func (a *Agent) enroll(ctx context.Context) error {
 // CheckIn sends one heartbeat and acts on the response. Updates and actions
 // run in the background.
 func (a *Agent) CheckIn(ctx context.Context) error {
+	// Deliver queued update results first, so the server never judges an
+	// update from the versions in this heartbeat before hearing its outcome
+	// (e.g. an image that booted but failed its health check).
+	a.flushOutbox(ctx)
 	a.mu.Lock()
 	busy, status := a.busy, a.status
 	a.mu.Unlock()
@@ -263,7 +282,7 @@ func (a *Agent) CheckIn(ctx context.Context) error {
 		a.gw.enqueue(resp.PeripheralUpdates)
 	}
 	a.confirmSelfUpdate()
-	a.flushOutbox(ctx)
+	a.flushOutbox(ctx) // the self-update confirmation queued just above
 	if resp.Update != nil {
 		a.maybeStartUpdate(ctx, *resp.Update)
 	}
@@ -407,8 +426,9 @@ func (a *Agent) applyUpdate(ctx context.Context, u api.UpdateInstruction) {
 		}
 		return
 	}
-	status, msg := a.installPackage(ctx, u, path)
-	rep(status, msg)
+	if status, msg := a.installPackage(ctx, u, path); status != "" {
+		rep(status, msg)
+	}
 }
 
 // fetchArtifact downloads and verifies a release, returning the local path.
@@ -508,29 +528,25 @@ func (a *Agent) installPackage(ctx context.Context, u api.UpdateInstruction, dow
 	if err != nil || code != 0 {
 		return fail("install failed: " + describeRun(out, code, err))
 	}
-	if len(pc.HealthCommand) > 0 {
-		var last string
-		healthy := false
-		for i := 0; i < pc.HealthRetries; i++ {
-			if i > 0 {
-				select {
-				case <-ctx.Done():
-					return api.UpdateFailed, "interrupted during health check"
-				case <-time.After(pc.HealthInterval.Duration):
-				}
-			}
-			cctx, cancel := context.WithTimeout(ctx, timeout)
-			out, code, err := runCommand(cctx, pc.HealthCommand, env)
-			cancel()
-			if err == nil && code == 0 {
-				healthy = true
-				break
-			}
-			last = describeRun(out, code, err)
+	if pc.RebootRequired {
+		// A/B image updates activate on reboot; the health check and the
+		// confirmation run when the agent starts again (finishRebootUpdate).
+		if err := a.state.update(func(s *State) {
+			s.PendingReboot = &PendingRebootUpdate{DeploymentID: u.DeploymentID, ReleaseID: u.ReleaseID, Package: u.Package,
+				Version: u.Version, PreviousVersion: prevVersion, Artifact: artifact, PreviousArtifact: prev.Artifact, At: time.Now().UTC()}
+		}); err != nil {
+			return api.UpdateFailed, "could not save update state: " + err.Error()
 		}
-		if !healthy {
-			return fail(fmt.Sprintf("health check failed after %d attempts: %s", pc.HealthRetries, last))
+		a.report(ctx, api.UpdateReport{DeploymentID: u.DeploymentID, ReleaseID: u.ReleaseID, Status: api.UpdateInstalling, Message: "rebooting to activate " + u.Version})
+		a.log.Info("rebooting to activate update", "package", u.Package, "version", u.Version)
+		if err := a.Reboot(ctx); err != nil {
+			_ = a.state.update(func(s *State) { s.PendingReboot = nil })
+			return fail("reboot failed: " + err.Error())
 		}
+		return "", "" // reported after the reboot
+	}
+	if ok, last := a.runHealth(ctx, pc, env); !ok {
+		return fail(fmt.Sprintf("health check failed after %d attempts: %s", pc.HealthRetries, last))
 	}
 	_ = a.state.update(func(s *State) {
 		old := s.Installed[u.Package]
@@ -544,6 +560,90 @@ func (a *Agent) installPackage(ctx context.Context, u api.UpdateInstruction, dow
 		}
 	})
 	return api.UpdateSucceeded, "installed " + u.Version
+}
+
+// runHealth runs a package's health command with retries.
+func (a *Agent) runHealth(ctx context.Context, pc PackageConfig, env []string) (bool, string) {
+	if len(pc.HealthCommand) == 0 {
+		return true, ""
+	}
+	var last string
+	for i := 0; i < pc.HealthRetries; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return false, "interrupted during health check"
+			case <-time.After(pc.HealthInterval.Duration):
+			}
+		}
+		cctx, cancel := context.WithTimeout(ctx, a.cfg.CommandTimeout.Duration)
+		out, code, err := runCommand(cctx, pc.HealthCommand, env)
+		cancel()
+		if err == nil && code == 0 {
+			return true, ""
+		}
+		last = describeRun(out, code, err)
+	}
+	return false, last
+}
+
+// finishRebootUpdate completes an update that needed a reboot: it checks the
+// new version booted, runs the health check, then confirms it (e.g. marks
+// the A/B slot good). A device that booted the old version, or fails its
+// health check, is reported rolled back.
+func (a *Agent) finishRebootUpdate(ctx context.Context) {
+	p := a.state.get().PendingReboot
+	if p == nil {
+		return
+	}
+	pc, ok := a.cfg.Packages[p.Package]
+	report := func(status, msg string) {
+		a.log.Info("reboot update "+status, "package", p.Package, "version", p.Version, "msg", msg)
+		_ = a.state.update(func(s *State) {
+			s.PendingReboot = nil
+			s.Outbox = append(s.Outbox, api.UpdateReport{DeploymentID: p.DeploymentID, ReleaseID: p.ReleaseID, Status: status, Message: msg})
+		})
+	}
+	if !ok {
+		report(api.UpdateFailed, "package "+p.Package+" is no longer configured")
+		return
+	}
+	cur := a.packageVersions(ctx)[p.Package]
+	if cur != p.Version {
+		report(api.UpdateRolledBack, fmt.Sprintf("device booted %s instead of %s (the bootloader fell back to the previous image)", orUnknown(cur), p.Version))
+		return
+	}
+	env := []string{"ARMADA_PACKAGE=" + p.Package, "ARMADA_VERSION=" + p.Version, "ARMADA_ARTIFACT=" + p.Artifact,
+		"ARMADA_PREVIOUS_VERSION=" + p.PreviousVersion, "ARMADA_PREVIOUS_ARTIFACT=" + p.PreviousArtifact}
+	if healthy, last := a.runHealth(ctx, pc, env); !healthy {
+		msg := fmt.Sprintf("health check failed after reboot: %s", last)
+		if len(pc.RollbackCommand) > 0 {
+			cctx, cancel := context.WithTimeout(ctx, a.cfg.CommandTimeout.Duration)
+			out, code, err := runCommand(cctx, pc.RollbackCommand, env)
+			cancel()
+			if err != nil || code != 0 {
+				report(api.UpdateFailed, msg+"; rollback failed: "+describeRun(out, code, err))
+				return
+			}
+			report(api.UpdateRolledBack, msg+"; rolling back to "+orUnknown(p.PreviousVersion))
+			return
+		}
+		report(api.UpdateFailed, msg)
+		return
+	}
+	if len(pc.ConfirmCommand) > 0 {
+		cctx, cancel := context.WithTimeout(ctx, a.cfg.CommandTimeout.Duration)
+		out, code, err := runCommand(cctx, pc.ConfirmCommand, env)
+		cancel()
+		if err != nil || code != 0 {
+			report(api.UpdateFailed, "could not confirm the new image (it may be reverted on the next boot): "+describeRun(out, code, err))
+			return
+		}
+	}
+	_ = a.state.update(func(s *State) {
+		s.Installed[p.Package] = InstalledPackage{Version: p.Version, Artifact: p.Artifact, PreviousVersion: p.PreviousVersion, PreviousArtifact: p.PreviousArtifact}
+	})
+	report(api.UpdateSucceeded, "booted and confirmed "+p.Version)
 }
 
 func orUnknown(s string) string {

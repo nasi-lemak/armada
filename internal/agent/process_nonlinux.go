@@ -10,9 +10,6 @@ import (
 	"github.com/nasi-lemak/armada/internal/api"
 )
 
-// platformChecks: built-in hardware checks are Linux-only for now.
-func platformChecks() []builtinCheck { return nil }
-
 func checkProcess(c api.CheckSpec, r *api.CheckResult) {
 	out, code, err := runCommand(context.Background(), processLister(c.Target), nil)
 	if err != nil {

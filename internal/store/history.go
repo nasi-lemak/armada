@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -179,7 +180,39 @@ type seriesData struct {
 // or hourly summaries when hourly is set (including hours not yet rolled up).
 // For each series it also returns how many samples were ok and in total.
 func (s *Store) DeviceHistory(ctx context.Context, deviceID string, from time.Time, hourly bool) ([]api.HistorySeries, []int, []int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, kind, unit FROM series WHERE device_id=? ORDER BY name`, deviceID)
+	return s.history(ctx, "device_id", deviceID, from, hourly)
+}
+
+// CheckHistory returns the series named `name` on every device that has one
+// (for comparing one check across the fleet).
+func (s *Store) CheckHistory(ctx context.Context, name string, from time.Time, hourly bool) ([]api.HistorySeries, []int, []int, error) {
+	return s.history(ctx, "name", name, from, hourly)
+}
+
+// SeriesNames lists distinct series names with how many devices have each.
+func (s *Store) SeriesNames(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name, COUNT(*) FROM series GROUP BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var n string
+		var c int
+		if err := rows.Scan(&n, &c); err != nil {
+			return nil, err
+		}
+		out[n] = c
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) history(ctx context.Context, col, val string, from time.Time, hourly bool) ([]api.HistorySeries, []int, []int, error) {
+	if col != "device_id" && col != "name" {
+		return nil, nil, nil, fmt.Errorf("bad history column %q", col)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, kind, unit, device_id FROM series WHERE `+col+`=? ORDER BY name, device_id`, val)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -188,7 +221,7 @@ func (s *Store) DeviceHistory(ctx context.Context, deviceID string, from time.Ti
 	for rows.Next() {
 		var id int64
 		sd := &seriesData{}
-		if err := rows.Scan(&id, &sd.Name, &sd.Kind, &sd.Unit); err != nil {
+		if err := rows.Scan(&id, &sd.Name, &sd.Kind, &sd.Unit, &sd.DeviceID); err != nil {
 			rows.Close()
 			return nil, nil, nil, err
 		}
@@ -223,10 +256,12 @@ func (s *Store) DeviceHistory(ctx context.Context, deviceID string, from time.Ti
 			sd := byID[id]
 			p := api.HistoryPoint{T: t, S: statusName(worst)}
 			if vavg.Valid {
-				p.V = &vavg.Float64
+				// Averages pick up float noise (89.90000000000002); 4 decimals is plenty.
+				avg, lo, hi := round4(vavg.Float64), round4(vmin.Float64), round4(vmax.Float64)
+				p.V = &avg
 				sd.Numeric = true
 				if hourly {
-					p.Min, p.Max = &vmin.Float64, &vmax.Float64
+					p.Min, p.Max = &lo, &hi
 				}
 			}
 			sd.Points = append(sd.Points, p)
@@ -282,3 +317,12 @@ func (s *Store) FleetHistory(ctx context.Context, from time.Time, bucket int64) 
 
 // DB exposes the database handle to tests.
 func (s *Store) DB() *sql.DB { return s.db }
+
+// Snapshot writes a consistent copy of the database to path while the
+// server keeps running (SQLite VACUUM INTO).
+func (s *Store) Snapshot(ctx context.Context, path string) error {
+	_, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, path)
+	return err
+}
+
+func round4(v float64) float64 { return math.Round(v*1e4) / 1e4 }

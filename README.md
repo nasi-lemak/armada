@@ -339,7 +339,11 @@ Every agent reports health checks with its heartbeat, and checks in early when a
 Each device gets an overall health of `ok`, `warning` or `critical`, shown in the dashboard. Every
 status change is recorded in the activity log.
 
-### Built-in hardware checks (Linux)
+### Built-in hardware checks
+
+These run on Linux. On macOS, Windows and the BSDs, the agent checks SSD/HDD SMART health (through
+`smartctl --scan-open`) and disk space.
+
 
 | Check | What it reads | Flags |
 |---|---|---|
@@ -391,6 +395,18 @@ Every check's status and value is kept as history:
 - **Overview:** the fleet's online devices and health problems over time.
 - **Ranges:** 24 hours, 7, 30 or 90 days. Ranges longer than the raw retention show hourly averages,
   with the min–max range shaded.
+
+**Comparing one check across devices:** on the overview, pick a check, optionally filtered by labels.
+Armada charts the eight devices that need attention most: the highest values, or the least time ok. Use
+**Download CSV** on any history view to export it. From the CLI:
+
+```bash
+armadactl history <device-id> --range 7d
+```
+
+```bash
+armadactl history compare --check "temperature cpu-thermal" --label site=sg --csv > temps.csv
+```
 
 Storage stays small: one sample per check every 5 minutes is kept for 3 days, then hourly summaries
 (min, average, max and worst status) for 90 days. A device with a dozen checks levels off at about
@@ -542,6 +558,11 @@ then run `health_command` (retried). If install or the health check fails, the a
 to. [`examples/myapp/`](examples/myapp) has a complete set of hooks for a tarball deployed
 by symlink switching.
 
+**Whole-OS (A/B) image updates** with RAUC, SWUpdate or Mender use `reboot_required: true`. The agent
+reboots after `install_command`. On the next start it checks which version booted, runs the health
+check, then `confirm_command` (for example `rauc status mark-good`). If the bootloader fell back, or the
+health check fails, the update is reported as rolled back. See [`examples/os-image/`](examples/os-image).
+
 `version_command` must print exactly the version string you upload (for example `2.1.0`).
 Without it, the agent reports the last version it installed.
 
@@ -593,8 +614,17 @@ Add `--json` to any command for machine-readable output.
 | `-history-raw-retention` | `ARMADA_HISTORY_RAW_RETENTION` | `72h` |
 | `-history-retention` | `ARMADA_HISTORY_RETENTION` | `2160h` (90 days) |
 
-The data directory holds `armada.db` (SQLite), `artifacts/`, `signing.key` and
-`admin-token`. **Back it up.** Losing `signing.key` means agents that pinned the old key
+The data directory holds `armada.db` (SQLite), `artifacts/`, `signing.key`, `license.key` and
+`admin-token`. **Back it up**, for example nightly from cron:
+
+```bash
+armadactl backup -o /backups/armada-$(date +%F).tar.gz
+```
+
+The backup is a consistent snapshot taken while the server runs. It contains the database, the signing
+keys and every artifact. It holds private keys, so store it like a password. To restore, stop the
+server, extract the archive into an empty data directory, and start the server with the same admin
+token. Losing `signing.key` means agents that pinned the old key
 reject new releases.
 
 Deployment options: [`deploy/armada-server.service`](deploy/armada-server.service)
@@ -631,6 +661,8 @@ per-device key issued at enrollment.
 | `GET /api/v1/alerts[?status=firing]` | Firing and recent alerts |
 | `GET /api/v1/devices/{id}/history?range=24h\|7d\|30d\|90d` | A device's check and metric history (raw or hourly) |
 | `GET /api/v1/history/fleet?range=…` | Devices online, health problems and firing alerts over time |
+| `GET /api/v1/history/checks`, `GET /api/v1/history/compare?check=…&label=…` | One check across devices (worst eight) |
+| `GET /api/v1/backup` | Full backup (`.tar.gz`: database snapshot, keys, artifacts) |
 
 ## Security model
 
@@ -691,4 +723,5 @@ deploy/, examples/  service units, compose file, sample agent config and hooks
 - On Android, actions are limited to reboot and restarting the agent (`exec` isn't supported).
 - Android devices can't yet act as BLE gateways. That needs Nordic's Android DFU and mcumgr libraries
   in the Android agent.
-- Built-in hardware checks are Linux-only. Program monitors work on every platform.
+- On macOS and Windows, the built-in checks cover SMART and disk space only; temperature, power and
+  battery checks are Linux-only. Program monitors work everywhere.

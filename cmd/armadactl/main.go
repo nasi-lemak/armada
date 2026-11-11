@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -74,6 +75,10 @@ Monitoring and alerts:
                [--offline-minutes 10] [--repeat-minutes 0] [--label K=V]... [--no-resolved]
   rules delete <id>
   alerts [--firing]
+  history <device-id> [--range 24h|7d|30d|90d] [--check NAME] [--csv]
+  backup [-o FILE]                           download a full server backup (database, keys, artifacts)
+  history checks                             check names with history, and how many devices have each
+  history compare --check NAME [--range 7d] [--label K=V]... [--channel C] [--csv]
 
 Android:
   apps list
@@ -146,6 +151,10 @@ func (c *cli) run(args []string) error {
 		return c.rules(verb, rest)
 	case "alerts":
 		return c.alerts(append([]string{verb}, rest...))
+	case "history":
+		return c.history(verb, rest)
+	case "backup":
+		return c.backup(append([]string{verb}, rest...))
 	case "android":
 		return c.android(verb, rest)
 	case "deployments", "deployment", "deploy":
@@ -1225,5 +1234,179 @@ func (c *cli) alerts(args []string) error {
 		rows = append(rows, []string{a.Status, a.Severity, a.RuleName, firstLine(a.Summary), ago(a.StartedAt)})
 	}
 	c.table("STATUS\tSEVERITY\tRULE\tSUMMARY\tSINCE", rows)
+	return nil
+}
+
+func (c *cli) history(verb string, args []string) error {
+	fs := flag.NewFlagSet("history", flag.ContinueOnError)
+	rng := fs.String("range", "24h", "")
+	check := fs.String("check", "", "")
+	channel := fs.String("channel", "", "")
+	asCSV := fs.Bool("csv", false, "")
+	var labels multiFlag
+	fs.Var(&labels, "label", "")
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	var series []api.HistorySeries
+	if verb == "checks" {
+		var names []struct {
+			Name    string `json:"name"`
+			Devices int    `json:"devices"`
+		}
+		if err := c.do("GET", "/api/v1/history/checks", nil, &names); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(names)
+		}
+		var rows [][]string
+		for _, n := range names {
+			rows = append(rows, []string{n.Name, strconv.Itoa(n.Devices)})
+		}
+		c.table("CHECK\tDEVICES", rows)
+		return nil
+	}
+	if verb == "compare" {
+		if *check == "" {
+			return errors.New("--check is required; list the names with: armadactl history checks")
+		}
+		q := url.Values{"check": {*check}, "range": {*rng}, "channel": {*channel}}
+		for _, l := range labels {
+			q.Add("label", l)
+		}
+		var resp struct {
+			Matching int                 `json:"matching"`
+			Series   []api.HistorySeries `json:"series"`
+		}
+		if err := c.do("GET", "/api/v1/history/compare?"+q.Encode(), nil, &resp); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(resp)
+		}
+		series = resp.Series
+		if !*asCSV && resp.Matching > len(series) {
+			defer fmt.Fprintf(c.out, "\n%d devices have this check; showing the %d that need attention most.\n", resp.Matching, len(series))
+		}
+	} else {
+		if verb == "" {
+			return errors.New("usage: armadactl history <device-id> [--range 7d] [--csv]")
+		}
+		var h api.DeviceHistory
+		if err := c.do("GET", "/api/v1/devices/"+url.PathEscape(verb)+"/history?range="+url.QueryEscape(*rng), nil, &h); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(h)
+		}
+		for _, sr := range h.Series {
+			if *check == "" || sr.Name == *check {
+				series = append(series, sr)
+			}
+		}
+	}
+	_ = pos
+	if *asCSV {
+		w := csv.NewWriter(c.out)
+		w.Write([]string{"device", "series", "unit", "time", "value", "min", "max", "status"})
+		for _, sr := range series {
+			dev := sr.DeviceName
+			if dev == "" {
+				dev = verb
+			}
+			for _, p := range sr.Points {
+				w.Write([]string{dev, sr.Name, sr.Unit, time.Unix(p.T, 0).UTC().Format(time.RFC3339), num(p.V), num(p.Min), num(p.Max), p.S})
+			}
+		}
+		w.Flush()
+		return w.Error()
+	}
+	var rows [][]string
+	for _, sr := range series {
+		name := sr.Name
+		if sr.DeviceName != "" {
+			name = sr.DeviceName
+		}
+		now, lo, hi := "-", "-", "-"
+		var mn, mx *float64
+		for _, p := range sr.Points {
+			for _, v := range []*float64{p.V, p.Min, p.Max} {
+				if v == nil {
+					continue
+				}
+				if mn == nil || *v < *mn {
+					mn = v
+				}
+				if mx == nil || *v > *mx {
+					mx = v
+				}
+			}
+			if p.V != nil {
+				now = num(p.V)
+			}
+		}
+		if mn != nil {
+			lo, hi = num(mn), num(mx)
+		}
+		avail := "-"
+		if sr.Availability != nil {
+			avail = fmt.Sprintf("%.1f%%", *sr.Availability*100)
+			if sr.Name == "online" {
+				avail += " up"
+			} else {
+				avail += " ok"
+			}
+		}
+		rows = append(rows, []string{name, now, lo, hi, sr.Unit, avail, strconv.Itoa(len(sr.Points))})
+	}
+	c.table("SERIES\tLATEST\tMIN\tMAX\tUNIT\tAVAILABILITY\tPOINTS", rows)
+	return nil
+}
+
+func num(v *float64) string {
+	if v == nil {
+		return ""
+	}
+	return strconv.FormatFloat(*v, 'f', -1, 64)
+}
+
+func (c *cli) backup(args []string) error {
+	if len(args) > 0 && args[0] == "" {
+		args = args[1:]
+	}
+	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
+	out := fs.String("o", "armada-backup-"+time.Now().Format("20060102-150405")+".tar.gz", "")
+	if _, err := parse(fs, args); err != nil {
+		return err
+	}
+	req, err := http.NewRequest("GET", c.server+"/api/v1/backup", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("backup failed: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	n, err := io.Copy(f, resp.Body)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(*out)
+		return fmt.Errorf("backup interrupted: %w", err)
+	}
+	fmt.Fprintf(c.out, "wrote %s (%s). It contains the signing keys: store it securely.\n", *out, bytesH(uint64(n)))
 	return nil
 }

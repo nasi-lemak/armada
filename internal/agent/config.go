@@ -57,6 +57,14 @@ type PackageConfig struct {
 	// VersionCommand prints the installed version. If unset, the agent
 	// reports the last version it installed.
 	VersionCommand []string `json:"version_command,omitempty"`
+	// RebootRequired is for updates that take effect on reboot, such as A/B
+	// OS images (RAUC, SWUpdate, Mender). After install_command the agent
+	// reboots; when it starts again it checks version_command reports the new
+	// version, runs health_command, then confirm_command. Booting the old
+	// version (the bootloader fell back) is reported as rolled back.
+	RebootRequired bool `json:"reboot_required,omitempty"`
+	// ConfirmCommand marks a rebooted update good, e.g. ["rauc", "status", "mark-good"].
+	ConfirmCommand []string `json:"confirm_command,omitempty"`
 }
 
 // Config is the agent configuration file (JSON).
@@ -155,6 +163,9 @@ func (c *Config) Validate() error {
 	for name, p := range c.Packages {
 		if len(p.InstallCommand) == 0 {
 			return fmt.Errorf("package %q: install_command is required", name)
+		}
+		if p.RebootRequired && len(p.VersionCommand) == 0 {
+			return fmt.Errorf("package %q: reboot_required needs version_command, to tell which version booted", name)
 		}
 		if p.HealthRetries <= 0 {
 			p.HealthRetries = 3

@@ -1195,7 +1195,8 @@ function historySection(deviceId) {
   const status = h('span', { class: 'muted' });
   const el = h('section', { class: 'mt', 'aria-label': 'History' },
     h('div', { class: 'page-head' }, h('div', {}, h('h2', {}, 'History'), status),
-      rangePicker(range, v => { range = v; load(true); })),
+      h('div', { class: 'filters' }, rangePicker(range, v => { range = v; load(true); }),
+        h('button', { class: 'btn small', type: 'button', onclick: () => data && downloadCSV(`${deviceId}-history-${range}.csv`, data.series, deviceId) }, 'Download CSV'))),
     charts, h('div', { class: 'spacer' }), timeline);
   let renderers = [];
 
@@ -1251,10 +1252,55 @@ function historySection(deviceId) {
 }
 
 function fleetHistorySection() {
-  let range = '24h', data = null, fetchedAt = 0;
+  let range = '24h', data = null, fetchedAt = 0, cmp = null;
   const grid = h('div', { class: 'grid cols-2' });
+  const checkSel = h('select', { 'aria-label': 'Compare check' }, h('option', { value: '' }, 'Compare a check across devices…'));
+  const cmpLabels = h('input', { placeholder: 'labels, e.g. site=sg', 'aria-label': 'Compare labels', size: '16' });
+  const cmpBox = h('div', {});
   const el = h('section', { class: 'mt', 'aria-label': 'Fleet history' },
-    h('div', { class: 'page-head' }, h('h2', {}, 'Fleet history'), rangePicker(range, v => { range = v; load(true); })), grid);
+    h('div', { class: 'page-head' }, h('h2', {}, 'Fleet history'),
+      h('div', { class: 'filters' }, rangePicker(range, v => { range = v; load(true); }), checkSel, cmpLabels)),
+    grid, h('div', { class: 'spacer' }), cmpBox);
+  checkSel.addEventListener('change', () => loadCompare());
+  cmpLabels.addEventListener('change', () => loadCompare());
+  async function loadCompare() {
+    if (!checkSel.value) { cmp = null; replace(cmpBox); return; }
+    let labels;
+    try { labels = parseLabels(cmpLabels.value); } catch (err) { return toast(err.message, true); }
+    const q = new URLSearchParams({ check: checkSel.value, range });
+    for (const [k, v] of Object.entries(labels)) q.append('label', k + '=' + v);
+    cmp = await guard(() => api('GET', '/api/v1/history/compare?' + q));
+    drawCompare();
+  }
+  function drawCompare() {
+    if (!cmp) return;
+    const from = Math.floor(new Date(cmp.from).getTime() / 1000), to = Math.floor(new Date(cmp.to).getTime() / 1000);
+    const series = cmp.series.map((s, i) => ({ name: s.device_name, label: s.device_name, cls: 'c' + (i + 1), points: s.points, src: s }));
+    const unit = cmp.series[0]?.unit || '';
+    const numeric = cmp.series.some(s => s.numeric);
+    const c = chartCard(`${cmp.check} — by device`, cmp.matching > series.length ? `${series.length} of ${cmp.matching} devices, worst first` : `${series.length} device${series.length === 1 ? '' : 's'}`,
+      body => {
+        if (!series.length) { replace(body, h('div', { class: 'viz-empty' }, 'No devices match.')); return; }
+        if (numeric) {
+          Charts.line(body, { from, to, resolution: cmp.resolution_seconds, unit, endLabels: series.length <= 4, title: cmp.check, series });
+        } else {
+          replace(body, ...series.map(s => {
+            const cell = h('div', { class: 'strip-cell' });
+            setTimeout(() => Charts.strip(cell, { from, to, resolution: cmp.resolution_seconds, title: s.name, points: s.points }));
+            return h('div', { class: 'timeline-row' }, h('div', { class: 'small' }, s.name), cell,
+              h('div', { class: 'pct' }, s.src.availability == null ? '—' : (s.src.availability * 100).toFixed(1) + '% ok'));
+          }));
+        }
+        body.prepend(h('div', { class: 'legend mb' }, series.map(s => h('span', {}, h('span', { class: 'sw line ' + s.cls }),
+          h('a', { href: '#/devices/' + s.src.device_id }, s.name))),
+          h('button', { class: 'btn ghost small', type: 'button', onclick: () => downloadCSV(`compare-${cmp.check}-${range}.csv`, cmp.series) }, 'Download CSV')));
+      },
+      () => series.flatMap(s => [...s.points].reverse().map(p => [s.name, Charts.timeFull(p.t), p.v == null ? '—' : Charts.fmtNum(p.v), p.s])),
+      ['Device', 'Time', 'Value' + (unit ? ` (${unit})` : ''), 'Status']);
+    replace(cmpBox, c.card);
+    c.render();
+    renderers.push(c.render);
+  }
   let renderers = [];
   function draw() {
     if (!data) return;
@@ -1286,7 +1332,26 @@ function fleetHistorySection() {
     fetchedAt = Date.now();
     data = await api('GET', `/api/v1/history/fleet?range=${range}`);
     draw();
+    if (checkSel.options.length === 1) {
+      const names = await api('GET', '/api/v1/history/checks');
+      append(checkSel, names.filter(n => n.name !== 'online').map(n => h('option', { value: n.name }, `${n.name} (${n.devices})`)));
+    }
+    if (force && checkSel.value) await loadCompare();
+    else drawCompare();
   }
   onResize(el, () => renderers.forEach(r => r()));
   return { el, load: () => guard(() => load(false)) };
+}
+
+// CSV export of history series (client-side, from the data already loaded).
+function downloadCSV(filename, series, fallbackDevice) {
+  const esc = v => (v === null || v === undefined ? '' : /[",\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : String(v));
+  const lines = [['device', 'series', 'unit', 'time', 'value', 'min', 'max', 'status'].join(',')];
+  for (const s of series) for (const p of s.points) {
+    lines.push([s.device_name || fallbackDevice || '', s.name, s.unit || '', new Date(p.t * 1000).toISOString(), p.v, p.min, p.max, p.s].map(esc).join(','));
+  }
+  const url = URL.createObjectURL(new Blob([lines.join('\n') + '\n'], { type: 'text/csv' }));
+  const a = h('a', { href: url, download: filename.replace(/[^\w.-]+/g, '-').replace(/-+/g, '-') });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
