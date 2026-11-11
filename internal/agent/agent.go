@@ -51,6 +51,7 @@ type Agent struct {
 	interval time.Duration
 	wg       sync.WaitGroup
 	health   *healthRunner
+	gw       *gateway
 }
 
 // New creates an agent from a validated config.
@@ -68,6 +69,9 @@ func New(cfg *Config, log *slog.Logger) (*Agent, error) {
 	windows, _ := ParseWindows(cfg.MaintenanceWindow)
 	a := &Agent{cfg: cfg, log: log, state: st, windows: windows, Reexec: reexec, Now: time.Now, interval: 30 * time.Second,
 		health: newHealthRunner(cfg.Health)}
+	if cfg.Peripherals != nil {
+		a.gw = newGateway(a, cfg.Peripherals)
+	}
 	a.client, err = newClient(cfg, func() string { return a.state.get().DeviceKey })
 	if err != nil {
 		return nil, err
@@ -95,6 +99,23 @@ func (a *Agent) Run(ctx context.Context) error {
 		defer a.wg.Done()
 		a.healthLoop(ctx)
 	}()
+	if a.gw != nil {
+		a.wg.Add(2)
+		go func() {
+			defer a.wg.Done()
+			a.gw.work(ctx)
+		}()
+		go func() {
+			defer a.wg.Done()
+			for ctx.Err() == nil {
+				a.gw.scanIfDue(ctx)
+				select {
+				case <-ctx.Done():
+				case <-time.After(15 * time.Second):
+				}
+			}
+		}()
+	}
 	backoff := time.Second
 	for {
 		err := a.CheckIn(ctx)
@@ -225,6 +246,9 @@ func (a *Agent) CheckIn(ctx context.Context) error {
 		Status:   status,
 		Health:   a.health.snapshot(),
 	}
+	if a.gw != nil {
+		req.Peripherals = a.gw.reports()
+	}
 	var resp api.HeartbeatResponse
 	if err := a.client.do(ctx, "POST", "/api/v1/agent/heartbeat", req, &resp); err != nil {
 		return err
@@ -235,6 +259,9 @@ func (a *Agent) CheckIn(ctx context.Context) error {
 		a.mu.Unlock()
 	}
 	a.health.setMonitors(resp.Monitors)
+	if a.gw != nil && len(resp.PeripheralUpdates) > 0 {
+		a.gw.enqueue(resp.PeripheralUpdates)
+	}
 	a.confirmSelfUpdate()
 	a.flushOutbox(ctx)
 	if resp.Update != nil {

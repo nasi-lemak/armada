@@ -93,6 +93,9 @@ type Config struct {
 
 	// Health tunes the built-in hardware checks (storage, temperature, power…).
 	Health HealthConfig `json:"health,omitempty"`
+
+	// Peripherals makes this agent a gateway for nearby devices (BLE sensors…).
+	Peripherals *PeripheralsConfig `json:"peripherals,omitempty"`
 }
 
 // LoadConfig reads a JSON config file. A missing file yields an empty config
@@ -143,6 +146,11 @@ func (c *Config) Validate() error {
 	}
 	if _, err := ParseWindows(c.MaintenanceWindow); err != nil {
 		return err
+	}
+	if c.Peripherals != nil {
+		if err := c.Peripherals.Validate(); err != nil {
+			return err
+		}
 	}
 	for name, p := range c.Packages {
 		if len(p.InstallCommand) == 0 {

@@ -19,6 +19,9 @@ type DeviceInfo struct {
 	MachineID    string   `json:"machine_id,omitempty"`
 	IPs          []string `json:"ips,omitempty"`
 	AgentVersion string   `json:"agent_version"`
+	// Model and Protocol describe peripherals (hardware model, firmware update method).
+	Model    string `json:"model,omitempty"`
+	Protocol string `json:"protocol,omitempty"`
 }
 
 // Metrics is a point-in-time health snapshot reported with every heartbeat.
@@ -31,6 +34,9 @@ type Metrics struct {
 	DiskTotalBytes    uint64  `json:"disk_total_bytes"`
 	DiskFreeBytes     uint64  `json:"disk_free_bytes"` // available to unprivileged users
 	DiskUsedBytes     uint64  `json:"disk_used_bytes"`
+	// Peripherals only.
+	RSSI           int `json:"rssi,omitempty"`
+	BatteryPercent int `json:"battery_percent,omitempty"`
 }
 
 // Device is a managed machine as seen by the control plane.

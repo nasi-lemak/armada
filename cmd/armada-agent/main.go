@@ -74,10 +74,12 @@ func run() error {
 		}
 		a.Wait()
 		a.RunHealthChecks(ctx)
+		a.ScanPeripherals(ctx)
 		if err := a.CheckIn(ctx); err != nil {
 			return err
 		}
 		a.Wait()
+		a.FlashPeripherals(ctx)
 		return nil
 	}
 	return a.Run(ctx)

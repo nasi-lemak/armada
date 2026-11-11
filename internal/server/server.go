@@ -35,6 +35,8 @@ type Config struct {
 	HeartbeatInterval time.Duration
 	// OfflineAfter is how long without a heartbeat before a device shows as offline.
 	OfflineAfter time.Duration
+	// PeripheralOfflineAfter is the same for peripherals, which gateways report less often.
+	PeripheralOfflineAfter time.Duration
 	// UpdateTimeout fails updates stuck downloading/installing for this long.
 	UpdateTimeout time.Duration
 	// EngineInterval is how often rollouts are evaluated.
@@ -80,13 +82,14 @@ type AndroidConfig struct {
 // DefaultConfig returns sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		DataDir:           "./data",
-		HeartbeatInterval: 30 * time.Second,
-		OfflineAfter:      2 * time.Minute,
-		UpdateTimeout:     time.Hour,
-		EngineInterval:    10 * time.Second,
-		MaxArtifactBytes:  2 << 30,
-		EventRetention:    30 * 24 * time.Hour,
+		DataDir:                "./data",
+		HeartbeatInterval:      30 * time.Second,
+		OfflineAfter:           2 * time.Minute,
+		PeripheralOfflineAfter: 20 * time.Minute,
+		UpdateTimeout:          time.Hour,
+		EngineInterval:         10 * time.Second,
+		MaxArtifactBytes:       2 << 30,
+		EventRetention:         30 * 24 * time.Hour,
 		DefaultStrategy: api.Strategy{
 			Stages:               []int{5, 25, 50, 100},
 			StageDurationSeconds: 15 * 60,

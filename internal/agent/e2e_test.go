@@ -76,10 +76,16 @@ func (h *harness) admin(method, path string, in, out any) {
 
 func (h *harness) upload(pkg, version string, content []byte) *api.Release {
 	h.t.Helper()
+	return h.uploadOS(pkg, version, "", content)
+}
+
+func (h *harness) uploadOS(pkg, version, osName string, content []byte) *api.Release {
+	h.t.Helper()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	mw.WriteField("package", pkg)
 	mw.WriteField("version", version)
+	mw.WriteField("os", osName)
 	fw, _ := mw.CreateFormFile("file", "artifact")
 	fw.Write(content)
 	mw.Close()

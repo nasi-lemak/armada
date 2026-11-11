@@ -70,7 +70,12 @@ func (s *Server) handleSigningKey(w http.ResponseWriter, r *http.Request) {
 // ---- devices ----
 
 func (s *Server) decorate(d *api.Device) {
-	if s.now().Sub(d.LastSeenAt) > s.cfg.OfflineAfter {
+	limit := s.cfg.OfflineAfter
+	if d.ParentID != "" {
+		// Gateways scan for peripherals every few minutes, not every heartbeat.
+		limit = max(limit, s.cfg.PeripheralOfflineAfter)
+	}
+	if s.now().Sub(d.LastSeenAt) > limit {
 		d.Status = api.DeviceOffline
 	} else {
 		d.Status = api.DeviceOnline
@@ -105,10 +110,11 @@ func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 type deviceDetail struct {
-	Device  *api.Device         `json:"device"`
-	Updates []*api.DeviceUpdate `json:"updates"`
-	Actions []*api.Action       `json:"actions"`
-	Events  []*api.Event        `json:"events"`
+	Device      *api.Device         `json:"device"`
+	Peripherals []*api.Device       `json:"peripherals"`
+	Updates     []*api.DeviceUpdate `json:"updates"`
+	Actions     []*api.Action       `json:"actions"`
+	Events      []*api.Event        `json:"events"`
 }
 
 func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +138,18 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	det.Updates, det.Actions, det.Events = nonNil(det.Updates), nonNil(det.Actions), nonNil(det.Events)
+	all, err := s.store.ListDevices(ctx)
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	for _, p := range all {
+		if p.ParentID == d.ID {
+			s.decorate(p)
+			det.Peripherals = append(det.Peripherals, p)
+		}
+	}
+	det.Updates, det.Actions, det.Events, det.Peripherals = nonNil(det.Updates), nonNil(det.Actions), nonNil(det.Events), nonNil(det.Peripherals)
 	writeJSON(w, http.StatusOK, det)
 }
 

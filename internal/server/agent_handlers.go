@@ -116,6 +116,12 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, dev *ap
 		s.internalError(w, err)
 		return
 	}
+	if len(req.Peripherals) > 0 {
+		if resp.PeripheralUpdates, err = s.handlePeripherals(ctx, dev, req.Peripherals); err != nil {
+			s.internalError(w, err)
+			return
+		}
+	}
 	if strings.EqualFold(dev.Info.OS, "android") {
 		resp.ManagedPackages = s.managedPackages(r)
 		resp.Policy = &api.DevicePolicy{DisableDebugging: s.cfg.Android.DisableDebugging, BlockUninstall: true}
@@ -155,6 +161,15 @@ func (s *Server) decideUpdate(ctx context.Context, dev *api.Device, busy bool) (
 			continue
 		}
 		if !isAndroid && strings.EqualFold(rel.OS, "android") {
+			continue
+		}
+		// Peripheral firmware (OS "ble") only goes to peripherals, and peripherals only get firmware.
+		if (dev.Info.OS == api.PeripheralOS) != strings.EqualFold(rel.OS, api.PeripheralOS) {
+			continue
+		}
+		// Firmware is per hardware model: never offer one model's image to another,
+		// even when the device has no version of that package yet.
+		if dev.Info.OS == api.PeripheralOS && rel.Package != dev.Info.Model {
 			continue
 		}
 		prog, err := s.store.GetDeviceUpdate(ctx, d.ID, dev.ID)
@@ -226,6 +241,15 @@ func (s *Server) handleUpdateReport(w http.ResponseWriter, r *http.Request, dev 
 		return
 	}
 	ctx := r.Context()
+	if rep.DeviceID != "" && rep.DeviceID != dev.ID {
+		// A gateway reporting for one of its peripherals.
+		p, err := s.store.GetDevice(ctx, rep.DeviceID)
+		if err != nil || p.ParentID != dev.ID {
+			writeError(w, http.StatusForbidden, "device is not a peripheral of this gateway")
+			return
+		}
+		dev = p
+	}
 	u, err := s.store.GetDeviceUpdate(ctx, rep.DeploymentID, dev.ID)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "no such update for this device")
@@ -257,18 +281,11 @@ func (s *Server) handleUpdateReport(w http.ResponseWriter, r *http.Request, dev 
 
 func (s *Server) handleAgentArtifact(w http.ResponseWriter, r *http.Request, dev *api.Device) {
 	id := r.PathValue("id")
-	// Devices may only download releases they have been offered.
-	ups, err := s.store.ListDeviceUpdates(r.Context(), "", dev.ID)
+	// Devices may only download releases offered to them or their peripherals.
+	allowed, err := s.store.ReleaseOfferedToGateway(r.Context(), id, dev.ID)
 	if err != nil {
 		s.internalError(w, err)
 		return
-	}
-	allowed := false
-	for _, u := range ups {
-		if u.ReleaseID == id {
-			allowed = true
-			break
-		}
 	}
 	if !allowed {
 		writeError(w, http.StatusForbidden, "release not offered to this device")

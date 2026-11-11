@@ -1,0 +1,35 @@
+{
+  "server_url": "https://fleet.example.com",
+  "enrollment_token": "et_REPLACE_ME",
+  "state_dir": "/var/lib/armada",
+
+  "health": {
+    "disk_warn_percent": 85,
+    "temperature_warn_c": 75,
+    "readonly_mounts_ok": []
+  },
+
+  "peripherals": {
+    "scan_interval": "5m",
+    "discovery": [
+      {
+        "type": "bluez",
+        "adapter": "hci0",
+        "scan_seconds": 10,
+        "match": { "name_prefix": "Acme-", "service_uuid": "8d53dc1d-1db7-4cd3-868b-8a527460aa84" },
+        "model": "acme-temp-v2",
+        "protocol": "mcumgr",
+        "read_firmware_version": true
+      },
+      {
+        "type": "command",
+        "command": ["/usr/local/lib/armada/discover-vendor-gateway.sh"]
+      }
+    ],
+    "drivers": {
+      "mcumgr": { "command": ["/usr/local/lib/armada/ble/mcumgr-dfu.sh"], "timeout": "20m" },
+      "nordic-dfu": { "command": ["/usr/local/lib/armada/ble/nordic-dfu.sh"] },
+      "esp-ota": { "command": ["/usr/local/lib/armada/ble/custom-dfu.sh"] }
+    }
+  }
+}

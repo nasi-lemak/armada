@@ -1221,3 +1221,39 @@ func (s *Store) PruneAlerts(ctx context.Context, before time.Time) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM alerts WHERE status<>? AND started_at < ?`, api.AlertFiring, ts(before))
 	return err
 }
+
+// UpsertPeripheral creates or refreshes a peripheral reported by a gateway.
+// New peripherals take the gateway's channel and labels; afterwards those
+// are managed like any device's.
+func (s *Store) UpsertPeripheral(ctx context.Context, d *api.Device) (created bool, err error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE devices SET info=?, metrics=?, packages=?, last_seen_at=?, parent_id=?, health=? WHERE id=?`,
+		mustJSON(d.Info), mustJSON(d.Metrics), mustJSON(d.Packages), ts(d.LastSeenAt), d.ParentID, mustJSON(nonNilChecks(d.Checks)), d.ID)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return false, nil
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash, hw_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		d.ID, d.Name, d.Channel, mustJSON(d.Labels), mustJSON(d.Info), mustJSON(d.Metrics), mustJSON(d.Packages),
+		"", ts(d.EnrolledAt), ts(d.LastSeenAt), "", 0, mustJSON(nonNilChecks(d.Checks)), d.ParentID,
+		// Peripherals have no credentials; this placeholder can never match a key hash.
+		"peripheral:"+d.ID, "")
+	return err == nil, err
+}
+
+func nonNilChecks(c []api.CheckResult) []api.CheckResult {
+	if c == nil {
+		return []api.CheckResult{}
+	}
+	return c
+}
+
+// ReleaseOfferedToGateway reports whether a release was offered to the
+// gateway itself or to one of its peripherals.
+func (s *Store) ReleaseOfferedToGateway(ctx context.Context, releaseID, gatewayID string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM device_updates u JOIN devices d ON d.id = u.device_id
+		WHERE u.release_id=? AND (d.id=? OR d.parent_id=?)`, releaseID, gatewayID, gatewayID).Scan(&n)
+	return n > 0, err
+}
