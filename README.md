@@ -54,6 +54,17 @@ It has three parts, all in Go with no external services:
   and each device opts in.
 - **Resumable downloads** for devices on poor links (HTTP Range).
 - **Activity log** of enrollments, updates, failures, pauses and actions.
+- **Health monitoring** (see [below](#health-monitoring)):
+  - Hardware checks run automatically. They cover SSD/HDD SMART data, NVMe wear, eMMC wear, SD-card
+    failure signs, RAID, temperature, power and under-voltage, battery, disk space and memory.
+  - You can add checks for your programs, defined on the server: systemd unit, process, HTTP, TCP, or any
+    Nagios-style command.
+- **Alerts** to any webhook (with a body template and signature, for PagerDuty, Teams, Opsgenie and
+  similar), Slack or email. They cover devices going offline, unhealthy checks, failed updates and paused
+  rollouts.
+- **BLE and other peripherals** (see [below](#peripherals-ble-sensors-and-other-devices)): any agent can be a
+  gateway that discovers nearby devices and rolls out their firmware. Drivers exist for MCUboot/Zephyr,
+  Nordic DFU, or your own tool.
 - **Web dashboard** built into the server binary (no build step, strict CSP).
 - **One-line onboarding** with `curl …/install.sh | sh`.
 - **Android devices you provide to customers** (see [below](#android-devices)):
@@ -322,6 +333,139 @@ default lifetime is 1 hour and you can set it per app. Reinstating restores it.
 | `-android-allow-adb` | off | Don't disable USB debugging |
 | `-attestation-status-url` | Google's list | Revocation list for attestation keys; set it to empty to disable |
 
+## Health monitoring
+
+Every agent reports health checks with its heartbeat, and checks in early when a status changes.
+Each device gets an overall health of `ok`, `warning` or `critical`, shown in the dashboard. Every
+status change is recorded in the activity log.
+
+### Built-in hardware checks (Linux)
+
+| Check | What it reads | Flags |
+|---|---|---|
+| SATA/SAS SSD & HDD | SMART via `smartctl` (install `smartmontools`) | failed self-assessment, reallocated/pending/uncorrectable sectors, SSD wear |
+| NVMe | SMART/health log via `smartctl` | % of rated life used, spare capacity, media errors, critical warnings |
+| eMMC | the chip's own wear estimate (`life_time`, `pre_eol_info`) | ≥80% of rated life used, reserve blocks running out |
+| SD cards | no wear reporting exists on consumer cards, so it watches for failure signs | kernel I/O and filesystem errors, filesystems the kernel remounted read-only |
+| Kernel log | I/O and filesystem errors per disk (`/dev/kmsg`) | any errors in the last 24h (≥20 is critical) |
+| Read-only filesystems | mounts that should be writable (per `/etc/fstab`, or remounted by the kernel after errors) | critical |
+| RAID | `/proc/mdstat` | degraded or rebuilding arrays |
+| Disk space / inodes | every mounted filesystem | 85% / 95% (configurable) |
+| Memory | available memory | below 10% / 5% |
+| Temperature | thermal zones | 80°C / 90°C (configurable) |
+| Power | Raspberry Pi firmware throttling flags | under-voltage now or since boot, throttling |
+| Battery | power-supply class | battery health problems, low charge on battery power |
+
+Android agents report battery health, charge and temperature; device thermal status; storage space; and
+memory. Android doesn't let apps read flash wear. Thresholds and exceptions go in the agent config's
+`health` section; see [`deploy/gateway.example.json`](deploy/gateway.example.json).
+
+### Program checks (monitors)
+
+Monitors are defined once on the server. Every device matching the monitor's labels runs them:
+
+```bash
+armadactl monitors create --name kiosk-web --type http --target http://127.0.0.1:8080/healthz --contains '"db":"up"' --label role=kiosk
+```
+
+```bash
+armadactl monitors create --name app-service --type systemd --target myapp.service
+```
+
+```bash
+armadactl monitors create --name queue --type command -- /usr/lib/nagios/plugins/check_procs -c 1:5 -C worker
+```
+
+The types are `http` (status code, body content, latency), `tcp`, `systemd`, `process` and `command`. A
+command follows the Nagios plugin convention: exit 0 is ok, 1 is warning, 2 is critical, and the first
+line of output is the message. That means existing Nagios and Icinga plugins work unchanged.
+
+## Alerts
+
+Alerts tie a **rule** to one or more **channels**. You can set them up on the dashboard's **Monitoring**
+page or with the CLI.
+
+| Condition | Fires when | Resolves when |
+|---|---|---|
+| `health` | a matching device has a check at `warning` or `critical`. You can limit it to some kinds of check, such as `storage` or `power`. | the checks recover |
+| `device_offline` | a device hasn't checked in for N minutes | it checks in |
+| `update_failed` | an update fails or rolls back. All failures in one rollout fold into one alert. | after an hour |
+| `deployment_paused` | a rollout auto-paused (or was paused) | it is resumed or aborted |
+
+Alerts notify when they fire and when their severity escalates. They can repeat every N minutes, and
+notify again when they resolve. Delivery is retried, and failures show up in the activity log.
+
+**Channels:**
+- **Webhook:** any URL, with custom headers. Set a secret and every request carries
+  `X-Armada-Signature: sha256=<HMAC of "timestamp.body">` and `X-Armada-Timestamp`. Without a body
+  template, the body is Armada's JSON notification. With one, it's a Go template, so you can fit
+  PagerDuty, Opsgenie, Microsoft Teams, Discord, Telegram or your own API. For example, PagerDuty Events v2:
+
+  ```
+  {"routing_key":"<key>","event_action":"{{if eq .Status "resolved"}}resolve{{else}}trigger{{end}}",
+   "dedup_key":"{{.AlertID}}","payload":{"summary":{{json .Summary}},"severity":"{{.Severity}}","source":"{{.DeviceName}}"}}
+  ```
+
+  Template fields: `.Status`, `.Severity`, `.Rule`, `.Condition`, `.Summary`, `.DeviceID`, `.DeviceName`,
+  `.DeviceLabels`, `.DeploymentID`, `.URL`, `.StartedAt`, `.ResolvedAt`, `.Count`, `.AlertID`.
+  Helper functions: `json`, `upper`, `lower`.
+- **Slack:** an incoming webhook URL.
+- **Email:** SMTP with STARTTLS on 587 or implicit TLS on 465.
+
+```bash
+armadactl channels create --name oncall --type webhook --url https://events.pagerduty.com/v2/enqueue --template "$(cat pd.tmpl)"
+```
+
+```bash
+armadactl rules create --name "Storage failing" --condition health --min-severity warning --kind storage --channel <id>
+```
+
+Set `-public-url` on the server so notifications link to the device page. Secrets aren't returned by
+the API.
+
+## Peripherals: BLE sensors and other devices
+
+Devices that can't run an agent can be managed through a **gateway**: any Linux agent near them, such as
+a Raspberry Pi or an industrial gateway. Each peripheral becomes a device in the fleet, linked to its
+gateway. It has its own firmware version, battery, signal strength, health, labels, update history and
+alerts. Staged rollouts, auto-pause and offline alerts work for peripherals just like for other devices.
+
+**Discovery** (`peripherals.discovery` in the agent config):
+- `bluez` scans with the Linux Bluetooth stack. It matches devices by name prefix, service UUID,
+  manufacturer ID or address. It reads battery level from the Battery Service and, optionally, the
+  firmware version from the standard Device Information Service.
+- `command` runs any program that prints JSON. Use it for vendor gateways, USB or serial dongles, or
+  Zigbee, Thread and LoRa bridges ([example](examples/ble/discover-example.sh)).
+
+**Firmware updates:**
+1. Upload the image as a release with `--os ble` and the hardware **model** as the package name.
+   Firmware is only ever offered to peripherals of exactly that model.
+
+   ```bash
+   armadactl releases upload --package acme-temp-v2 --version 1.4.0 --os ble firmware.bin
+   ```
+
+2. Deploy it like any release.
+3. The gateway checks the image's signature and SHA-256, then runs the **driver** for the device's
+   protocol.
+4. It then rediscovers the device and checks that it reports the new version. If the bootloader rolled
+   back, the update is marked failed.
+
+A gateway flashes one device at a time.
+
+**Drivers** are commands, so any stack works. [`examples/ble/`](examples/ble) has starting points:
+- **MCUboot/Zephyr** over SMP (`mcumgr`), using test-then-confirm, so a bad image is reverted by the
+  bootloader;
+- **Nordic Secure DFU** (`nrfutil`);
+- a template for **ESP32, TI, Silicon Labs or in-house** OTA tools.
+
+See [`deploy/gateway.example.json`](deploy/gateway.example.json) for a complete gateway config.
+
+**Testing status:** the gateway logic, the server side and the discovery-command path are tested end to
+end with simulated devices, including a bootloader rollback and a sensor of the wrong model. The BlueZ
+scanner and the example driver scripts haven't been run against real Bluetooth hardware yet, so pilot
+them with one gateway first.
+
 ## Agent configuration
 
 `/etc/armada/agent.json` (see [`deploy/agent.example.json`](deploy/agent.example.json)):
@@ -460,6 +604,10 @@ per-device key issued at enrollment.
 | `POST /api/v1/android/provisioning` | Android setup QR code for an enrollment token |
 | `POST /api/v1/agent/challenge`, `POST /api/v1/agent/license` | Attestation and license protocol |
 | `GET /api/v1/license/jwks` | Public keys for verifying licenses |
+| `GET/POST /api/v1/monitors`, `PUT/DELETE /api/v1/monitors/{id}` | Program health checks |
+| `GET/POST /api/v1/channels`, `PUT/DELETE /api/v1/channels/{id}`, `POST …/{id}/test` | Notification channels |
+| `GET/POST /api/v1/alert-rules`, `PUT/DELETE /api/v1/alert-rules/{id}` | Alert rules |
+| `GET /api/v1/alerts[?status=firing]` | Firing and recent alerts |
 
 ## Security model
 
@@ -518,3 +666,7 @@ deploy/, examples/  service units, compose file, sample agent config and hooks
 - There are no delta updates; every update downloads the full artifact.
 - The agent's metrics are richest on Linux. Other platforms report the basics.
 - On Android, actions are limited to reboot and restarting the agent (`exec` isn't supported).
+- Health and metrics show current values only; there's no history or charts yet.
+- Android devices can't yet act as BLE gateways. That needs Nordic's Android DFU and mcumgr libraries
+  in the Android agent.
+- Built-in hardware checks are Linux-only. Program monitors work on every platform.

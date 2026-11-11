@@ -160,11 +160,14 @@ function parseLabels(s) {
 }
 
 const STATUS_TONE = {
-  online: 'ok', offline: 'bad',
+  online: 'ok', offline: 'bad', ok: 'ok', warning: 'warn', critical: 'bad', unknown: '', firing: 'bad', resolved: 'ok',
+  enabled: 'ok', disabled: '',
   running: 'info', paused: 'warn', aborted: 'bad', completed: 'ok',
   succeeded: 'ok', failed: 'bad', rolled_back: 'warn', pending: '', downloading: 'info', installing: 'info',
   queued: '', sent: 'info', rejected: 'warn', revoked: 'bad', active: 'ok', attested: 'ok', 'attested (unlocked)': 'warn',
 };
+function healthRank(s) { return { ok: 0, unknown: 1, warning: 2, critical: 3 }[s] ?? 1; }
+
 function badge(status) {
   const tone = STATUS_TONE[status] || '';
   return h('span', { class: 'badge ' + tone }, h('span', { class: 'dot ' + (tone === 'info' ? '' : tone) }), status.replace('_', ' '));
@@ -221,6 +224,7 @@ const routes = [
   [/^#\/releases$/, 'releases', viewReleases],
   [/^#\/enroll$/, 'enroll', viewEnroll],
   [/^#\/apps$/, 'apps', viewApps],
+  [/^#\/monitoring$/, 'monitoring', viewMonitoring],
   [/^#\/activity$/, 'activity', viewActivity],
 ];
 
@@ -277,9 +281,12 @@ async function viewOverview(root) {
       h('div', { class: 'label' }, label), h('div', { class: 'value' }, value), h('div', { class: 'hint' }, hint));
     const pct = sum.devices ? Math.round(100 * sum.online / sum.devices) : 0;
     replace(stats,
-      tile('Devices', sum.devices, Object.entries(sum.channels).map(([c, n]) => `${n} ${c}`).join(' · ') || 'none enrolled', '#/devices'),
-      tile('Online', sum.online, sum.devices ? pct + '% of fleet' : '—', '#/devices'),
-      tile('Offline', sum.offline, sum.offline ? 'needs attention' : 'all reporting', '#/devices'),
+      tile('Devices', sum.devices, [Object.entries(sum.channels).map(([c, n]) => `${n} ${c}`).join(' · ') || 'none enrolled',
+        sum.peripherals ? ` · ${sum.peripherals} peripherals` : ''].join(''), '#/devices'),
+      tile('Online', sum.online, sum.devices ? `${pct}% · ${sum.offline} offline` : '—', '#/devices'),
+      tile('Health issues', sum.health_critical + sum.health_warning,
+        sum.health_critical + sum.health_warning ? `${sum.health_critical} critical · ${sum.health_warning} warning` : 'all healthy', '#/devices'),
+      tile('Firing alerts', sum.firing_alerts, sum.firing_alerts ? 'see Monitoring' : 'nothing firing', '#/monitoring'),
       tile('Active rollouts', sum.active_deployments, `${sum.releases} releases available`, '#/deployments'));
 
     const shown = active.slice(0, 5);
@@ -324,32 +331,38 @@ function eventFeed(events) {
 async function viewDevices(root) {
   const search = h('input', { type: 'search', placeholder: 'Search name, ID, IP, label…', 'aria-label': 'Search devices' });
   const status = h('select', { 'aria-label': 'Status filter' }, h('option', { value: '' }, 'All statuses'), h('option', { value: 'online' }, 'Online'), h('option', { value: 'offline' }, 'Offline'));
+  const healthSel = h('select', { 'aria-label': 'Health filter' }, ['', 'critical', 'warning', 'unknown', 'ok'].map(v => h('option', { value: v }, v ? 'Health: ' + v : 'Any health')));
+  const kindSel = h('select', { 'aria-label': 'Kind filter' }, [['', 'All kinds'], ['agent', 'Agents'], ['peripheral', 'Peripherals']].map(([v, l]) => h('option', { value: v }, l)));
   const list = h('div', { class: 'card flush' });
   const count = h('span', {});
   append(root, pageHead('Devices', count, h('a', { class: 'btn primary', href: '#/enroll' }, 'Enroll devices')),
-    h('div', { class: 'toolbar' }, search, status), h('div', { class: 'spacer' }), list);
+    h('div', { class: 'toolbar' }, search, status, healthSel, kindSel), h('div', { class: 'spacer' }), list);
   let devices = [];
   function render() {
     const q = search.value.trim().toLowerCase();
-    const shown = devices.filter(d => (!status.value || d.status === status.value) && (!q || [
-      d.id, d.name, d.channel, d.info.hostname, ...(d.info.ips || []),
+    const names = Object.fromEntries(devices.map(d => [d.id, d.name]));
+    const shown = devices.filter(d => (!status.value || d.status === status.value) && (!healthSel.value || d.health === healthSel.value) &&
+      (!kindSel.value || (kindSel.value === 'peripheral') === !!d.parent_id) && (!q || [
+      d.id, d.name, d.channel, d.info.hostname, d.info.model, d.info.machine_id, ...(d.info.ips || []),
       ...Object.entries(d.labels).map(([k, v]) => k + '=' + v),
     ].some(s => (s || '').toLowerCase().includes(q))));
     replace(count, `${devices.length} enrolled · ${devices.filter(d => d.status === 'online').length} online`);
-    replace(list, table(['Device', 'Status', 'Channel', 'Platform', 'Packages', 'Labels', 'Last seen'],
+    replace(list, table(['Device', 'Status', 'Health', 'Channel', 'Platform', 'Packages', 'Labels', 'Last seen'],
       shown.map(d => h('tr', { class: 'clickable', onclick: () => { location.hash = '#/devices/' + d.id; } },
         h('td', {}, h('div', {}, h('strong', {}, d.name)), h('div', { class: 'muted mono' }, d.id),
+          d.parent_id ? h('div', { class: 'muted' }, 'via ', names[d.parent_id] || d.parent_id) : null,
           d.agent_status ? h('div', { class: 'muted' }, d.agent_status) : null),
         h('td', {}, badge(d.status), d.license_revoked ? h('div', {}, badge('revoked')) : null),
+        h('td', {}, badge(d.health || 'ok')),
         h('td', {}, d.channel),
-        h('td', { class: 'nowrap' }, `${d.info.os || '?'}/${d.info.arch || '?'}`),
+        h('td', { class: 'nowrap' }, d.parent_id ? `BLE · ${d.info.model}` : `${d.info.os || '?'}/${d.info.arch || '?'}`),
         h('td', {}, pkgChips(d.packages)),
         h('td', {}, labelChips(d.labels)),
         h('td', { class: 'nowrap', title: d.last_seen_at }, ago(d.last_seen_at)))),
       devices.length ? 'No devices match.' : 'No devices enrolled yet. Create an enrollment token to add one.'));
   }
   search.addEventListener('input', render);
-  status.addEventListener('change', render);
+  [status, healthSel, kindSel].forEach(el => el.addEventListener('change', render));
   async function refresh() { devices = await api('GET', '/api/v1/devices'); render(); }
   await guard(refresh);
   search.focus();
@@ -364,9 +377,11 @@ async function viewDevice(root, id) {
   const updates = h('div', { class: 'card flush' });
   const actionLog = h('div', { class: 'card flush' });
   const events = h('div', { class: 'card flush' });
+  const healthCard = h('div', { class: 'card flush' });
+  const periphCard = h('div', { class: 'card flush hidden' });
   append(root, head,
     h('div', { class: 'grid side' },
-      h('div', { class: 'stack' }, info, updates, actionLog),
+      h('div', { class: 'stack' }, info, healthCard, periphCard, updates, actionLog),
       h('div', { class: 'stack' }, meta, actions, events)));
   let dev;
 
@@ -447,7 +462,17 @@ async function viewDevice(root, id) {
       used.style.width = (100 * u / total) + '%';
       return h('div', {}, h('div', { class: 'bar' }, used), h('div', { class: 'bar-label' }, h('span', {}, bytes(u) + ' used'), h('span', {}, bytes(free) + ' free')));
     };
-    replace(info, h('h2', {}, 'System'),
+    if (d.parent_id) {
+      replace(info, h('h2', {}, 'Peripheral'), h('dl', { class: 'kv' },
+        h('dt', {}, 'Gateway'), h('dd', {}, h('a', { href: '#/devices/' + d.parent_id }, d.parent_id)),
+        h('dt', {}, 'Address'), h('dd', { class: 'mono' }, d.info.machine_id),
+        h('dt', {}, 'Model'), h('dd', { class: 'mono' }, d.info.model),
+        h('dt', {}, 'Update method'), h('dd', {}, d.info.protocol || '—'),
+        h('dt', {}, 'Firmware'), h('dd', { class: 'mono' }, d.packages[d.info.model] || 'unknown'),
+        h('dt', {}, 'Battery'), h('dd', {}, d.metrics.battery_percent ? d.metrics.battery_percent + '%' : '—'),
+        h('dt', {}, 'Signal'), h('dd', {}, d.metrics.rssi ? d.metrics.rssi + ' dBm' : '—'),
+        h('dt', {}, 'First seen'), h('dd', {}, new Date(d.enrolled_at).toLocaleString())));
+    } else replace(info, h('h2', {}, 'System'),
       h('div', { class: 'grid cols-2' },
         h('dl', { class: 'kv' },
           h('dt', {}, 'Hostname'), h('dd', {}, d.info.hostname || '—'),
@@ -465,6 +490,27 @@ async function viewDevice(root, id) {
           h('dt', {}, 'Load (1m)'), h('dd', {}, `${(m.load1 || 0).toFixed(2)} on ${m.num_cpu || '?'} CPUs`),
           h('dt', {}, 'Memory'), h('dd', {}, usage(m.mem_available_bytes, m.mem_total_bytes)),
           h('dt', {}, 'Disk'), h('dd', {}, usage(m.disk_free_bytes, m.disk_total_bytes, m.disk_used_bytes)))));
+    const checks = [...(d.checks || [])].sort((a, b) => healthRank(b.status) - healthRank(a.status) || a.name.localeCompare(b.name));
+    replace(healthCard, h('h2', {}, 'Health ', badge(d.health || 'ok')), table(['Status', 'Check', 'Details', 'Checked'],
+      checks.map(c => h('tr', {},
+        h('td', {}, badge(c.status)),
+        h('td', {}, h('div', { class: 'mono' }, c.name), h('div', { class: 'muted' }, c.kind)),
+        h('td', {}, c.message, c.value !== undefined && c.value !== null ? h('div', { class: 'muted' }, `${c.value} ${c.unit || ''}`) : null,
+          c.details && Object.keys(c.details).length ? h('div', { class: 'muted mono small' },
+            sortedEntries(c.details).filter(([, v]) => v !== '').map(([k, v]) => `${k}=${v}`).join(' ')) : null),
+        h('td', { class: 'nowrap' }, ago(c.checked_at)))),
+      d.parent_id ? 'No health data from this peripheral.' : 'No health checks reported yet. Agents report hardware checks automatically; add program checks under Monitoring.'));
+    const periphs = det.peripherals || [];
+    periphCard.classList.toggle('hidden', periphs.length === 0);
+    replace(periphCard, h('h2', {}, `Peripherals (${periphs.length})`), table(['Device', 'Status', 'Health', 'Model', 'Firmware', 'Battery', 'Signal', 'Last seen'],
+      periphs.map(p => h('tr', { class: 'clickable', onclick: () => { location.hash = '#/devices/' + p.id; } },
+        h('td', {}, h('strong', {}, p.name), h('div', { class: 'muted mono' }, p.info.machine_id)),
+        h('td', {}, badge(p.status)), h('td', {}, badge(p.health || 'ok')),
+        h('td', { class: 'mono' }, p.info.model), h('td', { class: 'mono' }, p.packages[p.info.model] || '—'),
+        h('td', {}, p.metrics.battery_percent ? p.metrics.battery_percent + '%' : '—'),
+        h('td', {}, p.metrics.rssi ? p.metrics.rssi + ' dBm' : '—'),
+        h('td', { class: 'nowrap' }, ago(p.last_seen_at))))));
+    actions.classList.toggle('hidden', !!d.parent_id);
     replace(updates, h('h2', {}, 'Update history'), table(['Package', 'Version', 'Status', 'Updated', 'Details'],
       (det.updates || []).map(u => h('tr', {},
         h('td', { class: 'mono' }, u.package),
@@ -889,4 +935,195 @@ if (token) {
   route();
 } else {
   showLogin();
+}
+
+// ---------- monitoring: alerts, monitors, rules, channels ----------
+
+function kvLines(text) {
+  const out = {};
+  for (const line of text.split('\n').map(l => l.trim()).filter(Boolean)) {
+    const i = line.indexOf(':');
+    if (i <= 0) throw new Error('Headers must look like "Name: value"');
+    out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  return out;
+}
+
+async function viewMonitoring(root) {
+  const alertsBox = h('div', { class: 'card flush' });
+  const monitorsBox = h('div', { class: 'card flush' });
+  const rulesBox = h('div', { class: 'card flush' });
+  const channelsBox = h('div', { class: 'card flush' });
+  let channels = [];
+
+  // --- monitor form ---
+  const mName = h('input', { required: true, placeholder: 'kiosk-web', 'aria-label': 'Monitor name' });
+  const mType = h('select', { 'aria-label': 'Check type' }, ['http', 'tcp', 'systemd', 'process', 'command'].map(t => h('option', { value: t }, t)));
+  const mTarget = h('input', { placeholder: 'http://127.0.0.1:8080/healthz', 'aria-label': 'Target' });
+  const mCommand = h('input', { placeholder: '/usr/lib/nagios/plugins/check_load -w 5 -c 10', 'aria-label': 'Command' });
+  const mContains = h('input', { placeholder: 'optional', 'aria-label': 'Must contain' });
+  const mInterval = h('input', { type: 'number', min: '10', value: '60', 'aria-label': 'Interval seconds' });
+  const mLabels = h('input', { placeholder: 'all devices, or role=kiosk', 'aria-label': 'Monitor labels' });
+  const targetHint = { http: 'URL', tcp: 'host:port', systemd: 'unit, e.g. myapp.service', process: 'process name', command: '' };
+  const syncType = () => {
+    mTarget.closest('label').classList.toggle('hidden', mType.value === 'command');
+    mCommand.closest('label').classList.toggle('hidden', mType.value !== 'command');
+    mTarget.placeholder = targetHint[mType.value];
+  };
+  mType.addEventListener('change', syncType);
+
+  // --- rule form ---
+  const rName = h('input', { required: true, placeholder: 'Storage failing', 'aria-label': 'Rule name' });
+  const rCond = h('select', { 'aria-label': 'Condition' }, [['health', 'Health check failing'], ['device_offline', 'Device offline'],
+    ['update_failed', 'Update failed'], ['deployment_paused', 'Rollout paused']].map(([v, l]) => h('option', { value: v }, l)));
+  const rSev = h('select', { 'aria-label': 'Minimum severity' }, ['critical', 'warning'].map(v => h('option', { value: v }, v)));
+  const rKinds = h('input', { placeholder: 'any, or storage power temperature', 'aria-label': 'Check kinds' });
+  const rOffline = h('input', { type: 'number', min: '1', value: '10', 'aria-label': 'Offline minutes' });
+  const rLabels = h('input', { placeholder: 'all devices, or site=sg', 'aria-label': 'Rule labels' });
+  const rRepeat = h('input', { type: 'number', min: '0', value: '0', 'aria-label': 'Repeat minutes' });
+  const rResolved = h('input', { type: 'checkbox', checked: true });
+  const rChannels = h('div', { class: 'chips' });
+  const syncCond = () => {
+    rSev.closest('label').classList.toggle('hidden', rCond.value !== 'health');
+    rKinds.closest('label').classList.toggle('hidden', rCond.value !== 'health');
+    rOffline.closest('label').classList.toggle('hidden', rCond.value !== 'device_offline');
+  };
+  rCond.addEventListener('change', syncCond);
+
+  // --- channel form ---
+  const cName = h('input', { required: true, placeholder: 'Ops on-call', 'aria-label': 'Channel name' });
+  const cType = h('select', { 'aria-label': 'Channel type' }, [['webhook', 'Webhook (any service)'], ['slack', 'Slack'], ['email', 'Email (SMTP)']].map(([v, l]) => h('option', { value: v }, l)));
+  const cURL = h('input', { placeholder: 'https://events.pagerduty.com/v2/enqueue', 'aria-label': 'URL' });
+  const cSecret = h('input', { type: 'password', placeholder: 'optional, signs each request', 'aria-label': 'Signing secret' });
+  const cHeaders = h('textarea', { placeholder: 'Authorization: Bearer …\n(one header per line, optional)', 'aria-label': 'Headers' });
+  const cTemplate = h('textarea', { placeholder: 'optional Go template, e.g. {"text": {{json .Summary}}}', 'aria-label': 'Body template' });
+  const cSlack = h('input', { placeholder: 'https://hooks.slack.com/services/…', 'aria-label': 'Slack webhook URL' });
+  const cHost = h('input', { placeholder: 'smtp.example.com', 'aria-label': 'SMTP host' });
+  const cPort = h('input', { type: 'number', value: '587', 'aria-label': 'SMTP port' });
+  const cUser = h('input', { placeholder: 'optional', 'aria-label': 'SMTP user' });
+  const cPass = h('input', { type: 'password', placeholder: 'optional', 'aria-label': 'SMTP password' });
+  const cFrom = h('input', { placeholder: 'armada@example.com', 'aria-label': 'From' });
+  const cTo = h('input', { placeholder: 'ops@example.com, oncall@example.com', 'aria-label': 'To' });
+  const webhookFields = h('div', { class: 'form-grid' }, h('label', { class: 'wide' }, 'URL', cURL), h('label', {}, 'Signing secret', cSecret),
+    h('label', { class: 'wide' }, 'Headers', cHeaders), h('label', { class: 'wide' }, 'Body template', cTemplate));
+  const slackFields = h('div', { class: 'form-grid hidden' }, h('label', { class: 'wide' }, 'Slack incoming webhook URL', cSlack));
+  const emailFields = h('div', { class: 'form-grid hidden' }, h('label', {}, 'SMTP host', cHost), h('label', {}, 'Port', cPort),
+    h('label', {}, 'Username', cUser), h('label', {}, 'Password', cPass), h('label', {}, 'From', cFrom), h('label', { class: 'wide' }, 'To', cTo));
+  cType.addEventListener('change', () => {
+    webhookFields.classList.toggle('hidden', cType.value !== 'webhook');
+    slackFields.classList.toggle('hidden', cType.value !== 'slack');
+    emailFields.classList.toggle('hidden', cType.value !== 'email');
+  });
+
+  const section = (title, sub) => h('div', { class: 'page-head mt' }, h('div', {}, h('h2', {}, title), h('div', { class: 'muted' }, sub)));
+  append(root, pageHead('Monitoring', 'Health checks on devices, and who gets told when something goes wrong'),
+    alertsBox,
+    section('Health monitors', 'Program checks run by every matching device. Hardware checks (storage, temperature, power, battery) run automatically.'),
+    h('div', { class: 'card mb' }, h('form', { class: 'stack', onsubmit: async e => {
+      e.preventDefault();
+      let labels;
+      try { labels = parseLabels(mLabels.value); } catch (err) { return toast(err.message, true); }
+      const check = { type: mType.value, interval_seconds: parseInt(mInterval.value || '60', 10), contains: mContains.value };
+      if (mType.value === 'command') check.command = mCommand.value.match(/"[^"]*"|'[^']*'|\S+/g)?.map(a => a.replace(/^(["'])(.*)\1$/, '$2')) || [];
+      else check.target = mTarget.value.trim();
+      if (await guard(() => api('POST', '/api/v1/monitors', { name: mName.value.trim(), enabled: true, selector: { labels }, check }), 'Monitor added')) {
+        mName.value = ''; refresh();
+      }
+    } },
+    h('div', { class: 'form-grid' }, h('label', {}, 'Name', mName), h('label', {}, 'Type', mType), h('label', { class: 'wide' }, 'Target', mTarget),
+      h('label', { class: 'wide hidden' }, 'Command (exit 0 ok · 1 warning · 2 critical, like Nagios plugins)', mCommand),
+      h('label', {}, 'Must contain', mContains), h('label', {}, 'Every (seconds)', mInterval), h('label', {}, 'Devices (labels)', mLabels)),
+    h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Add monitor')))),
+    monitorsBox,
+    section('Alert rules', 'When to notify, and which channels to use.'),
+    h('div', { class: 'card mb' }, h('form', { class: 'stack', onsubmit: async e => {
+      e.preventDefault();
+      let labels;
+      try { labels = parseLabels(rLabels.value); } catch (err) { return toast(err.message, true); }
+      const chosen = [...rChannels.querySelectorAll('input:checked')].map(i => i.value);
+      if (!chosen.length) return toast('Pick at least one channel (add one below first).', true);
+      const body = { name: rName.value.trim(), enabled: true, condition: rCond.value, selector: { labels }, channels: chosen,
+        min_severity: rSev.value, check_kinds: rKinds.value.split(/[\s,]+/).filter(Boolean), offline_minutes: parseInt(rOffline.value || '10', 10),
+        repeat_minutes: parseInt(rRepeat.value || '0', 10), notify_resolved: rResolved.checked };
+      if (await guard(() => api('POST', '/api/v1/alert-rules', body), 'Rule added')) { rName.value = ''; refresh(); }
+    } },
+    h('div', { class: 'form-grid' }, h('label', {}, 'Name', rName), h('label', {}, 'When', rCond), h('label', {}, 'At least', rSev),
+      h('label', {}, 'Only check kinds', rKinds), h('label', { class: 'hidden' }, 'Offline for (minutes)', rOffline),
+      h('label', {}, 'Devices (labels)', rLabels), h('label', {}, 'Repeat every (minutes, 0 = never)', rRepeat)),
+    h('label', { class: 'check' }, rResolved, 'Also notify when it resolves'),
+    h('div', {}, h('div', { class: 'muted mb' }, 'Notify:'), rChannels),
+    h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Add rule')))),
+    rulesBox,
+    section('Notification channels', 'Webhooks reach any service (PagerDuty, Opsgenie, Teams, Discord, your own API) using an optional body template.'),
+    h('div', { class: 'card mb' }, h('form', { class: 'stack', onsubmit: async e => {
+      e.preventDefault();
+      const body = { name: cName.value.trim(), type: cType.value };
+      try {
+        if (cType.value === 'webhook') body.webhook = { url: cURL.value.trim(), secret: cSecret.value, headers: kvLines(cHeaders.value), body_template: cTemplate.value };
+        if (cType.value === 'slack') body.slack = { webhook_url: cSlack.value.trim() };
+        if (cType.value === 'email') body.email = { host: cHost.value.trim(), port: parseInt(cPort.value || '587', 10), username: cUser.value,
+          password: cPass.value, from: cFrom.value.trim(), to: cTo.value.split(/[\s,]+/).filter(Boolean) };
+      } catch (err) { return toast(err.message, true); }
+      if (await guard(() => api('POST', '/api/v1/channels', body), 'Channel added')) { cName.value = ''; refresh(); }
+    } },
+    h('div', { class: 'form-grid' }, h('label', {}, 'Name', cName), h('label', {}, 'Type', cType)),
+    webhookFields, slackFields, emailFields,
+    h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Add channel')))),
+    channelsBox);
+  syncType(); syncCond();
+
+  async function refresh() {
+    const [alerts, monitors, rules, chs] = await Promise.all([
+      api('GET', '/api/v1/alerts'), api('GET', '/api/v1/monitors'), api('GET', '/api/v1/alert-rules'), api('GET', '/api/v1/channels')]);
+    channels = chs;
+    const chName = Object.fromEntries(chs.map(c => [c.id, c.name]));
+    const firing = alerts.filter(a => a.status === 'firing');
+    replace(alertsBox, h('h2', {}, `Alerts${firing.length ? ` — ${firing.length} firing` : ''}`), table(['Status', 'Severity', 'Rule', 'What', 'Since'],
+      alerts.slice(0, 50).map(a => h('tr', {},
+        h('td', {}, badge(a.status)), h('td', {}, badge(a.severity)), h('td', {}, a.rule_name),
+        h('td', {}, a.summary, a.count > 1 ? h('span', { class: 'muted' }, ` (×${a.count})`) : null,
+          a.device_id ? h('div', {}, h('a', { href: '#/devices/' + a.device_id }, a.device_name || a.device_id)) : null,
+          a.deployment_id && !a.device_id ? h('div', {}, h('a', { href: '#/deployments/' + a.deployment_id }, 'rollout')) : null),
+        h('td', { class: 'nowrap' }, ago(a.started_at), a.resolved_at ? h('div', { class: 'muted' }, 'resolved ' + ago(a.resolved_at)) : null))),
+      'No alerts yet.'));
+    const del = (path, msg) => async () => { if (confirm(msg) && await guard(() => api('DELETE', path)) !== undefined) refresh(); };
+    replace(monitorsBox, table(['Monitor', 'Check', 'Devices', ''],
+      monitors.map(m => h('tr', {},
+        h('td', {}, h('strong', {}, m.name), ' ', badge(m.enabled ? 'enabled' : 'disabled')),
+        h('td', { class: 'mono' }, m.check.type + ' ' + (m.check.target || (m.check.command || []).join(' '))),
+        h('td', {}, labelChips(m.selector.labels)),
+        h('td', {}, h('div', { class: 'btn-row' },
+          h('button', { class: 'btn small', onclick: async () => {
+            if (await guard(() => api('PUT', '/api/v1/monitors/' + m.id, { ...m, enabled: !m.enabled }))) refresh();
+          } }, m.enabled ? 'Disable' : 'Enable'),
+          h('button', { class: 'btn small danger', onclick: del('/api/v1/monitors/' + m.id, `Delete monitor ${m.name}?`) }, 'Delete'))))),
+      'No program monitors yet.'));
+    const condLabel = { health: 'health', device_offline: 'offline', update_failed: 'update failed', deployment_paused: 'rollout paused' };
+    replace(rulesBox, table(['Rule', 'When', 'Devices', 'Notify', ''],
+      rules.map(r => h('tr', {},
+        h('td', {}, h('strong', {}, r.name), ' ', badge(r.enabled ? 'enabled' : 'disabled')),
+        h('td', {}, condLabel[r.condition] || r.condition,
+          r.condition === 'health' ? h('div', { class: 'muted' }, `${r.min_severity || 'critical'}+${(r.check_kinds || []).length ? ' · ' + r.check_kinds.join(', ') : ''}`) : null,
+          r.condition === 'device_offline' ? h('div', { class: 'muted' }, `${r.offline_minutes || 10} min`) : null),
+        h('td', {}, labelChips(r.selector.labels)),
+        h('td', {}, r.channels.map(id => chName[id] || id).join(', ')),
+        h('td', {}, h('div', { class: 'btn-row' },
+          h('button', { class: 'btn small', onclick: async () => {
+            if (await guard(() => api('PUT', '/api/v1/alert-rules/' + r.id, { ...r, enabled: !r.enabled }))) refresh();
+          } }, r.enabled ? 'Disable' : 'Enable'),
+          h('button', { class: 'btn small danger', onclick: del('/api/v1/alert-rules/' + r.id, `Delete rule ${r.name}?`) }, 'Delete'))))),
+      'No alert rules yet.'));
+    replace(rChannels, chs.length ? chs.map(c => h('label', { class: 'check chip' }, h('input', { type: 'checkbox', value: c.id }), c.name))
+      : h('span', { class: 'muted' }, 'No channels yet — add one below.'));
+    replace(channelsBox, table(['Channel', 'Type', 'Destination', ''],
+      chs.map(c => h('tr', {},
+        h('td', {}, h('strong', {}, c.name)), h('td', {}, c.type),
+        h('td', { class: 'mono' }, c.webhook ? c.webhook.url : c.slack ? c.slack.webhook_url : c.email ? c.email.to.join(', ') : ''),
+        h('td', {}, h('div', { class: 'btn-row' },
+          h('button', { class: 'btn small', onclick: () => guard(() => api('POST', `/api/v1/channels/${c.id}/test`), 'Test notification sent') }, 'Send test'),
+          h('button', { class: 'btn small danger', onclick: del('/api/v1/channels/' + c.id, `Delete channel ${c.name}?`) }, 'Delete'))))),
+      'No channels yet.'));
+  }
+  await guard(refresh);
+  return async () => { if (!root.contains(document.activeElement) || document.activeElement === document.body) await refresh(); };
 }

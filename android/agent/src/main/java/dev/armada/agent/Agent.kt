@@ -68,6 +68,7 @@ class Agent private constructor(private val context: Context) {
             .put("info", info())
             .put("metrics", metrics())
             .put("packages", packageVersions())
+            .put("health", Health.checks(context))
             .put("busy", false)
         val r = api().post("/api/v1/agent/heartbeat", body)
         prefs.heartbeatSeconds = r.optInt("heartbeat_interval_seconds", prefs.heartbeatSeconds)

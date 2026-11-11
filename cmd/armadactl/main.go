@@ -56,6 +56,25 @@ Commands:
   deployments pause|resume|advance|retry|complete|abort <id>
   events [--device ID] [--deployment ID] [--limit N]
 
+Monitoring and alerts:
+  monitors list
+  monitors create --name N --type http|tcp|systemd|process|command [--target T]
+                  [--interval 60] [--contains S] [--label K=V]... [-- command args]
+  monitors delete <id>
+  channels list
+  channels create --name N --type webhook --url URL [--secret S] [--header "K: V"]... [--template T]
+  channels create --name N --type slack --url HOOK_URL
+  channels create --name N --type email --smtp-host H [--smtp-port 587] [--smtp-user U --smtp-password P]
+                  --from ADDR --to ADDR [--to ADDR]...
+  channels test <id>
+  channels delete <id>
+  rules list
+  rules create --name N --condition health|device_offline|update_failed|deployment_paused
+               --channel ID [--channel ID]... [--min-severity warning|critical] [--kind storage]...
+               [--offline-minutes 10] [--repeat-minutes 0] [--label K=V]... [--no-resolved]
+  rules delete <id>
+  alerts [--firing]
+
 Android:
   apps list
   apps set <package> --signer SHA256 [--signer ...] [--name N] [--license] [--license-ttl 1h]
@@ -119,6 +138,14 @@ func (c *cli) run(args []string) error {
 		return c.releases(verb, rest)
 	case "apps", "app":
 		return c.apps(verb, rest)
+	case "monitors", "monitor":
+		return c.monitors(verb, rest)
+	case "channels", "channel":
+		return c.channels(verb, rest)
+	case "rules", "rule":
+		return c.rules(verb, rest)
+	case "alerts":
+		return c.alerts(append([]string{verb}, rest...))
 	case "android":
 		return c.android(verb, rest)
 	case "deployments", "deployment", "deploy":
@@ -342,9 +369,17 @@ func (c *cli) devices(verb string, args []string) error {
 		}
 		var rows [][]string
 		for _, d := range devs {
-			rows = append(rows, []string{d.ID, d.Name, d.Status, d.Channel, d.Info.OS + "/" + d.Info.Arch, fmtPackages(d.Packages), fmtLabels(d.Labels), ago(d.LastSeenAt)})
+			platform := d.Info.OS + "/" + d.Info.Arch
+			if d.ParentID != "" {
+				platform = "ble:" + d.Info.Model
+			}
+			health := d.Health
+			if health == "" {
+				health = "ok"
+			}
+			rows = append(rows, []string{d.ID, d.Name, d.Status, health, d.Channel, platform, fmtPackages(d.Packages), fmtLabels(d.Labels), ago(d.LastSeenAt)})
 		}
-		c.table("ID\tNAME\tSTATUS\tCHANNEL\tPLATFORM\tPACKAGES\tLABELS\tLAST SEEN", rows)
+		c.table("ID\tNAME\tSTATUS\tHEALTH\tCHANNEL\tPLATFORM\tPACKAGES\tLABELS\tLAST SEEN", rows)
 		return nil
 	case "get", "show":
 		if err := need(args, 1, "device id"); err != nil {
@@ -950,5 +985,245 @@ func (c *cli) android(verb string, args []string) error {
 	for _, w := range r.Warnings {
 		fmt.Fprintln(c.out, "warning:", w)
 	}
+	return nil
+}
+
+func (c *cli) simpleDelete(kind, path string, args []string) error {
+	if err := need(args, 1, kind+" id"); err != nil {
+		return err
+	}
+	if err := c.do("DELETE", path+url.PathEscape(args[0]), nil, nil); err != nil {
+		return err
+	}
+	fmt.Fprintln(c.out, "deleted", args[0])
+	return nil
+}
+
+func (c *cli) monitors(verb string, args []string) error {
+	switch verb {
+	case "", "list", "ls":
+		var ms []api.Monitor
+		if err := c.do("GET", "/api/v1/monitors", nil, &ms); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(ms)
+		}
+		var rows [][]string
+		for _, m := range ms {
+			target := m.Check.Target
+			if m.Check.Type == "command" {
+				target = strings.Join(m.Check.Command, " ")
+			}
+			state := "enabled"
+			if !m.Enabled {
+				state = "disabled"
+			}
+			rows = append(rows, []string{m.ID, m.Name, m.Check.Type, target, fmtLabels(m.Selector.Labels), state})
+		}
+		c.table("ID\tNAME\tTYPE\tTARGET\tDEVICES\tSTATE", rows)
+		return nil
+	case "create", "add":
+		fs := flag.NewFlagSet("monitors create", flag.ContinueOnError)
+		m := api.Monitor{Enabled: true}
+		fs.StringVar(&m.Name, "name", "", "")
+		fs.StringVar(&m.Check.Type, "type", "", "")
+		fs.StringVar(&m.Check.Target, "target", "", "")
+		fs.StringVar(&m.Check.Contains, "contains", "", "")
+		fs.IntVar(&m.Check.IntervalSeconds, "interval", 60, "")
+		fs.IntVar(&m.Check.TimeoutSeconds, "timeout", 0, "")
+		fs.IntVar(&m.Check.WarnMs, "warn-ms", 0, "")
+		var labels multiFlag
+		fs.Var(&labels, "label", "")
+		pos, err := parse(fs, args)
+		if err != nil {
+			return err
+		}
+		if m.Check.Type == "command" {
+			m.Check.Command = pos
+		}
+		if m.Selector.Labels, err = labelsOf(labels); err != nil {
+			return err
+		}
+		var out api.Monitor
+		if err := c.do("POST", "/api/v1/monitors", m, &out); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(out)
+		}
+		fmt.Fprintf(c.out, "monitor %s created; matching devices start running it on their next check-in\n", out.ID)
+		return nil
+	case "delete", "rm":
+		return c.simpleDelete("monitor", "/api/v1/monitors/", args)
+	}
+	return fmt.Errorf("unknown monitors command %q", verb)
+}
+
+func (c *cli) channels(verb string, args []string) error {
+	switch verb {
+	case "", "list", "ls":
+		var chs []api.NotificationChannel
+		if err := c.do("GET", "/api/v1/channels", nil, &chs); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(chs)
+		}
+		var rows [][]string
+		for _, ch := range chs {
+			dest := ""
+			switch {
+			case ch.Webhook != nil:
+				dest = ch.Webhook.URL
+			case ch.Slack != nil:
+				dest = ch.Slack.WebhookURL
+			case ch.Email != nil:
+				dest = strings.Join(ch.Email.To, ", ")
+			}
+			rows = append(rows, []string{ch.ID, ch.Name, ch.Type, dest})
+		}
+		c.table("ID\tNAME\tTYPE\tDESTINATION", rows)
+		return nil
+	case "create", "add":
+		fs := flag.NewFlagSet("channels create", flag.ContinueOnError)
+		name := fs.String("name", "", "")
+		typ := fs.String("type", "", "")
+		u := fs.String("url", "", "")
+		secret := fs.String("secret", "", "")
+		tpl := fs.String("template", "", "")
+		host := fs.String("smtp-host", "", "")
+		port := fs.Int("smtp-port", 587, "")
+		user := fs.String("smtp-user", "", "")
+		pass := fs.String("smtp-password", "", "")
+		from := fs.String("from", "", "")
+		var headers, to multiFlag
+		fs.Var(&headers, "header", "")
+		fs.Var(&to, "to", "")
+		if _, err := parse(fs, args); err != nil {
+			return err
+		}
+		ch := api.NotificationChannel{Name: *name, Type: *typ}
+		switch *typ {
+		case "webhook":
+			hm := map[string]string{}
+			for _, hd := range headers {
+				k, v, ok := strings.Cut(hd, ":")
+				if !ok {
+					return fmt.Errorf("header %q must be \"Name: value\"", hd)
+				}
+				hm[strings.TrimSpace(k)] = strings.TrimSpace(v)
+			}
+			ch.Webhook = &api.WebhookConfig{URL: *u, Secret: *secret, Headers: hm, BodyTemplate: *tpl}
+		case "slack":
+			ch.Slack = &api.SlackConfig{WebhookURL: *u}
+		case "email":
+			ch.Email = &api.EmailConfig{Host: *host, Port: *port, Username: *user, Password: *pass, From: *from, To: to}
+		}
+		var out api.NotificationChannel
+		if err := c.do("POST", "/api/v1/channels", ch, &out); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(out)
+		}
+		fmt.Fprintf(c.out, "channel %s created; try it with: armadactl channels test %s\n", out.ID, out.ID)
+		return nil
+	case "test":
+		if err := need(args, 1, "channel id"); err != nil {
+			return err
+		}
+		if err := c.do("POST", "/api/v1/channels/"+url.PathEscape(args[0])+"/test", nil, nil); err != nil {
+			return err
+		}
+		fmt.Fprintln(c.out, "test notification delivered")
+		return nil
+	case "delete", "rm":
+		return c.simpleDelete("channel", "/api/v1/channels/", args)
+	}
+	return fmt.Errorf("unknown channels command %q", verb)
+}
+
+func (c *cli) rules(verb string, args []string) error {
+	switch verb {
+	case "", "list", "ls":
+		var rs []api.AlertRule
+		if err := c.do("GET", "/api/v1/alert-rules", nil, &rs); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(rs)
+		}
+		var rows [][]string
+		for _, r := range rs {
+			state := "enabled"
+			if !r.Enabled {
+				state = "disabled"
+			}
+			rows = append(rows, []string{r.ID, r.Name, r.Condition, fmtLabels(r.Selector.Labels), strings.Join(r.Channels, ","), state})
+		}
+		c.table("ID\tNAME\tCONDITION\tDEVICES\tCHANNELS\tSTATE", rows)
+		return nil
+	case "create", "add":
+		fs := flag.NewFlagSet("rules create", flag.ContinueOnError)
+		r := api.AlertRule{Enabled: true}
+		fs.StringVar(&r.Name, "name", "", "")
+		fs.StringVar(&r.Condition, "condition", "", "")
+		fs.StringVar(&r.MinSeverity, "min-severity", "", "")
+		fs.IntVar(&r.OfflineMinutes, "offline-minutes", 0, "")
+		fs.IntVar(&r.RepeatMinutes, "repeat-minutes", 0, "")
+		noResolved := fs.Bool("no-resolved", false, "")
+		var labels, chans, kinds multiFlag
+		fs.Var(&labels, "label", "")
+		fs.Var(&chans, "channel", "")
+		fs.Var(&kinds, "kind", "")
+		if _, err := parse(fs, args); err != nil {
+			return err
+		}
+		var err error
+		if r.Selector.Labels, err = labelsOf(labels); err != nil {
+			return err
+		}
+		r.Channels, r.CheckKinds, r.NotifyResolved = chans, kinds, !*noResolved
+		var out api.AlertRule
+		if err := c.do("POST", "/api/v1/alert-rules", r, &out); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(out)
+		}
+		fmt.Fprintf(c.out, "rule %s created\n", out.ID)
+		return nil
+	case "delete", "rm":
+		return c.simpleDelete("rule", "/api/v1/alert-rules/", args)
+	}
+	return fmt.Errorf("unknown rules command %q", verb)
+}
+
+func (c *cli) alerts(args []string) error {
+	if len(args) > 0 && args[0] == "" {
+		args = args[1:]
+	}
+	fs := flag.NewFlagSet("alerts", flag.ContinueOnError)
+	firing := fs.Bool("firing", false, "")
+	if _, err := parse(fs, args); err != nil {
+		return err
+	}
+	q := ""
+	if *firing {
+		q = "?status=firing"
+	}
+	var as []api.Alert
+	if err := c.do("GET", "/api/v1/alerts"+q, nil, &as); err != nil {
+		return err
+	}
+	if c.json {
+		return c.printJSON(as)
+	}
+	var rows [][]string
+	for _, a := range as {
+		rows = append(rows, []string{a.Status, a.Severity, a.RuleName, firstLine(a.Summary), ago(a.StartedAt)})
+	}
+	c.table("STATUS\tSEVERITY\tRULE\tSUMMARY\tSINCE", rows)
 	return nil
 }

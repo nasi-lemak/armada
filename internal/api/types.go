@@ -564,6 +564,10 @@ type FleetSummary struct {
 	Offline           int                       `json:"offline"`
 	ActiveDeployments int                       `json:"active_deployments"`
 	Releases          int                       `json:"releases"`
+	Peripherals       int                       `json:"peripherals"`
+	HealthWarning     int                       `json:"health_warning"`
+	HealthCritical    int                       `json:"health_critical"`
+	FiringAlerts      int                       `json:"firing_alerts"`
 	PackageVersions   map[string]map[string]int `json:"package_versions"`
 	Channels          map[string]int            `json:"channels"`
 }

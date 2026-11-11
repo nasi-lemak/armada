@@ -41,6 +41,15 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 			sum.Offline++
 		}
 		sum.Channels[d.Channel]++
+		if d.ParentID != "" {
+			sum.Peripherals++
+		}
+		switch d.Health {
+		case api.HealthWarning:
+			sum.HealthWarning++
+		case api.HealthCritical:
+			sum.HealthCritical++
+		}
 		for p, v := range d.Packages {
 			if sum.PackageVersions[p] == nil {
 				sum.PackageVersions[p] = map[string]int{}
@@ -60,6 +69,12 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sum.Releases = len(rels)
+	firing, err := s.store.ListAlerts(ctx, true, 10000)
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	sum.FiringAlerts = len(firing)
 	writeJSON(w, http.StatusOK, sum)
 }
 
