@@ -925,7 +925,8 @@ deploy/, examples/  service units, compose file, sample agent config and hooks
 ## Limitations and next steps
 
 - A single server with SQLite comfortably handles thousands of devices at a 30s
-  heartbeat. Larger fleets would need Postgres and several server replicas.
+  heartbeat. Running several replicas on Postgres is designed but not built; see
+  [docs/scaling.md](docs/scaling.md).
 - There is no single sign-on (OIDC/SAML) or two-factor sign-in yet. Put the dashboard behind your
   identity-aware proxy if you need either.
 - Push wakes one device at a time (actions, logs, check-in). New rollouts still start at each
