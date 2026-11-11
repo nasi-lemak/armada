@@ -50,6 +50,9 @@ type Config struct {
 	HistoryRawRetention time.Duration
 	// HistoryRetention is how long hourly summaries are kept.
 	HistoryRetention time.Duration
+	// PushHold is how long an agent's long-poll is held open (0 disables
+	// push). Keep it under any proxy's idle timeout.
+	PushHold time.Duration
 	// SessionTTL is how long a dashboard sign-in lasts without activity.
 	SessionTTL time.Duration
 	// DefaultStrategy is used for deployments created without one (including auto-deploys).
@@ -101,6 +104,7 @@ func DefaultConfig() Config {
 		HistoryRawRetention:    72 * time.Hour,
 		HistoryRetention:       90 * 24 * time.Hour,
 		SessionTTL:             12 * time.Hour,
+		PushHold:               50 * time.Second,
 		DefaultStrategy: api.Strategy{
 			Stages:               []int{5, 25, 50, 100},
 			StageDurationSeconds: 15 * 60,
@@ -138,6 +142,7 @@ type Server struct {
 	logins       loginLimiter
 	notifyQueue  chan notifyJob
 	notifyClient *http.Client
+	push         *pushHub
 }
 
 // New opens the data directory (creating the database and signing key if
@@ -192,6 +197,7 @@ func New(cfg Config) (*Server, error) {
 		verifier:    verifier,
 		revocations: revocations,
 		challenges:  newChallengeStore(),
+		push:        newPushHub(),
 	}
 	s.history.last = map[string]time.Time{}
 	s.notifyQueue = make(chan notifyJob, 1000)
@@ -202,6 +208,7 @@ func New(cfg Config) (*Server, error) {
 
 // Close releases resources.
 func (s *Server) Close() error {
+	s.push.close()
 	close(s.notifyQueue)
 	return s.store.Close()
 }
@@ -255,6 +262,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/agent/updates", s.deviceAuth(s.handleUpdateReport))
 	mux.Handle("GET /api/v1/agent/releases/{id}/artifact", s.deviceAuth(s.handleAgentArtifact))
 	mux.Handle("POST /api/v1/agent/actions/{id}/result", s.deviceAuth(s.handleActionResult))
+	mux.Handle("GET /api/v1/agent/wait", s.deviceAuth(s.handleAgentWait))
 	mux.Handle("POST /api/v1/agent/license", s.deviceAuth(s.handleLicense))
 
 	// Admin API.
@@ -283,6 +291,7 @@ func (s *Server) Handler() http.Handler {
 	viewer(scopedOK, "GET /api/v1/devices/{id}/actions", s.handleListActions)
 	operator(scopedOK, "PATCH /api/v1/devices/{id}", s.handlePatchDevice)
 	operator(scopedOK, "POST /api/v1/devices/{id}/actions", s.handleCreateAction)
+	operator(scopedOK, "POST /api/v1/devices/{id}/wake", s.handleWakeDevice)
 	operator(fleetOnly, "DELETE /api/v1/devices/{id}", s.handleDeleteDevice)
 	viewer(scopedOK, "GET /api/v1/events", s.handleListEvents)
 	viewer(scopedOK, "GET /api/v1/alerts", s.handleListAlerts)

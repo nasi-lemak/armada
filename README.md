@@ -50,8 +50,11 @@ It has three parts, all in Go with no external services:
   signature and SHA-256 before installing anything. You can pin the key in the agent config.
 - **Maintenance windows.** Devices can be limited to installing at certain local times
   (`02:00-05:00`).
-- **Remote actions.** Reboot, restart the agent, or run a command. `exec` is off by default
-  and each device opts in.
+- **Remote actions, in seconds.** Reboot, restart the agent, run a command, or ask for a check-in.
+  Each agent holds a long-poll connection, so actions reach it within a second or two, even behind
+  NAT, without opening ports. `exec` is off by default and each device opts in.
+- **Remote logs.** Fetch recent systemd journal lines (any unit) or named log files from a device,
+  filtered by time and text, from the dashboard or `armadactl devices logs`.
 - **Resumable downloads** for devices on poor links (HTTP Range).
 - **Activity log** of enrollments, updates, failures, pauses and actions.
 - **Health monitoring** (see [below](#health-monitoring)):
@@ -565,6 +568,8 @@ or `ARMADA_TOKEN`.
   "maintenance_window": "02:00-05:00",
   "allow_reboot": true,
   "allow_exec": false,
+  "allow_logs": true,
+  "log_files": { "myapp": "/var/log/myapp/app.log" },
   "packages": {
     "myapp": {
       "install_command":  ["/opt/myapp/hooks/install.sh"],
@@ -588,6 +593,9 @@ or `ARMADA_TOKEN`.
 | `auto_update` | `true` | When `false`, the agent only reports that updates are available |
 | `maintenance_window` | any time | Local-time windows such as `02:00-05:00,13:00-14:00`; windows may cross midnight |
 | `allow_reboot` / `allow_exec` | `true` / `false` | Which remote actions this device accepts |
+| `allow_logs` | `true` | Whether the server may read the systemd journal and the files in `log_files` |
+| `log_files` | none | Log files the server may ask for, by name: `{"myapp": "/var/log/myapp/app.log"}`. No other files can be read. |
+| `disable_push` | `false` | Turn off the long-poll connection; actions then wait for the next heartbeat |
 | `reboot_command` | `["systemctl","reboot"]` | |
 | `command_timeout` | `10m` | Applies to hooks and exec actions |
 
@@ -634,6 +642,8 @@ armadactl devices get <id>
 armadactl devices set <id> [--name N] [--channel C] [--label K=V]... [--unlabel K]...
 armadactl devices action <id> reboot|restart-agent
 armadactl devices action <id> exec -- systemctl status myapp
+armadactl devices logs <id> [--unit myapp.service | --file myapp] [--lines 200] [--since 1h] [--grep error]
+armadactl devices wake <id>
 armadactl devices delete <id>
 armadactl tokens create|list|revoke
 armadactl releases upload|list|delete
@@ -671,6 +681,7 @@ Add `--json` to any command for machine-readable output.
 | `-history-raw-retention` | `ARMADA_HISTORY_RAW_RETENTION` | `72h` |
 | `-history-retention` | `ARMADA_HISTORY_RETENTION` | `2160h` (90 days) |
 | `-session-ttl` | `ARMADA_SESSION_TTL` | `12h` (dashboard sign-in, sliding) |
+| `-push-hold` | `ARMADA_PUSH_HOLD` | `50s` (agent long-poll; keep below your proxy's idle timeout; `0` disables) |
 
 The data directory holds `armada.db` (SQLite), `artifacts/`, `signing.key`, `license.key` and
 `admin-token`. **Back it up**, for example nightly from cron:
@@ -702,14 +713,15 @@ endpoints use the per-device key issued at enrollment.
 | `GET /api/v1/summary` | Fleet counts and version distribution |
 | `GET /api/v1/devices` (`?channel=&label=k=v&status=`) | List devices |
 | `GET/PATCH/DELETE /api/v1/devices/{id}` | Device detail (with updates, actions, events), edit name/channel/labels, remove |
-| `GET/POST /api/v1/devices/{id}/actions` | List or queue `reboot`, `restart-agent`, `exec` |
+| `GET/POST /api/v1/devices/{id}/actions` | List or queue `reboot`, `restart-agent`, `exec`, `logs` |
+| `POST /api/v1/devices/{id}/wake` | Ask a device to check in now |
 | `GET/POST /api/v1/tokens`, `DELETE /api/v1/tokens/{id}` | Enrollment tokens |
 | `GET/POST /api/v1/releases`, `GET/DELETE /api/v1/releases/{id}`, `GET …/artifact` | Releases (upload is `multipart/form-data`) |
 | `GET/POST /api/v1/deployments`, `GET /api/v1/deployments/{id}` | Deployments |
 | `POST /api/v1/deployments/{id}/{pause,resume,advance,retry,complete,abort}` | Control a rollout |
 | `GET /api/v1/events` | Activity log |
 | `GET /api/v1/signing-key` | Release-signing public key |
-| `POST /api/v1/agent/enroll`, `/heartbeat`, `/updates`, `/actions/{id}/result`, `GET /api/v1/agent/releases/{id}/artifact` | Agent protocol |
+| `POST /api/v1/agent/enroll`, `/heartbeat`, `/updates`, `/actions/{id}/result`, `GET /api/v1/agent/releases/{id}/artifact`, `GET /api/v1/agent/wait` | Agent protocol (`wait` is the push long-poll) |
 | `GET /install.sh`, `GET /api/v1/agent/download?os=&arch=&package=` | Public bootstrap (agent binaries and APK only) |
 | `GET/PUT/DELETE /api/v1/apps[/{package}]` | Android apps: signing certificates and licensing |
 | `POST /api/v1/android/provisioning` | Android setup QR code for an enrollment token |
@@ -742,6 +754,8 @@ endpoints use the per-device key issued at enrollment.
   `(package, version, sha256)`. An artifact therefore can't be replayed under another
   name or version.
 - `exec` actions are disabled unless a device sets `allow_exec: true`.
+- `logs` actions read only the systemd journal and the files a device lists in `log_files`. Set
+  `allow_logs: false` to refuse them. Client accounts can read logs from their own devices.
 - The dashboard sends a strict Content-Security-Policy and renders all device-supplied
   text as text.
 
@@ -785,10 +799,12 @@ deploy/, examples/  service units, compose file, sample agent config and hooks
   heartbeat. Larger fleets would need Postgres and several server replicas.
 - There is no single sign-on (OIDC/SAML) or two-factor sign-in yet. Put the dashboard behind your
   identity-aware proxy if you need either.
-- Agents poll; there is no push channel, so actions run on the next check-in (30s by default).
+- Push wakes one device at a time (actions, logs, check-in). New rollouts still start at each
+  device's next heartbeat, which spreads the load. Logs are a snapshot, not a live tail.
 - There are no delta updates; every update downloads the full artifact.
 - The agent's metrics are richest on Linux. Other platforms report the basics.
-- On Android, actions are limited to reboot and restarting the agent (`exec` isn't supported).
+- On Android, actions are limited to reboot and restarting the agent (`exec` and `logs` aren't
+  supported: Android doesn't let apps read other apps' logs).
 - Android devices can't yet act as BLE gateways. That needs Nordic's Android DFU and mcumgr libraries
   in the Android agent.
 - On macOS and Windows, the built-in checks cover SMART and disk space only; temperature, power and

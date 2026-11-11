@@ -65,6 +65,7 @@ func run() error {
 	flag.DurationVar(&cfg.HistoryResolution, "history-resolution", envDur("ARMADA_HISTORY_RESOLUTION", cfg.HistoryResolution), "how often health history is sampled per check (0 disables history)")
 	flag.DurationVar(&cfg.HistoryRawRetention, "history-raw-retention", envDur("ARMADA_HISTORY_RAW_RETENTION", cfg.HistoryRawRetention), "keep full-resolution history this long; older history is kept hourly")
 	flag.DurationVar(&cfg.HistoryRetention, "history-retention", envDur("ARMADA_HISTORY_RETENTION", cfg.HistoryRetention), "keep hourly history this long")
+	flag.DurationVar(&cfg.PushHold, "push-hold", envDur("ARMADA_PUSH_HOLD", cfg.PushHold), "how long agents' long-poll connections are held open, so actions reach them instantly (0 disables; keep below proxy idle timeouts)")
 	flag.DurationVar(&cfg.SessionTTL, "session-ttl", envDur("ARMADA_SESSION_TTL", cfg.SessionTTL), "sign users out of the dashboard after this long without activity")
 	flag.DurationVar(&cfg.UpdateTimeout, "update-timeout", envDur("ARMADA_UPDATE_TIMEOUT", cfg.UpdateTimeout), "fail device updates stuck downloading/installing this long")
 	var stageDur time.Duration

@@ -32,6 +32,13 @@ class Agent private constructor(private val context: Context) {
         return ApiClient(url) { prefs.deviceKey }
     }
 
+    /**
+     * Holds the push long-poll open for up to [holdSec] seconds. Returns true
+     * when the server wants a check-in now (an action is waiting).
+     */
+    fun waitForWake(holdSec: Int): Boolean =
+        api().get("/api/v1/agent/wait?hold=$holdSec", readTimeoutMs = (holdSec + 25) * 1000).optBoolean("wake")
+
     val isDeviceOwner: Boolean get() = dpm.isDeviceOwnerApp(context.packageName)
 
     // ---- enrollment ----

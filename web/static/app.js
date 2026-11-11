@@ -170,7 +170,7 @@ const STATUS_TONE = {
   enabled: 'ok', disabled: '',
   running: 'info', paused: 'warn', aborted: 'bad', completed: 'ok',
   succeeded: 'ok', failed: 'bad', rolled_back: 'warn', pending: '', downloading: 'info', installing: 'info',
-  queued: '', sent: 'info', rejected: 'warn', revoked: 'bad', active: 'ok', attested: 'ok', 'attested (unlocked)': 'warn',
+  queued: '', sent: 'info', rejected: 'warn', live: 'ok', revoked: 'bad', active: 'ok', attested: 'ok', 'attested (unlocked)': 'warn',
 };
 function healthRank(s) { return { ok: 0, unknown: 1, warning: 2, critical: 3 }[s] ?? 1; }
 
@@ -394,10 +394,11 @@ async function viewDevice(root, id) {
   const events = h('div', { class: 'card flush' });
   const healthCard = h('div', { class: 'card flush' });
   const periphCard = h('div', { class: 'card flush hidden' });
+  const logs = logsCard(id, () => dev);
   const hist = historySection(id);
   append(root, head,
     h('div', { class: 'grid side' },
-      h('div', { class: 'stack' }, info, healthCard, periphCard, updates, actionLog),
+      h('div', { class: 'stack' }, info, healthCard, periphCard, logs.el, updates, actionLog),
       h('div', { class: 'stack' }, meta, actions, events)),
     hist.el);
   let dev;
@@ -427,6 +428,12 @@ async function viewDevice(root, id) {
   const queue = (type, args) => guard(() => api('POST', `/api/v1/devices/${id}/actions`, { type, args }), `${type} queued; runs at next check-in`).then(r => r && refresh());
   append(actions, h('h2', {}, 'Actions'),
     h('div', { class: 'btn-row' },
+      h('button', { class: 'btn', title: 'Ask the device to report now instead of at its next heartbeat', onclick: async () => {
+        const r = await guard(() => api('POST', `/api/v1/devices/${id}/wake`));
+        if (!r) return;
+        toast(r.connected ? 'Device is checking in now' : 'Device has no live connection; it checks in at its next heartbeat');
+        if (r.connected) setTimeout(() => guard(refresh), 1500);
+      } }, 'Check in now'),
       h('button', { class: 'btn', onclick: () => confirm('Reboot this device?') && queue('reboot') }, 'Reboot'),
       h('button', { class: 'btn', onclick: () => queue('restart-agent') }, 'Restart agent')),
     h('form', { class: 'inline mt', onsubmit: e => {
@@ -471,7 +478,9 @@ async function viewDevice(root, id) {
       if (await guard(() => api('PATCH', '/api/v1/devices/' + id, { remove_labels: [k] }))) refresh();
     }));
     replace(head, h('div', { class: 'crumb' }, h('a', { href: '#/devices' }, 'Devices'), ' / ', d.id),
-      pageHead(d.name, h('span', {}, badge(d.status), d.license_revoked ? [' ', badge('revoked')] : null, ' last seen ', ago(d.last_seen_at),
+      pageHead(d.name, h('span', {}, badge(d.status),
+        d.connected ? [' ', h('span', { title: 'Holding a live connection: actions reach it within seconds' }, badge('live'))] : null,
+        d.license_revoked ? [' ', badge('revoked')] : null, ' last seen ', ago(d.last_seen_at),
         d.agent_status ? ' · ' + d.agent_status : '')));
     const usage = (free, total, usedBytes) => {
       if (!total) return h('span', { class: 'muted' }, '—');
@@ -529,6 +538,7 @@ async function viewDevice(root, id) {
         h('td', {}, p.metrics.rssi ? p.metrics.rssi + ' dBm' : '—'),
         h('td', { class: 'nowrap' }, ago(p.last_seen_at))))));
     actions.classList.toggle('hidden', !!d.parent_id);
+    logs.el.classList.toggle('hidden', !!d.parent_id || android);
     replace(updates, h('h2', {}, 'Update history'), table(['Package', 'Version', 'Status', 'Updated', 'Details'],
       (det.updates || []).map(u => h('tr', {},
         h('td', { class: 'mono' }, u.package),
@@ -548,6 +558,82 @@ async function viewDevice(root, id) {
   }
   if (await guard(refresh) === undefined && !dev) replace(root, h('div', { class: 'empty' }, 'Device not found. ', h('a', { href: '#/devices' }, 'Back to devices')));
   return refresh;
+}
+
+// Remote logs: queue a "logs" action and show the result as soon as the
+// device answers (within seconds when it holds a live connection).
+function logsCard(id, getDevice) {
+  const source = h('select', { 'aria-label': 'Log source' }, h('option', { value: 'journal' }, 'System journal'), h('option', { value: 'file' }, 'Log file'));
+  const target = h('input', { placeholder: 'all units, or e.g. myapp.service', 'aria-label': 'Unit or file name' });
+  const targetLabel = h('label', {}, 'Unit', target);
+  const lines = h('select', { 'aria-label': 'Lines' }, ['100', '200', '1000', '5000'].map(n => h('option', { value: n }, n + ' lines')));
+  lines.value = '200';
+  const since = h('select', { 'aria-label': 'Since' }, [['', 'Any time'], ['15m', 'Last 15 min'], ['1h', 'Last hour'], ['6h', 'Last 6 hours'], ['24h', 'Last day'], ['168h', 'Last week']].map(([v, l]) => h('option', { value: v }, l)));
+  const grep = h('input', { placeholder: 'optional', 'aria-label': 'Only lines containing' });
+  const status = h('div', { class: 'muted', role: 'status' });
+  const out = h('pre', { class: 'logs hidden', tabindex: '0', 'aria-label': 'Log output' });
+  const save = h('button', { class: 'btn small hidden', type: 'button' }, 'Download');
+  const submit = h('button', { class: 'btn primary', type: 'submit' }, 'Fetch logs');
+  let text = '';
+  source.addEventListener('change', () => {
+    const file = source.value === 'file';
+    targetLabel.firstChild.textContent = file ? 'File name' : 'Unit';
+    target.placeholder = file ? 'a name from the agent\'s log_files, e.g. app' : 'all units, or e.g. myapp.service';
+    since.disabled = file;
+  });
+  save.addEventListener('click', () => {
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    const a = h('a', { href: url, download: `${(getDevice() || {}).name || id}-${target.value || source.value}.log`.replace(/[^\w.-]+/g, '-') });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  });
+  const form = h('form', { class: 'stack', onsubmit: async e => {
+    e.preventDefault();
+    const args = [source.value];
+    const t = target.value.trim();
+    if (t) args.push((source.value === 'file' ? 'name=' : 'unit=') + t);
+    else if (source.value === 'file') return toast('Enter the log file name', true);
+    args.push('lines=' + lines.value);
+    if (since.value && source.value === 'journal') args.push('since=' + since.value);
+    if (grep.value.trim()) args.push('grep=' + grep.value.trim());
+    const act = await guard(() => api('POST', `/api/v1/devices/${id}/actions`, { type: 'logs', args }));
+    if (!act) return;
+    submit.disabled = true;
+    const d = getDevice();
+    const started = Date.now();
+    status.textContent = d && d.connected ? 'Asking the device…' : 'Queued. The device has no live connection, so it answers at its next heartbeat.';
+    try {
+      for (;;) {
+        await new Promise(r => setTimeout(r, 700));
+        const acts = await api('GET', `/api/v1/devices/${id}/actions`);
+        const a = acts.find(x => x.id === act.id);
+        if (a && a.status !== 'queued' && a.status !== 'sent') {
+          text = a.output || '';
+          replace(out, text);
+          out.classList.remove('hidden');
+          save.classList.toggle('hidden', a.status !== 'succeeded');
+          status.textContent = a.status === 'succeeded'
+            ? `Received in ${((Date.now() - started) / 1000).toFixed(1)}s · ${Math.max(0, text.split('\n').length - 1)} lines`
+            : `The device could not read these logs (${a.status}).`;
+          out.scrollTop = out.scrollHeight;
+          return;
+        }
+        if (Date.now() - started > 120_000) {
+          status.textContent = 'Still waiting. The result will appear under Actions when the device answers.';
+          return;
+        }
+      }
+    } catch (err) {
+      if (!(err instanceof APIError && err.status === 401)) status.textContent = err.message;
+    } finally {
+      submit.disabled = false;
+    }
+  } },
+  h('div', { class: 'form-grid' }, h('label', {}, 'Source', source), targetLabel, h('label', {}, 'Show', lines),
+    h('label', {}, 'Since', since), h('label', {}, 'Only lines containing', grep)),
+  h('div', { class: 'btn-row' }, submit, save), status);
+  const el = h('div', { class: 'card need-operator' }, h('h2', {}, 'Logs'), form, out);
+  return { el };
 }
 
 function strategyFields() {

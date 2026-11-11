@@ -102,6 +102,7 @@ func (s *Server) decorate(d *api.Device) {
 	} else {
 		d.Status = api.DeviceOnline
 	}
+	d.Connected = s.push.connected(d.ID)
 }
 
 func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
@@ -324,8 +325,17 @@ func (s *Server) handleCreateAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "exec requires args (the command and its arguments)")
 			return
 		}
+	case api.ActionLogs:
+		if err := validLogArgs(req.Args); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	default:
-		writeError(w, http.StatusBadRequest, "unknown action type; use reboot, restart-agent or exec")
+		writeError(w, http.StatusBadRequest, "unknown action type; use reboot, restart-agent, exec or logs")
+		return
+	}
+	if d.ParentID != "" {
+		writeError(w, http.StatusBadRequest, "peripherals run no agent; send actions to their gateway")
 		return
 	}
 	now := s.now()
@@ -335,14 +345,68 @@ func (s *Server) handleCreateAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.event(r.Context(), "action.queued", d.ID, "", fmt.Sprintf("%s queued for %s", describeAction(a), d.Name))
+	s.push.wake(d.ID) // a connected agent runs it within a second or two
 	writeJSON(w, http.StatusCreated, a)
 }
 
 func describeAction(a *api.Action) string {
-	if a.Type == api.ActionExec {
+	switch a.Type {
+	case api.ActionExec:
 		return "exec `" + truncate(strings.Join(a.Args, " "), 80) + "`"
+	case api.ActionLogs:
+		return "logs (" + truncate(strings.Join(a.Args, " "), 80) + ")"
 	}
 	return a.Type
+}
+
+var (
+	logUnitRe = regexp.MustCompile(`^[A-Za-z0-9@._:\\-]{1,128}$`)
+	logNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+)
+
+// validLogArgs checks a logs action: a source, then key=value options.
+func validLogArgs(args []string) error {
+	if len(args) == 0 || (args[0] != "journal" && args[0] != "file") {
+		return errors.New(`logs needs a source: "journal" (systemd journal) or "file" (a log file named in the agent's log_files)`)
+	}
+	seen := map[string]string{}
+	for _, a := range args[1:] {
+		k, v, ok := strings.Cut(a, "=")
+		if !ok {
+			return fmt.Errorf("logs option %q must be key=value", a)
+		}
+		seen[k] = v
+		switch k {
+		case "unit":
+			if !logUnitRe.MatchString(v) {
+				return errors.New("invalid unit name")
+			}
+		case "name":
+			if !logNameRe.MatchString(v) {
+				return errors.New("invalid log file name")
+			}
+		case "lines":
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 || n > 5000 {
+				return errors.New("lines must be 1-5000")
+			}
+		case "since":
+			d, err := time.ParseDuration(v)
+			if err != nil || d <= 0 || d > 31*24*time.Hour {
+				return errors.New("since must be a duration such as 30m, 6h or 72h (up to 31 days)")
+			}
+		case "grep":
+			if len(v) > 200 {
+				return errors.New("grep pattern too long")
+			}
+		default:
+			return fmt.Errorf("unknown logs option %q (use unit, name, lines, since, grep)", k)
+		}
+	}
+	if args[0] == "file" && seen["name"] == "" {
+		return errors.New("file logs need name=<log file name from the agent's log_files>")
+	}
+	return nil
 }
 
 // ---- enrollment tokens ----

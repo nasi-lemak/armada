@@ -41,17 +41,20 @@ type Metrics struct {
 
 // Device is a managed machine as seen by the control plane.
 type Device struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Channel     string            `json:"channel"`
-	Labels      map[string]string `json:"labels"`
-	Info        DeviceInfo        `json:"info"`
-	Metrics     Metrics           `json:"metrics"`
-	Packages    map[string]string `json:"packages"`
-	Status      string            `json:"status"` // online | offline
-	EnrolledAt  time.Time         `json:"enrolled_at"`
-	LastSeenAt  time.Time         `json:"last_seen_at"`
-	AgentStatus string            `json:"agent_status,omitempty"` // free-form note from the agent, e.g. "update deferred"
+	ID         string            `json:"id"`
+	Name       string            `json:"name"`
+	Channel    string            `json:"channel"`
+	Labels     map[string]string `json:"labels"`
+	Info       DeviceInfo        `json:"info"`
+	Metrics    Metrics           `json:"metrics"`
+	Packages   map[string]string `json:"packages"`
+	Status     string            `json:"status"` // online | offline
+	EnrolledAt time.Time         `json:"enrolled_at"`
+	LastSeenAt time.Time         `json:"last_seen_at"`
+	// Connected means the agent holds a live push connection, so actions
+	// reach it within a second or two instead of at the next heartbeat.
+	Connected   bool   `json:"connected,omitempty"`
+	AgentStatus string `json:"agent_status,omitempty"` // free-form note from the agent, e.g. "update deferred"
 	// Attestation is set for devices that proved a hardware-backed key at enrollment.
 	Attestation *DeviceAttestation `json:"attestation,omitempty"`
 	// LicenseRevoked stops the device from receiving new app licenses.
@@ -347,7 +350,22 @@ const (
 	ActionReboot       = "reboot"
 	ActionRestartAgent = "restart-agent"
 	ActionExec         = "exec"
+	// ActionLogs collects recent logs from the device. Args are a source
+	// ("journal" or "file") followed by key=value options: unit=, name=,
+	// lines=, since= (a duration such as 1h) and grep= (case-insensitive).
+	ActionLogs = "logs"
 )
+
+// WaitResponse answers an agent's long-poll.
+type WaitResponse struct {
+	Wake bool `json:"wake"`
+}
+
+// WakeResponse reports whether a device had a live connection when woken.
+// If not, it checks in as soon as it reconnects or at its next heartbeat.
+type WakeResponse struct {
+	Connected bool `json:"connected"`
+}
 
 // Action statuses.
 const (

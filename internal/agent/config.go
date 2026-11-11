@@ -90,6 +90,15 @@ type Config struct {
 	AllowReboot *bool `json:"allow_reboot,omitempty"`
 	// AllowExec permits the "exec" action, which runs arbitrary commands (default false).
 	AllowExec bool `json:"allow_exec,omitempty"`
+	// AllowLogs permits the "logs" action: reading the systemd journal and
+	// the files listed in LogFiles (default true).
+	AllowLogs *bool `json:"allow_logs,omitempty"`
+	// LogFiles names log files the server may ask for, e.g.
+	// {"app": "/var/log/myapp/app.log"}. Only these files can be read.
+	LogFiles map[string]string `json:"log_files,omitempty"`
+	// DisablePush turns off the long-poll connection that lets the server
+	// reach this device instantly. Actions then wait for the next heartbeat.
+	DisablePush bool `json:"disable_push,omitempty"`
 	// RebootCommand is run for the reboot action (default ["systemctl", "reboot"]).
 	RebootCommand []string `json:"reboot_command,omitempty"`
 	// CommandTimeout bounds install, health, rollback and exec commands (default 10m).
@@ -145,6 +154,10 @@ func (c *Config) Validate() error {
 	if c.AllowReboot == nil {
 		t := true
 		c.AllowReboot = &t
+	}
+	if c.AllowLogs == nil {
+		t := true
+		c.AllowLogs = &t
 	}
 	if len(c.RebootCommand) == 0 {
 		c.RebootCommand = []string{"systemctl", "reboot"}

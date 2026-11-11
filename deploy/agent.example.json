@@ -8,6 +8,10 @@
 
   "allow_reboot": true,
   "allow_exec": false,
+  "allow_logs": true,
+  "log_files": {
+    "myapp": "/var/log/myapp/app.log"
+  },
   "command_timeout": "10m",
 
   "packages": {

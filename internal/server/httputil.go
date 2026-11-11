@@ -44,6 +44,18 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
+// truncateHead keeps the last n bytes of s (for logs and command output).
+func truncateHead(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	s = s[len(s)-n:]
+	for len(s) > 0 && !utf8.RuneStart(s[0]) {
+		s = s[1:]
+	}
+	return "…" + s
+}
+
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s

@@ -196,6 +196,10 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; }
   font-family: var(--mono); font-size: 12.5px; background: var(--panel-2); border: 1px dashed var(--border);
   border-radius: 8px; padding: 10px 12px; overflow-wrap: anywhere; user-select: all;
 }
+pre.logs {
+  font-family: var(--mono); font-size: 12px; line-height: 1.45; background: var(--panel-2); border-radius: 6px;
+  padding: 10px; margin: 12px 0 0; max-height: 480px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+}
 pre.out {
   font-family: var(--mono); font-size: 12px; background: var(--panel-2); border-radius: 6px;
   padding: 8px; margin: 4px 0 0; max-height: 160px; overflow: auto; white-space: pre-wrap;

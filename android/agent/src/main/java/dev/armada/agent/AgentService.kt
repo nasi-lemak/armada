@@ -10,6 +10,8 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlin.math.min
 
@@ -22,12 +24,16 @@ import kotlin.math.min
 class AgentService : Service() {
     @Volatile private var running = false
     private var worker: Thread? = null
+    private var pusher: Thread? = null
+    /** Signals from the push connection: check in now. */
+    private val wakeups = LinkedBlockingQueue<Unit>(1)
 
     override fun onCreate() {
         super.onCreate()
         startInForeground()
         running = true
         worker = thread(name = "armada-agent") { loop() }
+        pusher = thread(name = "armada-push") { pushLoop() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
@@ -35,6 +41,7 @@ class AgentService : Service() {
     override fun onDestroy() {
         running = false
         worker?.interrupt()
+        pusher?.interrupt()
         super.onDestroy()
     }
 
@@ -59,11 +66,50 @@ class AgentService : Service() {
                 backoffSec.also { backoffSec = min(backoffSec * 2, 300) }
             }
             try {
-                Thread.sleep(wait * 1000)
+                // Sleep until the next heartbeat, or until the server wakes us.
+                wakeups.poll(wait, TimeUnit.SECONDS)
             } catch (e: InterruptedException) {
                 return
             }
         }
+    }
+
+    /**
+     * Keeps a long-poll open so the server can reach the device at once
+     * (actions run within seconds instead of at the next heartbeat).
+     */
+    private fun pushLoop() {
+        val agent = Agent.get(this)
+        var backoffSec = 5L
+        while (running) {
+            try {
+                if (!agent.prefs.isEnrolled) {
+                    Thread.sleep(10_000)
+                    continue
+                }
+                if (agent.waitForWake(50)) wakeups.offer(Unit)
+                backoffSec = 5
+            } catch (e: InterruptedException) {
+                return
+            } catch (e: ApiException) {
+                if (e.status == 404) {
+                    Log.i(Agent.TAG, "server does not support push; actions run at the next heartbeat")
+                    return
+                }
+                if (!sleepQuietly(backoffSec)) return
+                backoffSec = min(backoffSec * 2, 300)
+            } catch (e: Exception) {
+                if (!sleepQuietly(backoffSec)) return
+                backoffSec = min(backoffSec * 2, 300)
+            }
+        }
+    }
+
+    private fun sleepQuietly(sec: Long): Boolean = try {
+        Thread.sleep(jitter(sec) * 1000)
+        true
+    } catch (e: InterruptedException) {
+        false
     }
 
     private fun jitter(sec: Long): Long = (sec * (0.9 + Math.random() * 0.2)).toLong().coerceAtLeast(5)

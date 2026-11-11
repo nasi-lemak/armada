@@ -267,3 +267,63 @@ func (c *cli) meCmd(verb string, args []string) error {
 	}
 	return fmt.Errorf("unknown me command %q", verb)
 }
+
+// deviceLogs queues a logs action and waits for the device's answer.
+func (c *cli) deviceLogs(args []string) error {
+	fs := flag.NewFlagSet("devices logs", flag.ContinueOnError)
+	unit := fs.String("unit", "", "")
+	file := fs.String("file", "", "")
+	lines := fs.Int("lines", 200, "")
+	since := fs.String("since", "", "")
+	grep := fs.String("grep", "", "")
+	timeout := fs.Duration("timeout", 2*time.Minute, "")
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if err := need(pos, 1, "device id"); err != nil {
+		return err
+	}
+	req := api.CreateActionRequest{Type: api.ActionLogs, Args: []string{"journal"}}
+	if *file != "" {
+		req.Args = []string{"file", "name=" + *file}
+	} else if *unit != "" {
+		req.Args = append(req.Args, "unit="+*unit)
+	}
+	req.Args = append(req.Args, fmt.Sprintf("lines=%d", *lines))
+	if *since != "" {
+		req.Args = append(req.Args, "since="+*since)
+	}
+	if *grep != "" {
+		req.Args = append(req.Args, "grep="+*grep)
+	}
+	path := "/api/v1/devices/" + url.PathEscape(pos[0]) + "/actions"
+	var a api.Action
+	if err := c.do("POST", path, req, &a); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(*timeout)
+	for {
+		time.Sleep(700 * time.Millisecond)
+		var acts []api.Action
+		if err := c.do("GET", path, nil, &acts); err != nil {
+			return err
+		}
+		for _, x := range acts {
+			if x.ID != a.ID || x.Status == api.ActionQueued || x.Status == api.ActionSent {
+				continue
+			}
+			if c.json {
+				return c.printJSON(x)
+			}
+			fmt.Fprintln(c.out, x.Output)
+			if x.Status != api.ActionSucceeded {
+				return fmt.Errorf("device could not read logs (%s)", x.Status)
+			}
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("no answer within %s; the device may be offline. The result will appear in 'armadactl devices get %s' (action %s)", *timeout, pos[0], a.ID)
+		}
+	}
+}

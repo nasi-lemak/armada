@@ -54,6 +54,7 @@ type Agent struct {
 	wg       sync.WaitGroup
 	health   *healthRunner
 	gw       *gateway
+	wake     chan struct{} // the server asked for a check-in now
 }
 
 // New creates an agent from a validated config.
@@ -70,7 +71,7 @@ func New(cfg *Config, log *slog.Logger) (*Agent, error) {
 	}
 	windows, _ := ParseWindows(cfg.MaintenanceWindow)
 	a := &Agent{cfg: cfg, log: log, state: st, windows: windows, Reexec: reexec, Now: time.Now, interval: 30 * time.Second,
-		health: newHealthRunner(cfg.Health)}
+		health: newHealthRunner(cfg.Health), wake: make(chan struct{}, 1)}
 	if cfg.Peripherals != nil {
 		a.gw = newGateway(a, cfg.Peripherals)
 	}
@@ -110,6 +111,13 @@ func (a *Agent) Run(ctx context.Context) error {
 		defer a.wg.Done()
 		a.healthLoop(ctx)
 	}()
+	if !a.cfg.DisablePush {
+		a.wg.Add(1)
+		go func() {
+			defer a.wg.Done()
+			a.pushLoop(ctx)
+		}()
+	}
 	if a.gw != nil {
 		a.wg.Add(2)
 		go func() {
@@ -150,6 +158,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-time.After(wait):
 		case <-a.health.changed:
 			// A health status changed: report it now rather than at the next interval.
+		case <-a.wake:
+			// The server has something for us (an action, a log request).
 		}
 	}
 }
@@ -828,6 +838,19 @@ func (a *Agent) runAction(ctx context.Context, act api.Action) {
 		if err := a.Reexec(a.ExePath); err != nil {
 			a.log.Error("restart failed", "err", err)
 		}
+	case api.ActionLogs:
+		if !*a.cfg.AllowLogs {
+			result(api.ActionRejected, -1, "logs are disabled on this device (allow_logs=false)")
+			return
+		}
+		cctx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		out, err := a.collectLogs(cctx, act.Args)
+		if err != nil {
+			result(api.ActionFailed, 1, err.Error())
+			return
+		}
+		result(api.ActionSucceeded, 0, out)
 	case api.ActionExec:
 		if !a.cfg.AllowExec {
 			result(api.ActionRejected, -1, "exec is disabled on this device (allow_exec=false)")

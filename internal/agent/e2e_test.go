@@ -45,7 +45,8 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(func() { ts.Close(); srv.Close() })
+	// Drop held long-polls first; ts.Close waits for open requests.
+	t.Cleanup(func() { ts.CloseClientConnections(); ts.Close(); srv.Close() })
 	return &harness{t: t, srv: srv, ts: ts}
 }
 

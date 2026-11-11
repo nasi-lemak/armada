@@ -40,6 +40,9 @@ Commands:
   devices list [--channel C] [--label K=V] [--status online|offline]
   devices get <id>                           details, update history, actions
   devices set <id> [--name N] [--channel C] [--label K=V]... [--unlabel K]...
+  devices logs <id> [--unit U | --file NAME] [--lines 200] [--since 1h] [--grep TEXT] [--timeout 2m]
+                                             fetch recent journal or log-file lines (waits for the answer)
+  devices wake <id>                          ask the device to check in now
   devices delete <id>
   devices action <id> reboot|restart-agent
   devices action <id> exec -- <command> [args...]
@@ -540,7 +543,23 @@ func (c *cli) devices(verb string, args []string) error {
 		if c.json {
 			return c.printJSON(a)
 		}
-		fmt.Fprintf(c.out, "queued %s (%s); it runs on the device's next check-in\n", a.ID, a.Type)
+		fmt.Fprintf(c.out, "queued %s (%s); a connected device runs it within seconds, others at their next check-in\n", a.ID, a.Type)
+		return nil
+	case "logs", "log":
+		return c.deviceLogs(args)
+	case "wake":
+		if err := need(args, 1, "device id"); err != nil {
+			return err
+		}
+		var wr api.WakeResponse
+		if err := c.do("POST", "/api/v1/devices/"+url.PathEscape(args[0])+"/wake", nil, &wr); err != nil {
+			return err
+		}
+		if wr.Connected {
+			fmt.Fprintln(c.out, "device is checking in now")
+		} else {
+			fmt.Fprintln(c.out, "device has no live connection; it checks in at its next heartbeat")
+		}
 		return nil
 	}
 	return fmt.Errorf("unknown devices command %q", verb)

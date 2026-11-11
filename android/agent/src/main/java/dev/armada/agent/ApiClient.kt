@@ -20,6 +20,13 @@ class ApiClient(private val baseUrl: String, private val deviceKey: () -> String
         return readJson(conn)
     }
 
+    /** GET with a custom read timeout, for the push long-poll. */
+    fun get(path: String, readTimeoutMs: Int = 30_000): JSONObject {
+        val conn = open(path, true)
+        conn.readTimeout = readTimeoutMs
+        return readJson(conn)
+    }
+
     /**
      * Downloads [path] into [dest], resuming if [dest] already holds part of
      * the file. Large APKs on flaky mobile links benefit from this.

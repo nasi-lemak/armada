@@ -75,6 +75,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, dev *ap
 	}
 	ctx := r.Context()
 	now := s.now()
+	s.push.checkedIn(dev.ID)
 	if req.Packages == nil {
 		req.Packages = map[string]string{}
 	}
@@ -338,7 +339,7 @@ func (s *Server) handleActionResult(w http.ResponseWriter, r *http.Request, dev 
 		writeError(w, http.StatusBadRequest, "invalid status")
 		return
 	}
-	res.Output = truncate(res.Output, 64*1024)
+	res.Output = truncateHead(res.Output, 256*1024) // keep the newest output
 	id := r.PathValue("id")
 	if err := s.store.CompleteAction(r.Context(), id, dev.ID, res, s.now()); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "action not found")
