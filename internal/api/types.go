@@ -578,6 +578,21 @@ type UpdateInstruction struct {
 	Peripheral *PeripheralTarget `json:"peripheral,omitempty"`
 }
 
+// ChunkIndex lists a release artifact's content-defined chunks, in order.
+// Agents rebuild a new artifact from chunks of the version they have and
+// download only the missing ones (delta updates).
+type ChunkIndex struct {
+	Algorithm string     `json:"algorithm"`
+	Size      int64      `json:"size"`
+	Chunks    []ChunkRef `json:"chunks"`
+}
+
+// ChunkRef is one chunk: its length and truncated SHA-256.
+type ChunkRef struct {
+	Len int64  `json:"l"`
+	Sum string `json:"h"`
+}
+
 // PeripheralTarget says which peripheral a gateway should flash.
 type PeripheralTarget struct {
 	DeviceID        string `json:"device_id"`

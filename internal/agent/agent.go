@@ -433,12 +433,12 @@ func (a *Agent) applyUpdate(ctx context.Context, u api.UpdateInstruction) {
 		a.report(ctx, api.UpdateReport{DeploymentID: u.DeploymentID, ReleaseID: u.ReleaseID, Status: status, Message: msg})
 	}
 	rep(api.UpdateDownloading, "")
-	path, err := a.fetchArtifact(ctx, u)
+	path, note, err := a.fetchArtifactNote(ctx, u)
 	if err != nil {
 		rep(api.UpdateFailed, err.Error())
 		return
 	}
-	rep(api.UpdateInstalling, "")
+	rep(api.UpdateInstalling, note)
 	if u.Package == api.AgentPackage {
 		if err := a.selfUpdate(ctx, u, path); err != nil {
 			rep(api.UpdateFailed, err.Error())
@@ -452,37 +452,63 @@ func (a *Agent) applyUpdate(ctx context.Context, u api.UpdateInstruction) {
 
 // fetchArtifact downloads and verifies a release, returning the local path.
 func (a *Agent) fetchArtifact(ctx context.Context, u api.UpdateInstruction) (string, error) {
+	path, _, err := a.fetchArtifactNote(ctx, u)
+	return path, err
+}
+
+// fetchArtifactNote is fetchArtifact, also returning a note on how it was
+// downloaded (e.g. how much a delta update saved).
+func (a *Agent) fetchArtifactNote(ctx context.Context, u api.UpdateInstruction) (string, string, error) {
 	pubB64 := a.cfg.SigningPublicKey
 	if pubB64 == "" {
 		pubB64 = a.state.get().SigningPublicKey
 	}
 	pub, err := base64.StdEncoding.DecodeString(pubB64)
 	if err != nil || len(pub) != ed25519.PublicKeySize {
-		return "", errors.New("no valid release-signing key; refusing to install")
+		return "", "", errors.New("no valid release-signing key; refusing to install")
 	}
 	sig, err := base64.StdEncoding.DecodeString(u.Signature)
 	if err != nil || !ed25519.Verify(pub, api.SigningPayload(u.Package, u.Version, u.SHA256), sig) {
-		return "", errors.New("release signature is invalid; refusing to install")
+		return "", "", errors.New("release signature is invalid; refusing to install")
 	}
 	dir := filepath.Join(a.cfg.StateDir, "downloads")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
+		return "", "", err
 	}
 	path := filepath.Join(dir, filepath.Base(u.ReleaseID)+".part")
 	dctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
 	defer cancel()
-	if err := a.client.downloadTo(dctx, u.ArtifactPath, path, u.Size); err != nil {
-		return "", fmt.Errorf("download: %w", err)
+	note := ""
+	if seed := a.deltaSeed(u); seed != "" && !a.cfg.DisableDelta {
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) { // not resuming a full download
+			n, err := a.client.deltaDownload(dctx, u, seed, path)
+			if err == nil {
+				if sum, size, _ := fileSHA256(path); size == u.Size && sum == u.SHA256 {
+					a.log.Info(n, "package", u.Package, "version", u.Version)
+					note = n
+				} else {
+					a.log.Warn("delta-built artifact does not match; downloading in full", "package", u.Package)
+					os.Remove(path)
+				}
+			} else {
+				a.log.Info("delta update not used; downloading in full", "package", u.Package, "reason", err)
+			}
+		}
+	}
+	if note == "" {
+		if err := a.client.downloadTo(dctx, u.ArtifactPath, path, u.Size); err != nil {
+			return "", "", fmt.Errorf("download: %w", err)
+		}
 	}
 	sum, size, err := fileSHA256(path)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if size != u.Size || sum != u.SHA256 {
 		os.Remove(path) // corrupt; start over next time
-		return "", fmt.Errorf("artifact checksum mismatch (got %s, %d bytes)", sum, size)
+		return "", "", fmt.Errorf("artifact checksum mismatch (got %s, %d bytes)", sum, size)
 	}
-	return path, nil
+	return path, note, nil
 }
 
 func fileSHA256(path string) (string, int64, error) {

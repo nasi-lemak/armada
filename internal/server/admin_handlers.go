@@ -685,6 +685,15 @@ func (s *Server) handleUploadRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.event(ctx, "release.created", "", "", fmt.Sprintf("release %s %s uploaded to %s (%s)", rel.Package, rel.Version, rel.Channel, humanBytes(rel.Size)))
+	if rel.Size >= 1<<20 { // precompute the delta-update index off the request path
+		s.bg.Add(1)
+		go func(rel api.Release) {
+			defer s.bg.Done()
+			if _, err := s.chunkIndex(&rel); err != nil {
+				s.log.Warn("chunk index", "release", rel.ID, "err", err)
+			}
+		}(*rel)
+	}
 	res := uploadResult{Release: rel}
 	if autoDeploy {
 		d, err := s.createDeployment(ctx, api.CreateDeploymentRequest{
@@ -716,6 +725,7 @@ func (s *Server) handleDeleteRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	os.Remove(s.artifactPath(id))
+	os.Remove(s.chunkPath(id))
 	w.WriteHeader(http.StatusNoContent)
 }
 

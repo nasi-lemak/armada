@@ -84,7 +84,7 @@ func TestLogsActionValidation(t *testing.T) {
 	if code := call(t, ts, admin, "POST", apath, api.CreateActionRequest{Type: api.ActionWipe, Args: []string{"confirm=" + ar.DeviceID}}, nil); code != 201 {
 		t.Errorf("confirmed wipe: %d", code)
 	}
-		var wr api.WakeResponse
+	var wr api.WakeResponse
 	if code := call(t, ts, admin, "POST", "/api/v1/devices/"+er.DeviceID+"/wake", nil, &wr); code != 200 || wr.Connected {
 		t.Fatalf("wake offline device: %d %+v", code, wr)
 	}

@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nasi-lemak/armada/internal/api"
@@ -143,6 +144,8 @@ type Server struct {
 	notifyQueue  chan notifyJob
 	notifyClient *http.Client
 	push         *pushHub
+	chunks       chunkIndexes
+	bg           sync.WaitGroup // background work Close waits for
 }
 
 // New opens the data directory (creating the database and signing key if
@@ -209,6 +212,7 @@ func New(cfg Config) (*Server, error) {
 // Close releases resources.
 func (s *Server) Close() error {
 	s.push.close()
+	s.bg.Wait()
 	close(s.notifyQueue)
 	return s.store.Close()
 }
@@ -263,6 +267,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/agent/releases/{id}/artifact", s.deviceAuth(s.handleAgentArtifact))
 	mux.Handle("POST /api/v1/agent/actions/{id}/result", s.deviceAuth(s.handleActionResult))
 	mux.Handle("GET /api/v1/agent/wait", s.deviceAuth(s.handleAgentWait))
+	mux.Handle("GET /api/v1/agent/releases/{id}/chunks", s.deviceAuth(s.handleAgentChunks))
 	mux.Handle("POST /api/v1/agent/license", s.deviceAuth(s.handleLicense))
 
 	// Admin API.

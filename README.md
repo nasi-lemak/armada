@@ -56,7 +56,9 @@ It has three parts, all in Go with no external services:
   NAT, without opening ports. `exec` is off by default and each device opts in.
 - **Remote logs.** Fetch recent systemd journal lines (any unit) or named log files from a device,
   filtered by time and text, from the dashboard or `armadactl devices logs`.
-- **Resumable downloads** for devices on poor links (HTTP Range).
+- **Delta updates.** Devices download only the parts of a release that differ from the version they
+  have (content-defined chunks), from any older version, with no diffs to prepare. Resumable full
+  downloads for everything else.
 - **Activity log** of enrollments, updates, failures, pauses and actions.
 - **Health monitoring** (see [below](#health-monitoring)):
   - Hardware checks run automatically. They cover SSD/HDD SMART data, NVMe wear, eMMC wear, SD-card
@@ -205,6 +207,24 @@ armadactl deployments create --release rel_... --start-at "2026-12-01 02:00" \
   under way finish. An overnight window belongs to the day it starts on, so `22:00-05:00` on
   Friday covers early Saturday too.
 - Devices also honour their own `maintenance_window`, in their local time.
+
+**Delta updates.** Nothing to set up. For every release of 1 MB or more, the server publishes a list of
+the artifact's *content-defined chunks*: pieces whose boundaries follow the content, so an edit only
+changes the chunks around it. A device that already has an earlier version of the package splits that
+copy the same way, then downloads only the chunks it lacks, using range requests. For agent updates
+the running binary is the starting copy.
+
+- It works from any older version, and the server keeps no per-version diffs.
+- The rebuilt file is checked against the release's SHA-256 and signature like any download. If
+  anything is off, or more than 70% would have to be fetched anyway, the agent downloads in full.
+- The device's update progress shows what it saved, e.g. *delta update: downloaded 3.1 MB of 412 MB
+  (99% reused)*.
+- Savings depend on the format. Uncompressed tarballs, disk and filesystem images, and binaries share
+  most chunks between versions. Compressed archives (`.tar.gz`, `.zip`, APKs) change throughout, so
+  they gain little. Ship `.tar` and let the link compress, or use formats built for this, such as RAUC
+  bundles with casync, or squashfs with small blocks.
+- Splitting a file runs at roughly 100-200 MB/s on a modern CPU, and slower on small boards.
+- Set `disable_delta: true` in the agent config to always download in full.
 
 ## Android devices
 
@@ -699,6 +719,7 @@ or `ARMADA_TOKEN`.
 | `allow_logs` | `true` | Whether the server may read the systemd journal and the files in `log_files` |
 | `log_files` | none | Log files the server may ask for, by name: `{"myapp": "/var/log/myapp/app.log"}`. No other files can be read. |
 | `disable_push` | `false` | Turn off the long-poll connection; actions then wait for the next heartbeat |
+| `disable_delta` | `false` | Always download updates in full instead of reusing chunks of the installed version |
 | `managed_config` | none | Directories configuration profiles may write files into, by name, each with an optional `reload_command` |
 | `allow_remote_settings` | `true` | Whether `agent` profiles may override `maintenance_window` and `auto_update` |
 | `reboot_command` | `["systemctl","reboot"]` | |
@@ -828,7 +849,7 @@ endpoints use the per-device key issued at enrollment.
 | `POST /api/v1/deployments/{id}/{pause,resume,advance,retry,complete,abort}` | Control a rollout |
 | `GET /api/v1/events` | Activity log |
 | `GET /api/v1/signing-key` | Release-signing public key |
-| `POST /api/v1/agent/enroll`, `/heartbeat`, `/updates`, `/actions/{id}/result`, `GET /api/v1/agent/releases/{id}/artifact`, `GET /api/v1/agent/wait` | Agent protocol (`wait` is the push long-poll) |
+| `POST /api/v1/agent/enroll`, `/heartbeat`, `/updates`, `/actions/{id}/result`, `GET /api/v1/agent/releases/{id}/artifact`, `GET /api/v1/agent/wait`, `GET /api/v1/agent/releases/{id}/chunks` | Agent protocol (`wait` is the push long-poll; `chunks` the delta-update index) |
 | `GET /install.sh`, `GET /api/v1/agent/download?os=&arch=&package=` | Public bootstrap (agent binaries and APK only) |
 | `GET/PUT/DELETE /api/v1/apps[/{package}]` | Android apps: signing certificates and licensing |
 | `POST /api/v1/android/provisioning` | Android setup QR code for an enrollment token |
@@ -889,6 +910,7 @@ cmd/armada-agent    agent entrypoint
 cmd/armadactl       CLI
 internal/api        wire types shared by everything
 internal/rollout    pure rollout logic: targeting, staging, version ordering, health evaluation
+internal/chunk      content-defined chunking for delta updates
 internal/store      SQLite persistence
 internal/server     HTTP API, agent protocol, rollout engine
 internal/agent      agent: enrollment, heartbeat, updates, self-update, actions
@@ -908,7 +930,7 @@ deploy/, examples/  service units, compose file, sample agent config and hooks
   identity-aware proxy if you need either.
 - Push wakes one device at a time (actions, logs, check-in). New rollouts still start at each
   device's next heartbeat, which spreads the load. Logs are a snapshot, not a live tail.
-- There are no delta updates; every update downloads the full artifact.
+- Android app updates always download the full APK (APKs are compressed, so deltas save little).
 - The agent's metrics are richest on Linux. Other platforms report the basics.
 - On Android, actions are reboot, restart the agent, lock and wipe (`exec` and `logs` aren't
   supported: Android doesn't let apps read other apps' logs).

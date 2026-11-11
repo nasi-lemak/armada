@@ -99,6 +99,9 @@ type Config struct {
 	// LogFiles names log files the server may ask for, e.g.
 	// {"app": "/var/log/myapp/app.log"}. Only these files can be read.
 	LogFiles map[string]string `json:"log_files,omitempty"`
+	// DisableDelta always downloads updates in full instead of reusing
+	// chunks of the installed version.
+	DisableDelta bool `json:"disable_delta,omitempty"`
 	// DisablePush turns off the long-poll connection that lets the server
 	// reach this device instantly. Actions then wait for the next heartbeat.
 	DisablePush bool `json:"disable_push,omitempty"`

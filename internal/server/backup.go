@@ -54,7 +54,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	arts, _ := os.ReadDir(s.artifactDir)
 	for _, a := range arts {
 		// Artifacts are stored under their release ID; skip in-progress uploads.
-		if a.Type().IsRegular() && !strings.HasPrefix(a.Name(), "upload-") {
+		if a.Type().IsRegular() && !strings.HasPrefix(a.Name(), "upload-") && !strings.HasSuffix(a.Name(), ".chunks.json") && !strings.HasSuffix(a.Name(), ".tmp") {
 			files = append(files, [2]string{filepath.Join(s.artifactDir, a.Name()), "artifacts/" + a.Name()})
 		}
 	}
