@@ -99,9 +99,11 @@ Users and access:
   whoami                                     who the token belongs to, role and scope
   users list
   users create --email E --role viewer|operator|admin [--name N] [--scope K=V]...
-               [--password P]                password is read from stdin if omitted
+               [--password P | --sso-only]   password is read from stdin if omitted
   users set <id|email> [--role R] [--name N] [--scope K=V]... [--whole-fleet]
                        [--disable|--enable] [--reset-password]
+                       [--reset-2fa]          turn off their authenticator (lost phone)
+                       [--unlink-sso]         forget their single sign-on identity
   users delete <id|email>
   me password                                change your password (prompts on stdin)
   me tokens [list]

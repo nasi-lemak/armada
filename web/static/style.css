@@ -219,6 +219,14 @@ body[data-scoped="true"] .fleet-only { display: none !important; }
 .bad-text { color: var(--bad); font-weight: 600; }
 
 /* ---- login & toast ---- */
+#login-sso { justify-content: center; text-align: center; }
+.or { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
+.or::before, .or::after { content: ''; flex: 1; border-top: 1px solid var(--border); }
+.codes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 16px; font-family: var(--mono); font-size: 14px;
+  background: var(--panel-2); border-radius: 8px; padding: 12px 16px; margin: 8px 0; }
+.qr-box { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+.qr-box img { width: 200px; height: 200px; image-rendering: pixelated; background: #fff; border-radius: 8px; padding: 6px; }
+.banner { border-left: 3px solid var(--warn); background: var(--panel); padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; }
 .login { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
 .login-card {
   width: min(400px, 100%); background: var(--panel); border: 1px solid var(--border); border-radius: 14px;

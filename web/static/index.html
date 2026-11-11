@@ -11,6 +11,8 @@
   <div id="login" class="login hidden">
     <form id="login-form" class="login-card">
       <div class="brand brand-lg"><span class="logo" aria-hidden="true"></span>Armada</div>
+      <a id="login-sso" class="btn primary hidden" href="/api/v1/auth/sso/login">Sign in with single sign-on</a>
+      <div id="login-or" class="or hidden"><span>or</span></div>
       <div id="login-user" class="stack">
         <label>Email<input id="login-email" type="email" autocomplete="username"></label>
         <label>Password<input id="login-password" type="password" autocomplete="current-password"></label>
@@ -18,6 +20,10 @@
       <div id="login-admin" class="stack hidden">
         <p class="muted">The admin token is printed on first start and saved in <code>&lt;data-dir&gt;/admin-token</code>. Personal API tokens (<code>ut_…</code>) work here too.</p>
         <label>Token<input id="login-token" type="password" autocomplete="off"></label>
+      </div>
+      <div id="login-2fa" class="stack hidden">
+        <p class="muted">Enter the 6-digit code from your authenticator app, or one of your recovery codes.</p>
+        <label>Code<input id="login-code" inputmode="numeric" autocomplete="one-time-code" maxlength="11"></label>
       </div>
       <p id="login-error" class="error hidden" role="alert"></p>
       <button type="submit" class="btn primary">Sign in</button>

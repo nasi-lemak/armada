@@ -25,6 +25,11 @@ type principal struct {
 	scope api.Selector
 	// sessionHash is set when signed in with a dashboard session.
 	sessionHash string
+	// method is how they signed in: password, sso, token or admin-token.
+	method string
+	// setupRequired means two-factor sign-in is required and not set up yet:
+	// only account and sign-out routes are allowed.
+	setupRequired bool
 }
 
 // A nil principal (no auth context) is treated as unscoped; every route that
@@ -52,7 +57,7 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 	}
 	for _, t := range s.cfg.AdminTokens {
 		if subtle.ConstantTimeCompare([]byte(tok), []byte(t)) == 1 {
-			return &principal{name: "admin token", role: api.RoleAdmin}, nil
+			return &principal{name: "admin token", role: api.RoleAdmin, method: "admin-token"}, nil
 		}
 	}
 	var u *api.User
@@ -61,8 +66,9 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 	switch {
 	case strings.HasPrefix(tok, "st_"):
 		p.sessionHash = hashSecret(tok)
-		u, err = s.store.SessionUser(r.Context(), p.sessionHash, s.now(), s.cfg.SessionTTL)
+		u, p.method, err = s.store.SessionUser(r.Context(), p.sessionHash, s.now(), s.cfg.SessionTTL)
 	case strings.HasPrefix(tok, "ut_"):
+		p.method = "token"
 		u, err = s.store.TokenUser(r.Context(), hashSecret(tok), s.now())
 	default:
 		return nil, errors.New("invalid token")
@@ -74,7 +80,14 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 		return nil, errors.New("this account is disabled")
 	}
 	p.user, p.name, p.role, p.scope = u, u.Email, u.Role, u.Scope
+	p.setupRequired = s.cfg.Require2FA && p.method == "password" && !u.TwoFactor
 	return p, nil
+}
+
+// allowedDuringSetup are the routes a user who must still set up two-factor
+// sign-in can reach.
+func allowedDuringSetup(path string) bool {
+	return path == "/api/v1/me" || path == "/api/v1/auth/logout" || strings.HasPrefix(path, "/api/v1/me/2fa/")
 }
 
 // guard requires at least minRole. Routes that are not scopedOK are refused
@@ -84,6 +97,10 @@ func (s *Server) guard(minRole string, scopedOK bool, next http.HandlerFunc) htt
 		p, err := s.authenticate(r)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, err.Error())
+			return
+		}
+		if p.setupRequired && !allowedDuringSetup(r.URL.Path) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "set up two-factor sign-in first (My account)", "two_factor_setup_required": true})
 			return
 		}
 		if api.RoleRank(p.role) < api.RoleRank(minRole) {
@@ -187,6 +204,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
+	if !s.cfg.PasswordLogin {
+		writeError(w, http.StatusForbidden, "password sign-in is turned off; use single sign-on")
+		return
+	}
 	now := s.now()
 	email := strings.ToLower(strings.TrimSpace(req.Email))
 	keys := []string{"email:" + email, "ip:" + clientIP(r)}
@@ -195,26 +216,23 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, hash, err := s.store.UserByEmail(r.Context(), email)
-	if err != nil {
+	if err != nil || hash == "" { // unknown, or an SSO-only account
 		hash = string(dummyHash)
 	}
-	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) != nil || err != nil || u.Disabled {
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) != nil || err != nil || u.Disabled || u.NoPassword {
 		s.logins.fail(keys, now)
 		writeError(w, http.StatusUnauthorized, "wrong email or password")
 		return
 	}
-	s.logins.reset("email:" + email)
-	tok := newSecret("st")
-	exp := now.Add(s.cfg.SessionTTL)
-	if err := s.store.CreateSession(r.Context(), newID("ses"), hashSecret(tok), u.ID, exp); err != nil {
-		s.internalError(w, err)
-		return
+	s.finishPasswordLogin(w, r, u, req.Code, "")
+}
+
+func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
+	c := api.AuthConfig{PasswordLogin: s.cfg.PasswordLogin}
+	if s.sso != nil {
+		c.SSO, c.SSOName = true, s.cfg.OIDC.Name
 	}
-	u.LastLoginAt = &now
-	_ = s.store.UpdateUser(r.Context(), u)
-	ctx := context.WithValue(r.Context(), principalKey{}, &principal{user: u, name: u.Email, role: u.Role})
-	s.logEvent(ctx, "user.login", "", "", u.Email+" signed in")
-	writeJSON(w, http.StatusOK, api.LoginResponse{Token: tok, ExpiresAt: exp, User: *u})
+	writeJSON(w, http.StatusOK, c)
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -226,7 +244,8 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	p := principalFrom(r.Context())
-	writeJSON(w, http.StatusOK, api.Me{User: p.user, Name: p.name, Role: p.role, Scope: p.scope, Scoped: p.scoped()})
+	writeJSON(w, http.StatusOK, api.Me{User: p.user, Name: p.name, Role: p.role, Scope: p.scope, Scoped: p.scoped(),
+		SignInMethod: p.method, TwoFactorSetupRequired: p.setupRequired})
 }
 
 // ---- users (admin) ----
@@ -292,12 +311,17 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	hash, err := hashPassword(req.Password)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
 	u := &api.User{ID: newID("usr"), Email: req.Email, Name: truncate(strings.TrimSpace(req.Name), 128), Role: req.Role, Scope: req.Scope, CreatedAt: s.now()}
+	hash := ""
+	if req.Password == "" && s.sso != nil {
+		u.NoPassword = true // signs in with single sign-on only
+	} else {
+		var err error
+		if hash, err = hashPassword(req.Password); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	if err := s.store.CreateUser(r.Context(), u, hash); errors.Is(err, store.ErrConflict) {
 		writeError(w, http.StatusConflict, "a user with this email already exists")
 		return
@@ -329,6 +353,10 @@ type patchUserRequest struct {
 	Scope    *api.Selector `json:"scope"`
 	Disabled *bool         `json:"disabled"`
 	Password *string       `json:"password"`
+	// ResetTwoFactor turns off the user's authenticator (lost phone).
+	ResetTwoFactor bool `json:"reset_two_factor"`
+	// UnlinkSSO forgets the user's single sign-on identity.
+	UnlinkSSO bool `json:"unlink_sso"`
 }
 
 func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
@@ -377,6 +405,26 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 			s.internalError(w, err)
 			return
 		}
+		u.NoPassword = false
+	}
+	if req.ResetTwoFactor && u.TwoFactor {
+		if err := s.store.DeleteMFA(ctx, u.ID); err != nil {
+			s.internalError(w, err)
+			return
+		}
+		if err := s.store.DeleteUserSessions(ctx, u.ID); err != nil {
+			s.internalError(w, err)
+			return
+		}
+		u.TwoFactor = false
+		s.logEvent(ctx, "user.2fa", "", "", "two-factor sign-in reset for "+u.Email+" (signed out everywhere)")
+	}
+	if req.UnlinkSSO && u.SSO {
+		if err := s.store.UnlinkIdentities(ctx, u.ID); err != nil {
+			s.internalError(w, err)
+			return
+		}
+		u.SSO = false
 	}
 	if err := s.store.UpdateUser(ctx, u); err != nil {
 		s.internalError(w, err)
@@ -416,6 +464,10 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	p := principalFrom(r.Context())
 	if p.user == nil {
 		writeError(w, http.StatusBadRequest, "the admin token has no password")
+		return
+	}
+	if p.user.NoPassword {
+		writeError(w, http.StatusBadRequest, "you sign in with single sign-on; there is no password to change")
 		return
 	}
 	var req struct {

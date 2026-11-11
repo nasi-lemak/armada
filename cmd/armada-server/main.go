@@ -79,7 +79,50 @@ func run() error {
 	allowADB := flag.Bool("android-allow-adb", false, "do not disable USB debugging on Android devices")
 	flag.BoolVar(&cfg.Android.RequireStrongBox, "android-require-strongbox", false, "require attested keys to live in a StrongBox security chip, not just the TEE")
 	flag.StringVar(&cfg.Android.StatusURL, "attestation-status-url", cfg.Android.StatusURL, "Google attestation revocation list URL; empty disables revocation checks")
+	envBool := func(k string, def bool) bool {
+		if v := os.Getenv(k); v != "" {
+			b, err := strconv.ParseBool(v)
+			if err == nil {
+				return b
+			}
+		}
+		return def
+	}
+	flag.BoolVar(&cfg.PasswordLogin, "password-login", envBool("ARMADA_PASSWORD_LOGIN", true), "allow email and password sign-in; turn off when everyone uses single sign-on (the admin token still works) (ARMADA_PASSWORD_LOGIN)")
+	flag.BoolVar(&cfg.Require2FA, "require-2fa", envBool("ARMADA_REQUIRE_2FA", false), "make password users set up an authenticator app before using the dashboard or API (ARMADA_REQUIRE_2FA)")
+	flag.StringVar(&cfg.TOTPIssuer, "totp-issuer", env("ARMADA_TOTP_ISSUER", "Armada"), "name shown in authenticator apps")
+	flag.StringVar(&cfg.OIDC.Issuer, "oidc-issuer", os.Getenv("ARMADA_OIDC_ISSUER"), "OpenID Connect issuer URL for single sign-on, e.g. https://accounts.google.com (ARMADA_OIDC_ISSUER)")
+	flag.StringVar(&cfg.OIDC.ClientID, "oidc-client-id", os.Getenv("ARMADA_OIDC_CLIENT_ID"), "OIDC client ID (ARMADA_OIDC_CLIENT_ID)")
+	flag.StringVar(&cfg.OIDC.RedirectURL, "oidc-redirect-url", os.Getenv("ARMADA_OIDC_REDIRECT_URL"), "OIDC redirect URL; default <public-url>/api/v1/auth/sso/callback")
+	flag.StringVar(&cfg.OIDC.Name, "oidc-name", env("ARMADA_OIDC_NAME", ""), "name on the sign-in button, e.g. Google or Okta")
+	oidcScopes := flag.String("oidc-scopes", env("ARMADA_OIDC_SCOPES", ""), "comma-separated scopes (default openid,email,profile; add groups if your provider needs it)")
+	oidcDomains := flag.String("oidc-allowed-domains", env("ARMADA_OIDC_ALLOWED_DOMAINS", ""), "comma-separated email domains allowed to sign in with SSO")
+	flag.StringVar(&cfg.OIDC.CreateRole, "oidc-create-role", env("ARMADA_OIDC_CREATE_ROLE", ""), "create unknown SSO users with this role (viewer, operator or admin); empty: only users an admin added")
+	flag.StringVar(&cfg.OIDC.GroupsClaim, "oidc-groups-claim", env("ARMADA_OIDC_GROUPS_CLAIM", "groups"), "ID token claim with the user's groups")
+	oidcGroupRoles := flag.String("oidc-group-roles", env("ARMADA_OIDC_GROUP_ROLES", ""), "map groups to roles, e.g. fleet-admins=admin,fleet-ops=operator,support=viewer; users in none can't sign in")
 	flag.Parse()
+	// The client secret only comes from the environment, never argv (visible in ps).
+	cfg.OIDC.ClientSecret = os.Getenv("ARMADA_OIDC_CLIENT_SECRET")
+	split := func(s string) []string {
+		var out []string
+		for _, p := range strings.Split(s, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	cfg.OIDC.Scopes, cfg.OIDC.AllowedDomains = split(*oidcScopes), split(*oidcDomains)
+	for _, kv := range split(*oidcGroupRoles) {
+		g, r, ok := strings.Cut(kv, "=")
+		if !ok {
+			return fmt.Errorf("invalid -oidc-group-roles entry %q (want group=role)", kv)
+		}
+		if cfg.OIDC.GroupRoles == nil {
+			cfg.OIDC.GroupRoles = map[string]string{}
+		}
+		cfg.OIDC.GroupRoles[strings.TrimSpace(g)] = strings.TrimSpace(r)
+	}
 	cfg.Android.RequireVerifiedBoot = !*allowUnverified
 	cfg.Android.RequireAttestation = !*allowNoAttest
 	cfg.Android.DisableDebugging = !*allowADB

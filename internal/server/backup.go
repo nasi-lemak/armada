@@ -50,7 +50,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 		_, err = io.Copy(tw, f)
 		return err
 	}
-	files := [][2]string{{snap, "armada.db"}, {filepath.Join(s.cfg.DataDir, "signing.key"), "signing.key"}, {filepath.Join(s.cfg.DataDir, "license.key"), "license.key"}}
+	files := [][2]string{{snap, "armada.db"}, {filepath.Join(s.cfg.DataDir, "signing.key"), "signing.key"}, {filepath.Join(s.cfg.DataDir, "license.key"), "license.key"}, {filepath.Join(s.cfg.DataDir, "secrets.key"), "secrets.key"}}
 	arts, _ := os.ReadDir(s.artifactDir)
 	for _, a := range arts {
 		// Artifacts are stored under their release ID; skip in-progress uploads.

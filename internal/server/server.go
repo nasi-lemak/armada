@@ -54,6 +54,17 @@ type Config struct {
 	// PushHold is how long an agent's long-poll is held open (0 disables
 	// push). Keep it under any proxy's idle timeout.
 	PushHold time.Duration
+	// PasswordLogin allows email and password sign-in (default true). Turn
+	// it off when everyone uses single sign-on; the admin token still works.
+	PasswordLogin bool
+	// Require2FA makes password users set up an authenticator before they
+	// can do anything else. Single sign-on users are exempt (their identity
+	// provider handles it).
+	Require2FA bool
+	// TOTPIssuer is the name authenticator apps show (default "Armada").
+	TOTPIssuer string
+	// OIDC configures single sign-on; empty Issuer disables it.
+	OIDC OIDCConfig
 	// SessionTTL is how long a dashboard sign-in lasts without activity.
 	SessionTTL time.Duration
 	// DefaultStrategy is used for deployments created without one (including auto-deploys).
@@ -105,6 +116,8 @@ func DefaultConfig() Config {
 		HistoryRawRetention:    72 * time.Hour,
 		HistoryRetention:       90 * 24 * time.Hour,
 		SessionTTL:             12 * time.Hour,
+		PasswordLogin:          true,
+		TOTPIssuer:             "Armada",
 		PushHold:               50 * time.Second,
 		DefaultStrategy: api.Strategy{
 			Stages:               []int{5, 25, 50, 100},
@@ -145,6 +158,9 @@ type Server struct {
 	notifyClient *http.Client
 	push         *pushHub
 	chunks       chunkIndexes
+	secrets      *secretBox
+	mfa          mfaChallenges
+	sso          *ssoState
 	bg           sync.WaitGroup // background work Close waits for
 }
 
@@ -182,6 +198,14 @@ func New(cfg Config) (*Server, error) {
 		st.Close()
 		return nil, err
 	}
+	secrets, err := loadSecretBox(filepath.Join(cfg.DataDir, "secrets.key"))
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+	if cfg.TOTPIssuer == "" {
+		cfg.TOTPIssuer = "Armada"
+	}
 	revocations := &attestation.RevocationList{}
 	verifier, err := attestation.NewVerifier(cfg.Android.ExtraRootsPEM, revocations.IsRevoked)
 	if err != nil {
@@ -201,6 +225,13 @@ func New(cfg Config) (*Server, error) {
 		revocations: revocations,
 		challenges:  newChallengeStore(),
 		push:        newPushHub(),
+		secrets:     secrets,
+	}
+	if cfg.OIDC.Issuer != "" {
+		if s.sso, err = newSSO(cfg.OIDC); err != nil {
+			st.Close()
+			return nil, err
+		}
 	}
 	s.history.last = map[string]time.Time{}
 	s.notifyQueue = make(chan notifyJob, 1000)
@@ -282,6 +313,15 @@ func (s *Server) Handler() http.Handler {
 	admin := func(pattern string, h http.HandlerFunc) { route(api.RoleAdmin, fleetOnly, pattern, h) }
 
 	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
+	mux.HandleFunc("POST /api/v1/auth/2fa", s.handleTwoFactorLogin)
+	mux.HandleFunc("GET /api/v1/auth/config", s.handleAuthConfig)
+	mux.HandleFunc("GET /api/v1/auth/sso/login", s.handleSSOLogin)
+	mux.HandleFunc("GET /api/v1/auth/sso/callback", s.handleSSOCallback)
+	mux.HandleFunc("POST /api/v1/auth/sso/exchange", s.handleSSOExchange)
+	viewer(scopedOK, "POST /api/v1/me/2fa/setup", s.handleTwoFactorSetup)
+	viewer(scopedOK, "POST /api/v1/me/2fa/enable", s.handleTwoFactorEnable)
+	viewer(scopedOK, "POST /api/v1/me/2fa/disable", s.handleTwoFactorDisable)
+	viewer(scopedOK, "POST /api/v1/me/2fa/recovery-codes", s.handleRecoveryCodes)
 	viewer(scopedOK, "POST /api/v1/auth/logout", s.handleLogout)
 	viewer(scopedOK, "GET /api/v1/me", s.handleMe)
 	viewer(scopedOK, "POST /api/v1/me/password", s.handleChangePassword)

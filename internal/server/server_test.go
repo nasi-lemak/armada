@@ -20,10 +20,18 @@ const admin = "admin-secret"
 
 func setup(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
+	return setupWith(t, nil)
+}
+
+func setupWith(t *testing.T, mod func(*Config)) (*Server, *httptest.Server) {
+	t.Helper()
 	cfg := DefaultConfig()
 	cfg.DataDir = t.TempDir()
 	cfg.AdminTokens = []string{admin}
 	cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	if mod != nil {
+		mod(&cfg)
+	}
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)

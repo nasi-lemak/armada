@@ -32,8 +32,9 @@ async function api(method, path, body) {
   const res = await fetch(path, opts);
   if (res.status === 401) { me = null; showLogin('Your session expired or the token is invalid.'); throw new APIError(401, 'unauthorized'); }
   if (!res.ok) {
-    let msg = res.statusText;
-    try { msg = (await res.json()).error || msg; } catch { /* not JSON */ }
+    let msg = res.statusText, body = null;
+    try { body = await res.json(); msg = body.error || msg; } catch { /* not JSON */ }
+    if (body && body.two_factor_setup_required && location.hash !== '#/account') location.hash = '#/account';
     throw new APIError(res.status, msg);
   }
   if (res.status === 204) return null;
@@ -258,6 +259,7 @@ async function route() {
     const m = hash.match(re);
     if (!m) continue;
     if (!allowed(need)) break;
+    if (me.two_factor_setup_required && nav !== 'account') { location.hash = '#/account'; return; }
     document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('active', a.dataset.route === nav));
     const root = $('#view');
     root.replaceChildren();
@@ -1068,11 +1070,25 @@ function scopeText(sel) {
 }
 
 let tokenMode = false;
+let challenge = ''; // set while waiting for a second-factor code
+let authConfig = { password_login: true, sso: false };
 function syncLoginMode() {
-  $('#login-user').classList.toggle('hidden', tokenMode);
+  const pw = authConfig.password_login;
+  $('#login-sso').classList.toggle('hidden', !authConfig.sso || tokenMode || !!challenge);
+  $('#login-or').classList.toggle('hidden', !authConfig.sso || !pw || tokenMode || !!challenge);
+  $('#login-user').classList.toggle('hidden', tokenMode || !pw || !!challenge);
+  $('#login-2fa').classList.toggle('hidden', !challenge);
   $('#login-admin').classList.toggle('hidden', !tokenMode);
-  $('#login-switch').textContent = tokenMode ? 'Sign in with email instead' : 'Sign in with a token instead';
+  $('#login-form button[type=submit]').classList.toggle('hidden', !tokenMode && !pw && !challenge);
+  $('#login-switch').textContent = tokenMode ? (pw ? 'Sign in with email instead' : 'Back') : 'Sign in with a token instead';
+  $('#login-switch').classList.toggle('hidden', !!challenge);
 }
+fetch('/api/v1/auth/config').then(r => r.ok ? r.json() : null).then(c => {
+  if (!c) return;
+  authConfig = c;
+  if (c.sso_name) $('#login-sso').textContent = 'Sign in with ' + c.sso_name;
+  syncLoginMode();
+}).catch(() => {});
 $('#login-switch').addEventListener('click', () => {
   tokenMode = !tokenMode;
   syncLoginMode();
@@ -1087,37 +1103,72 @@ function showLogin(msg) {
   err.textContent = msg || '';
   err.classList.toggle('hidden', !msg);
   syncLoginMode();
-  (tokenMode ? $('#login-token') : $('#login-email')).focus();
+  (challenge ? $('#login-code') : tokenMode ? $('#login-token') : $('#login-email')).focus();
 }
 
-$('#login-form').addEventListener('submit', async e => {
-  e.preventDefault();
-  let candidate;
-  if (tokenMode) {
-    candidate = $('#login-token').value.trim();
-    if (!candidate) return showLogin('Enter a token.');
-  } else {
-    const email = $('#login-email').value.trim(), password = $('#login-password').value;
-    if (!email || !password) return showLogin('Enter your email and password.');
-    const res = await fetch('/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) }).catch(() => null);
-    if (!res) return showLogin('Could not reach the server.');
-    if (res.status === 429) return showLogin('Too many failed attempts. Wait 15 minutes and try again.');
-    if (!res.ok) return showLogin('Wrong email or password.');
-    candidate = (await res.json()).token;
-  }
+// Finish signing in with a session or API token.
+async function signedIn(candidate) {
   const res = await fetch('/api/v1/me', { headers: { Authorization: 'Bearer ' + candidate } }).catch(() => null);
   if (!res || !res.ok) return showLogin(res ? 'That token was not accepted.' : 'Could not reach the server.');
   token = candidate;
+  challenge = '';
   store.set('armada.token', token);
-  $('#login-token').value = '';
-  $('#login-password').value = '';
+  $('#login-token').value = $('#login-password').value = $('#login-code').value = '';
   $('#login').classList.add('hidden');
   $('#app').classList.remove('hidden');
   me = null;
   route();
+}
+
+$('#login-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const post = (path, body) => fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null);
+  if (challenge) {
+    const code = $('#login-code').value.trim();
+    if (!code) return showLogin('Enter the code from your authenticator app.');
+    const res = await post('/api/v1/auth/2fa', { challenge, code });
+    if (!res) return showLogin('Could not reach the server.');
+    if (!res.ok) {
+      const msg = (await res.json().catch(() => ({}))).error || '';
+      if (msg.includes('expired')) { challenge = ''; return showLogin('That took too long or too many codes were wrong. Enter your password again.'); }
+      $('#login-code').value = '';
+      return showLogin('That code is not valid. Codes change every 30 seconds.');
+    }
+    return signedIn((await res.json()).token);
+  }
+  if (tokenMode) {
+    const t = $('#login-token').value.trim();
+    if (!t) return showLogin('Enter a token.');
+    return signedIn(t);
+  }
+  const email = $('#login-email').value.trim(), password = $('#login-password').value;
+  if (!email || !password) return showLogin('Enter your email and password.');
+  const res = await post('/api/v1/auth/login', { email, password });
+  if (!res) return showLogin('Could not reach the server.');
+  if (res.status === 429) return showLogin('Too many failed attempts. Wait 15 minutes and try again.');
+  if (res.status === 403) return showLogin('Password sign-in is turned off. Use single sign-on.');
+  if (!res.ok) return showLogin('Wrong email or password.');
+  const lr = await res.json();
+  if (lr.two_factor_required) {
+    challenge = lr.challenge;
+    $('#login-password').value = '';
+    return showLogin();
+  }
+  signedIn(lr.token);
 });
 
+// Single sign-on comes back to #/sso?ticket=… (or ?error=…).
+async function finishSSO() {
+  const q = new URLSearchParams(location.hash.replace(/^#\/sso\??/, ''));
+  history.replaceState(null, '', location.pathname + '#/');
+  if (q.get('error')) return showLogin(q.get('error'));
+  const res = await fetch('/api/v1/auth/sso/exchange', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket: q.get('ticket') || '' }) }).catch(() => null);
+  if (!res || !res.ok) return showLogin('Single sign-on did not complete. Try again.');
+  signedIn((await res.json()).token);
+}
+
 $('#logout').addEventListener('click', () => {
+  challenge = '';
   // Sessions are ended server-side too; tokens just stop being remembered here.
   if (token.startsWith('st_')) fetch('/api/v1/auth/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + token } }).catch(() => {});
   token = '';
@@ -1141,7 +1192,8 @@ async function viewUsers(root) {
   const roleIn = h('select', { 'aria-label': 'Role' }, Object.keys(ROLE_HELP).map(r => h('option', { value: r }, r)));
   const roleHint = h('span', { class: 'muted' });
   const scopeIn = h('input', { placeholder: 'empty = whole fleet, or customer=acme', 'aria-label': 'Scope labels' });
-  const passIn = h('input', { type: 'password', required: true, minlength: '10', autocomplete: 'new-password', 'aria-label': 'Initial password' });
+  const passIn = h('input', { type: 'password', required: !authConfig.sso, minlength: '10', autocomplete: 'new-password', 'aria-label': 'Initial password',
+    placeholder: authConfig.sso ? 'empty: ' + (authConfig.sso_name || 'single sign-on') + ' only' : '' });
   roleIn.value = 'operator';
   const syncRole = () => { roleHint.textContent = ROLE_HELP[roleIn.value]; scopeIn.disabled = roleIn.value === 'admin'; if (scopeIn.disabled) scopeIn.value = ''; };
   roleIn.addEventListener('change', syncRole);
@@ -1153,7 +1205,7 @@ async function viewUsers(root) {
         let labels;
         try { labels = parseLabels(scopeIn.value); } catch (err) { return toast(err.message, true); }
         const body = { email: emailIn.value.trim(), name: nameIn.value.trim(), role: roleIn.value, scope: { labels }, password: passIn.value };
-        if (await guard(() => api('POST', '/api/v1/users', body), 'User added — share the password with them privately')) {
+        if (await guard(() => api('POST', '/api/v1/users', body), body.password ? 'User added — share the password with them privately' : 'User added — they sign in with ' + (authConfig.sso_name || 'single sign-on'))) {
           emailIn.value = nameIn.value = scopeIn.value = passIn.value = '';
           refresh();
         }
@@ -1177,7 +1229,10 @@ async function viewUsers(root) {
         roleSel.addEventListener('change', () => patch(u, { role: roleSel.value }, 'Role changed').then(r => r === undefined && (roleSel.value = u.role)));
         return h('tr', {},
           h('td', {}, h('strong', {}, u.name || u.email), u.name ? h('div', { class: 'muted' }, u.email) : null,
-            u.disabled ? h('div', {}, badge('disabled')) : null, self ? h('div', { class: 'muted' }, 'you') : null),
+            h('div', { class: 'btn-row mt' }, u.disabled ? badge('disabled') : null,
+              u.two_factor ? h('span', { class: 'chip', title: 'Uses an authenticator app' }, '2FA') : null,
+              u.sso ? h('span', { class: 'chip', title: 'Has signed in with single sign-on' }, u.no_password ? 'SSO only' : 'SSO') : null,
+              self ? h('span', { class: 'muted' }, 'you') : null)),
           h('td', {}, roleSel),
           h('td', {}, scopeText(u.scope) ? labelChips(u.scope.labels) : h('span', { class: 'muted' }, 'whole fleet')),
           h('td', { class: 'nowrap' }, u.last_login_at ? ago(u.last_login_at) : h('span', { class: 'muted' }, 'never')),
@@ -1192,7 +1247,13 @@ async function viewUsers(root) {
             h('button', { class: 'btn small', onclick: () => {
               const pw = prompt(`New password for ${u.email} (10+ characters). Their sessions are signed out.`);
               if (pw) patch(u, { password: pw }, 'Password reset');
-            } }, 'Reset password'),
+            } }, u.no_password ? 'Set password' : 'Reset password'),
+            u.two_factor ? h('button', { class: 'btn small', title: 'For a lost phone: turns off their authenticator and signs them out', onclick: () => {
+              if (confirm(`Turn off two-factor sign-in for ${u.email}? Do this only after confirming who is asking (lost phone). They are signed out everywhere.`)) patch(u, { reset_two_factor: true }, 'Two-factor sign-in reset');
+            } }, 'Reset 2FA') : null,
+            u.sso ? h('button', { class: 'btn small', title: 'Forget their single sign-on identity; the next sign-in links again by email', onclick: () => {
+              if (confirm(`Unlink ${u.email} from their single sign-on identity?`)) patch(u, { unlink_sso: true }, 'Unlinked');
+            } }, 'Unlink SSO') : null,
             h('button', { class: 'btn small', onclick: () => patch(u, { disabled: !u.disabled }, u.disabled ? 'Enabled' : 'Disabled — signed out everywhere') },
               u.disabled ? 'Enable' : 'Disable'),
             h('button', { class: 'btn small danger', onclick: async () => {
@@ -1206,6 +1267,78 @@ async function viewUsers(root) {
 
 // ---------- my account ----------
 
+// Two-factor sign-in: set up with an authenticator app, recovery codes, turn off.
+function twoFactorCard() {
+  const card = h('div', { class: 'card' });
+  const codeInput = label => h('input', { inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '11', placeholder: '123456', 'aria-label': label });
+  const showCodes = codes => {
+    const text = codes.join('\n');
+    return h('div', { class: 'callout mt' },
+      h('div', {}, h('strong', {}, 'Save these recovery codes now'), ' — they are shown only once. Each one signs you in a single time if you lose your phone.'),
+      h('div', { class: 'codes' }, codes.map(c => h('span', {}, c))),
+      h('div', { class: 'btn-row' },
+        h('button', { class: 'btn small', type: 'button', onclick: () => navigator.clipboard.writeText(text).then(() => toast('Copied'), () => toast('Copy failed; select the codes instead', true)) }, 'Copy'),
+        h('button', { class: 'btn small', type: 'button', onclick: () => {
+          const url = URL.createObjectURL(new Blob([`Armada recovery codes for ${me.user.email}\n\n${text}\n`], { type: 'text/plain' }));
+          const a = h('a', { href: url, download: 'armada-recovery-codes.txt' });
+          document.body.append(a); a.click(); a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 10000);
+        } }, 'Download')));
+  };
+  const afterChange = async () => { me = null; await guard(loadMe); };
+  const render = () => {
+    if (!me.user.two_factor) {
+      replace(card, h('h2', {}, 'Two-factor sign-in'),
+        h('p', { class: 'muted' }, 'Off. Turn it on so a stolen password alone can\'t get into your account. You\'ll need an authenticator app such as Google Authenticator, Microsoft Authenticator, 1Password or Authy.'),
+        h('div', {}, h('button', { class: 'btn primary', onclick: start }, 'Set up two-factor sign-in')));
+      return;
+    }
+    const code = codeInput('Current code');
+    const out = h('div', {});
+    replace(card, h('h2', {}, 'Two-factor sign-in ', badge('enabled')),
+      h('p', { class: 'muted' }, 'You enter a code from your authenticator app after your password.'),
+      h('form', { class: 'stack', onsubmit: e => e.preventDefault() },
+        h('label', {}, 'Code from your app (needed to change these settings)', code),
+        h('div', { class: 'btn-row' },
+          h('button', { class: 'btn', type: 'button', onclick: async () => {
+            const r = await guard(() => api('POST', '/api/v1/me/2fa/recovery-codes', { code: code.value }));
+            if (r) { code.value = ''; replace(out, showCodes(r.codes)); }
+          } }, 'New recovery codes'),
+          h('button', { class: 'btn danger', type: 'button', onclick: async () => {
+            if (!confirm('Turn off two-factor sign-in? Your password alone will be enough to sign in.')) return;
+            if (await guard(() => api('POST', '/api/v1/me/2fa/disable', { code: code.value }), 'Two-factor sign-in turned off') === undefined) return;
+            await afterChange(); render();
+          } }, 'Turn off'))),
+      out);
+  };
+  const start = async () => {
+    const st = await guard(() => api('POST', '/api/v1/me/2fa/setup'));
+    if (!st) return;
+    const code = codeInput('Code from the app');
+    replace(card, h('h2', {}, 'Set up two-factor sign-in'),
+      h('div', { class: 'qr-box' },
+        h('img', { src: 'data:image/png;base64,' + st.qr_png, alt: 'QR code for your authenticator app', width: '200', height: '200' }),
+        h('div', { class: 'stack' },
+          h('div', {}, h('strong', {}, '1. '), 'Scan the code with your authenticator app.'),
+          h('div', { class: 'muted' }, 'Can\'t scan? Enter this key:'),
+          h('div', { class: 'secret' }, st.secret.replace(/(.{4})/g, '$1 ').trim()),
+          h('div', {}, h('strong', {}, '2. '), 'Enter the 6-digit code it shows.'),
+          h('form', { class: 'inline', onsubmit: async e => {
+            e.preventDefault();
+            const r = await guard(() => api('POST', '/api/v1/me/2fa/enable', { code: code.value }));
+            if (!r) return;
+            await afterChange();
+            render();
+            card.append(showCodes(r.codes));
+            if (location.hash === '#/account') toast('Two-factor sign-in is on');
+          } }, code, h('button', { class: 'btn primary', type: 'submit' }, 'Turn on')),
+          h('div', {}, h('button', { class: 'btn ghost small', type: 'button', onclick: render }, 'Cancel')))));
+    code.focus();
+  };
+  render();
+  return card;
+}
+
 async function viewAccount(root) {
   const tokens = h('div', { class: 'card flush' });
   const created = h('div', {});
@@ -1215,12 +1348,22 @@ async function viewAccount(root) {
       atLeast('admin') ? [h('a', { href: '#/users' }, 'Add a user'), ' for each person, so actions are attributed to them and access can be revoked individually.'] : null)));
     return;
   }
+  if (me.two_factor_setup_required) {
+    append(root, h('div', { class: 'banner' }, h('strong', {}, 'Set up two-factor sign-in to continue. '),
+      'This server requires an authenticator app for password sign-in. It takes a minute.'), twoFactorCard());
+    return;
+  }
   const cur = h('input', { type: 'password', required: true, autocomplete: 'current-password', 'aria-label': 'Current password' });
   const nw = h('input', { type: 'password', required: true, minlength: '10', autocomplete: 'new-password', 'aria-label': 'New password' });
   const tokName = h('input', { required: true, placeholder: 'e.g. CI pipeline', 'aria-label': 'Token name' });
+  const ssoName = authConfig.sso_name || 'single sign-on';
   append(root,
     h('div', { class: 'grid cols-2' },
-      h('div', { class: 'card' }, h('h2', {}, 'Change password'),
+      me.user.no_password
+        ? h('div', { class: 'card' }, h('h2', {}, 'Sign-in'),
+          h('p', {}, `You sign in with ${ssoName}. Your password and two-factor settings are managed there.`))
+        : twoFactorCard(),
+      me.user.no_password ? null : h('div', { class: 'card' }, h('h2', {}, 'Change password'),
         h('form', { class: 'stack', onsubmit: async e => {
           e.preventDefault();
           if (await guard(() => api('POST', '/api/v1/me/password', { current: cur.value, new: nw.value })) === undefined) return;
@@ -1263,7 +1406,9 @@ async function viewAccount(root) {
 window.addEventListener('hashchange', route);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && currentRefresh) guard(currentRefresh); });
 
-if (token) {
+if (location.hash.startsWith('#/sso')) {
+  finishSSO();
+} else if (token) {
   $('#app').classList.remove('hidden');
   route();
 } else {

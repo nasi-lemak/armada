@@ -195,6 +195,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate history: %w", err)
 	}
+	if _, err := db.Exec(mfaSchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate mfa: %w", err)
+	}
 	if _, err := db.Exec(configSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate config: %w", err)
@@ -217,6 +221,7 @@ func (s *Store) addColumns() error {
 		{"devices", "parent_id", "TEXT NOT NULL DEFAULT ''"},
 		{"events", "actor", "TEXT NOT NULL DEFAULT ''"},
 		{"releases", "version_code", "INTEGER NOT NULL DEFAULT 0"},
+		{"sessions", "method", "TEXT NOT NULL DEFAULT 'password'"},
 	}
 	for _, c := range cols {
 		rows, err := s.db.Query(`SELECT name FROM pragma_table_info(?)`, c.table)

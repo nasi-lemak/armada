@@ -92,9 +92,19 @@ func (c *cli) users(verb string, args []string) error {
 			if u.LastLoginAt != nil {
 				last = u.LastLoginAt.Local().Format(time.DateTime)
 			}
-			rows = append(rows, []string{u.ID, u.Email, u.Name, u.Role, scopeString(u.Scope), state, last})
+			var signIn []string
+			if !u.NoPassword {
+				signIn = append(signIn, "password")
+			}
+			if u.TwoFactor {
+				signIn = append(signIn, "2FA")
+			}
+			if u.SSO || u.NoPassword {
+				signIn = append(signIn, "SSO")
+			}
+			rows = append(rows, []string{u.ID, u.Email, u.Name, u.Role, scopeString(u.Scope), strings.Join(signIn, "+"), state, last})
 		}
-		c.table("ID\tEMAIL\tNAME\tROLE\tSCOPE\tSTATE\tLAST SIGN-IN", rows)
+		c.table("ID\tEMAIL\tNAME\tROLE\tSCOPE\tSIGN-IN\tSTATE\tLAST SIGN-IN", rows)
 		return nil
 	case "create", "add":
 		fs := flag.NewFlagSet("users create", flag.ContinueOnError)
@@ -104,6 +114,7 @@ func (c *cli) users(verb string, args []string) error {
 		fs.StringVar(&req.Name, "name", "", "")
 		fs.StringVar(&req.Role, "role", "", "")
 		fs.StringVar(&req.Password, "password", "", "")
+		ssoOnly := fs.Bool("sso-only", false, "")
 		fs.Var(&scope, "scope", "")
 		if _, err := parse(fs, args); err != nil {
 			return err
@@ -115,7 +126,7 @@ func (c *cli) users(verb string, args []string) error {
 		if req.Scope.Labels, err = labelsOf(scope); err != nil {
 			return err
 		}
-		if req.Password == "" {
+		if req.Password == "" && !*ssoOnly {
 			if req.Password, err = readSecret("Initial password"); err != nil {
 				return err
 			}
@@ -133,7 +144,9 @@ func (c *cli) users(verb string, args []string) error {
 		fs := flag.NewFlagSet("users set", flag.ContinueOnError)
 		var role, name string
 		var scope multiFlag
-		var whole, disable, enable, reset bool
+		var whole, disable, enable, reset, reset2FA, unlinkSSO bool
+		fs.BoolVar(&reset2FA, "reset-2fa", false, "")
+		fs.BoolVar(&unlinkSSO, "unlink-sso", false, "")
 		fs.StringVar(&role, "role", "", "")
 		fs.StringVar(&name, "name", "", "")
 		fs.Var(&scope, "scope", "")
@@ -175,6 +188,12 @@ func (c *cli) users(verb string, args []string) error {
 				return err
 			}
 			body["password"] = pw
+		}
+		if reset2FA {
+			body["reset_two_factor"] = true
+		}
+		if unlinkSSO {
+			body["unlink_sso"] = true
 		}
 		if len(body) == 0 {
 			return errors.New("nothing to change")

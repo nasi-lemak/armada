@@ -841,6 +841,12 @@ type User struct {
 	Disabled    bool       `json:"disabled"`
 	CreatedAt   time.Time  `json:"created_at"`
 	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
+	// TwoFactor is true once the user has set up an authenticator app.
+	TwoFactor bool `json:"two_factor"`
+	// SSO is true once the user has signed in with single sign-on.
+	SSO bool `json:"sso"`
+	// NoPassword marks users who can only sign in with single sign-on.
+	NoPassword bool `json:"no_password,omitempty"`
 }
 
 // CreateUserRequest creates a user (admin only).
@@ -856,13 +862,46 @@ type CreateUserRequest struct {
 type LoginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+	// Code is an authenticator or recovery code, for one-step sign-in from
+	// scripts. The dashboard sends it in a second step instead.
+	Code string `json:"code,omitempty"`
 }
 
 // LoginResponse returns a session token for the Authorization header.
 type LoginResponse struct {
-	Token     string    `json:"token"`
-	ExpiresAt time.Time `json:"expires_at"`
+	Token     string    `json:"token,omitempty"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
 	User      User      `json:"user"`
+	// TwoFactorRequired means the password was right and a code is needed:
+	// send it with Challenge to POST /api/v1/auth/2fa (or retry the login
+	// with "code" set).
+	TwoFactorRequired bool   `json:"two_factor_required,omitempty"`
+	Challenge         string `json:"challenge,omitempty"`
+}
+
+// TwoFactorLoginRequest completes a sign-in with an authenticator or recovery code.
+type TwoFactorLoginRequest struct {
+	Challenge string `json:"challenge"`
+	Code      string `json:"code"`
+}
+
+// AuthConfig tells the sign-in page which methods are available.
+type AuthConfig struct {
+	PasswordLogin bool   `json:"password_login"`
+	SSO           bool   `json:"sso"`
+	SSOName       string `json:"sso_name,omitempty"` // e.g. "Google" or "Okta"
+}
+
+// TwoFactorSetup starts authenticator setup. Confirm with a code to enable.
+type TwoFactorSetup struct {
+	Secret string `json:"secret"`
+	URI    string `json:"uri"`    // otpauth:// link
+	QRPNG  []byte `json:"qr_png"` // the link as a QR code
+}
+
+// RecoveryCodes are shown once; each signs in a single time without the app.
+type RecoveryCodes struct {
+	Codes []string `json:"codes"`
 }
 
 // Me describes the signed-in principal.
@@ -873,6 +912,11 @@ type Me struct {
 	Role   string   `json:"role"`
 	Scope  Selector `json:"scope"`
 	Scoped bool     `json:"scoped"`
+	// SignInMethod is "password", "sso", "token" or "admin-token".
+	SignInMethod string `json:"sign_in_method"`
+	// TwoFactorSetupRequired means the server requires two-factor sign-in
+	// and this user must set it up before doing anything else.
+	TwoFactorSetupRequired bool `json:"two_factor_setup_required,omitempty"`
 }
 
 // APIToken is a personal token for scripts and the CLI.

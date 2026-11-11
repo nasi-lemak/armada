@@ -221,8 +221,8 @@ func TestBackupRestore(t *testing.T) {
 		f.Close()
 	}
 	resp.Body.Close()
-	if len(got) != 4 {
-		t.Fatalf("archive contents: %v", got)
+	if len(got) != 5 || got[3] != "secrets.key" {
+		t.Fatalf("archive contents: %v", got) // db, signing, license and secrets keys, one artifact
 	}
 	// A server started from the restored directory has the same devices,
 	// releases, artifacts and signing key.

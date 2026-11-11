@@ -73,7 +73,8 @@ It has three parts, all in Go with no external services:
   Nordic DFU, or your own tool.
 - **Users, roles and client accounts** (see [below](#users-roles-and-client-accounts)): viewer, operator
   and admin roles, and accounts limited to one customer's devices. Every change in the activity log names
-  who made it.
+  who made it. Sign in with single sign-on (Google, Microsoft, Okta or any OpenID Connect provider,
+  with roles from groups) and two-factor authenticator codes, which can be required.
 - **Web dashboard** built into the server binary (no build step, strict CSP).
 - **One-line onboarding** with `curl …/install.sh | sh`.
 - **Android devices you provide to customers** (see [below](#android-devices)):
@@ -677,6 +678,80 @@ or `ARMADA_TOKEN`.
 - Users can't change their own role, disable themselves, or delete themselves, so an admin can't
   lock the last admin out by accident. The admin token keeps working regardless.
 
+### Two-factor sign-in
+
+Each user can turn on two-factor sign-in under **My account**. They scan a QR code with an
+authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, Authy and others) and
+confirm with a code. After that, signing in takes the password and then a 6-digit code.
+
+- Turning it on gives **10 recovery codes**. Each one signs in once without the phone. Users can
+  generate a new set at any time, which voids the old one.
+- A code can't be used twice. Each sign-in attempt allows five codes before the password is needed again.
+  Wrong codes also count towards the email's lockout.
+- Turning it on signs out the user's other sessions, because those only had the password.
+- **Lost phone:** an admin clicks **Reset 2FA** on the Users page, or runs
+  `armadactl users set <email> --reset-2fa`. That turns it off and signs the user out everywhere.
+  Check who is asking before doing this.
+- **Require it for everyone:** start the server with `-require-2fa`. Password users who haven't set it
+  up can only reach their account page until they do. Single sign-on users are exempt, because their
+  identity provider is where MFA belongs.
+- Scripts sign in with a personal API token, not a password. With a password, the API also accepts
+  `{"email", "password", "code"}` in one request.
+- Authenticator secrets are encrypted with `<data-dir>/secrets.key` (included in backups), so a copy of
+  the database alone doesn't reveal them.
+
+### Single sign-on
+
+Armada works with any OpenID Connect provider: Google Workspace, Microsoft Entra ID, Okta, Auth0,
+Keycloak, Authentik, JumpCloud and others. For SAML-only providers, put Keycloak or Authentik in
+between.
+
+1. Register Armada with your provider as a *web application*, with this redirect URI:
+   `https://fleet.example.com/api/v1/auth/sso/callback`
+2. Start the server with the provider's issuer and client ID. The secret is read from the
+   environment only, so it doesn't show up in `ps`:
+
+   ```bash
+   export ARMADA_OIDC_CLIENT_SECRET=...
+   armada-server -public-url https://fleet.example.com \
+     -oidc-issuer https://accounts.google.com -oidc-client-id 1234.apps.googleusercontent.com \
+     -oidc-name Google -oidc-allowed-domains yourco.com
+   ```
+
+| Provider | Issuer |
+|---|---|
+| Google Workspace | `https://accounts.google.com` |
+| Microsoft Entra ID | `https://login.microsoftonline.com/<tenant-id>/v2.0` |
+| Okta | `https://<your-org>.okta.com` (or a custom authorization server URL) |
+| Keycloak | `https://keycloak.example.com/realms/<realm>` |
+| Auth0 | `https://<tenant>.auth0.com/` |
+
+The sign-in page then shows **Sign in with Google** (or whatever `-oidc-name` says). Password sign-in
+stays available unless you pass `-password-login=false`. The admin token always works, as a
+break-glass.
+
+**Who can sign in.** There are three options:
+
+- **Only people you add (default).** Add them on the Users page with no password, or run
+  `armadactl users create --email … --role … --sso-only`. The first SSO sign-in with that email links
+  the account to their identity at the provider. After that, sign-ins match the provider's stable user
+  ID, so a later email change at the provider doesn't matter. Another identity claiming the same email
+  is refused.
+- **Anyone from your domains:** set `-oidc-create-role viewer` (or `operator`) with
+  `-oidc-allowed-domains`. New people get an account at their first sign-in.
+- **By group:** set `-oidc-group-roles fleet-admins=admin,fleet-ops=operator,support=viewer`, with
+  `-oidc-groups-claim` if the claim isn't called `groups`. Each sign-in sets the user's role from their
+  groups, and people in none of them can't sign in. Removing someone from the group in your directory
+  is then enough. Client scopes (`customer=acme`) are still set in Armada.
+
+Always set `-oidc-allowed-domains` for providers where users can change their own email address (for
+example multi-tenant Entra apps). Users who signed in with SSO can't use a password unless an admin
+sets one. Their MFA happens at the provider.
+
+**Security details.** The flow is the authorization-code flow with PKCE and a nonce. The callback must
+come back to the browser that started it (a cookie check). The session token never appears in a URL;
+the browser exchanges a one-time ticket, valid for a minute, for it.
+
 ## Agent configuration
 
 `/etc/armada/agent.json` (see [`deploy/agent.example.json`](deploy/agent.example.json)):
@@ -780,7 +855,7 @@ armadactl deployments list|get|pause|resume|advance|retry|complete|abort
 armadactl events [--device ID] [--deployment ID]
 armadactl config list|get|apply -f FILE|enable|disable|delete
 armadactl whoami
-armadactl users list|create|set|delete
+armadactl users list|create|set|delete      (create --sso-only; set --reset-2fa, --unlink-sso)
 armadactl me password
 armadactl me tokens [list|create --name N|revoke ID]
 ```
@@ -808,9 +883,14 @@ Add `--json` to any command for machine-readable output.
 | `-history-raw-retention` | `ARMADA_HISTORY_RAW_RETENTION` | `72h` |
 | `-history-retention` | `ARMADA_HISTORY_RETENTION` | `2160h` (90 days) |
 | `-session-ttl` | `ARMADA_SESSION_TTL` | `12h` (dashboard sign-in, sliding) |
+| `-password-login` | `ARMADA_PASSWORD_LOGIN` | `true` |
+| `-require-2fa` | `ARMADA_REQUIRE_2FA` | `false` |
+| `-oidc-issuer`, `-oidc-client-id` | `ARMADA_OIDC_ISSUER`, `ARMADA_OIDC_CLIENT_ID` | SSO off |
+| | `ARMADA_OIDC_CLIENT_SECRET` | (environment only) |
+| `-oidc-name`, `-oidc-allowed-domains`, `-oidc-create-role`, `-oidc-group-roles`, `-oidc-groups-claim`, `-oidc-scopes`, `-oidc-redirect-url` | `ARMADA_OIDC_…` | see [Single sign-on](#single-sign-on) |
 | `-push-hold` | `ARMADA_PUSH_HOLD` | `50s` (agent long-poll; keep below your proxy's idle timeout; `0` disables) |
 
-The data directory holds `armada.db` (SQLite), `artifacts/`, `signing.key`, `license.key` and
+The data directory holds `armada.db` (SQLite), `artifacts/`, `signing.key`, `license.key`, `secrets.key` and
 `admin-token`. **Back it up**, for example nightly from cron:
 
 ```bash
@@ -863,7 +943,11 @@ endpoints use the per-device key issued at enrollment.
 | `GET /api/v1/history/fleet?range=…` | Devices online, health problems and firing alerts over time |
 | `GET /api/v1/history/checks`, `GET /api/v1/history/compare?check=…&label=…` | One check across devices (worst eight) |
 | `GET /api/v1/backup` | Full backup (`.tar.gz`: database snapshot, keys, artifacts) |
-| `POST /api/v1/auth/login`, `POST /api/v1/auth/logout` | Email and password sign-in; returns a session token |
+| `POST /api/v1/auth/login`, `POST /api/v1/auth/logout` | Email and password sign-in; returns a session token, or a two-factor challenge |
+| `POST /api/v1/auth/2fa` | Second step: challenge and authenticator or recovery code |
+| `GET /api/v1/auth/config` | Which sign-in methods are on (public) |
+| `GET /api/v1/auth/sso/login`, `GET …/callback`, `POST …/exchange` | Single sign-on (browser flow) |
+| `POST /api/v1/me/2fa/{setup,enable,disable,recovery-codes}` | Manage your own two-factor sign-in (dashboard sessions only) |
 | `GET /api/v1/me`, `POST /api/v1/me/password` | Who is signed in (role, scope); change password |
 | `GET/POST /api/v1/me/tokens`, `DELETE /api/v1/me/tokens/{id}` | Personal API tokens |
 | `GET/POST /api/v1/users`, `PATCH/DELETE /api/v1/users/{id}` | Users (admin) |
@@ -872,7 +956,8 @@ endpoints use the per-device key issued at enrollment.
 
 - Admin, session, personal and device credentials are random 256-bit secrets. The server stores
   only their SHA-256 hashes. Deleting a device revokes its key immediately. User passwords are
-  bcrypt hashes.
+  bcrypt hashes. Authenticator secrets are encrypted (AES-GCM) with `secrets.key`; recovery codes
+  are stored as hashes.
 - Roles and client scopes are enforced by the server on every request. The dashboard only hides
   what a user can't use.
 - Enrollment tokens can expire, have a use limit, and be revoked.
@@ -927,8 +1012,9 @@ deploy/, examples/  service units, compose file, sample agent config and hooks
 - A single server with SQLite comfortably handles thousands of devices at a 30s
   heartbeat. Running several replicas on Postgres is designed but not built; see
   [docs/scaling.md](docs/scaling.md).
-- There is no single sign-on (OIDC/SAML) or two-factor sign-in yet. Put the dashboard behind your
-  identity-aware proxy if you need either.
+- Two-factor sign-in uses authenticator codes; passkeys and security keys (WebAuthn) aren't supported
+  yet. SAML needs a broker such as Keycloak. There's no SCIM provisioning: use group mapping, or
+  disable people in Armada as well.
 - Push wakes one device at a time (actions, logs, check-in). New rollouts still start at each
   device's next heartbeat, which spreads the load. Logs are a snapshot, not a live tail.
 - Android app updates always download the full APK (APKs are compressed, so deltas save little).
