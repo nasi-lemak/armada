@@ -36,7 +36,8 @@ It has three parts, all in Go with no external services:
   updates through a staged rollout without further work.
 - **Staged rollouts.** Cumulative stages such as `5% → 25% → 50% → 100%`, each with a soak
   time. Each rollout picks a different random slice of the fleet for its canary
-  (deterministic per device).
+  (deterministic per device). Rollouts can be scheduled and limited to time windows
+  (for example weeknights 22:00-05:00 in the customer's time zone).
 - **Safety.**
   - On the device: each install runs your health check, and the agent rolls back if it fails.
   - On the server: a rollout **auto-pauses** once its failure rate passes a threshold, so a
@@ -77,6 +78,10 @@ It has three parts, all in Go with no external services:
   - Updates to your app go out silently, without Google Play.
   - Your app only runs on devices you enrolled. A copied APK won't work anywhere else, because your
     backend requires a license bound to the device's secure hardware.
+  - App settings per customer or site, OS update timing, and remote lock and wipe.
+- **Configuration profiles** (see [below](#configuration-profiles)): files, agent settings and Android app
+  settings kept applied on matching devices, with per-device templates, rollback on failed reload, and
+  compliance reporting.
 
 ## Quick start
 
@@ -325,6 +330,30 @@ armadactl devices revoke <device-id>
 The device gets no new licenses, so your app stops working on it within the license lifetime. The
 default lifetime is 1 hour and you can set it per app. Reinstating restores it.
 
+### Lost or stolen devices
+
+**Lock screen** locks the device now. **Wipe device** factory-resets it: everything is erased and the
+device leaves the fleet until it is set up again with the QR code. The dashboard asks you to type the
+device name; the API needs `["confirm=<device ID>"]`, and the device checks that ID again before
+wiping.
+
+```bash
+armadactl devices action <id> lock
+armadactl devices action <id> wipe confirm=<id>
+```
+
+Revoking licenses as well stops your app working on it even if the wipe never arrives.
+
+### App settings and OS updates
+
+Use [configuration profiles](#configuration-profiles):
+
+- **Android app settings** (`android_app`) set an app's *managed configuration*: the values your app
+  reads with `RestrictionsManager.getApplicationRestrictions()`. Use them for the backend URL, feature
+  flags or kiosk options per customer or site, without rebuilding the APK.
+- **Android OS updates** (`android_system_update`) set the system update policy: install automatically,
+  only during a daily window (for example `02:00-04:00` device time), or postpone for up to 30 days.
+
 ### What this does and doesn't protect against
 
 - **Protects against:** installing a copy of your APK on any other phone; running a modified or
@@ -434,6 +463,66 @@ Storage stays small: one sample per check every 5 minutes is kept for 3 days, th
 2 MB in total, because older data is dropped as it ages out (measured: ~33 bytes per raw sample and ~51
 bytes per hourly summary). Tune it with `-history-resolution`, `-history-raw-retention` and `-history-retention`
 (`-history-resolution 0` disables history).
+
+## Configuration profiles
+
+A profile is configuration the server keeps applied on every matching device (by labels and/or
+channel). Change it once and devices pick it up within seconds. Connected devices are woken, and the
+rest pick it up at their next heartbeat. Each device reports what it applied, so the **Config** page
+shows how many devices have applied each profile, are still pending, or failed.
+
+| Kind | Devices | What it does |
+|---|---|---|
+| `files` | Linux and other agents | Writes files into a directory the agent's `managed_config` names, then runs that entry's reload command |
+| `agent` | Linux and other agents | Overrides `maintenance_window` and/or `auto_update` |
+| `android_app` | Android | An app's managed configuration (see [App settings](#app-settings-and-os-updates)) |
+| `android_system_update` | Android | OS update policy: automatic, windowed or postpone |
+
+**Files** are safe by construction:
+
+- The agent only writes into directories listed in its own config. The server can't name a path:
+
+  ```json
+  "managed_config": {
+    "kiosk": { "dir": "/etc/kiosk", "reload_command": ["systemctl", "reload", "kiosk"] }
+  }
+  ```
+
+- Files are written atomically. If the reload command fails, the previous files are put back and
+  reloaded, and the device reports the error.
+- Files a profile no longer lists, or whose profile is deleted, are removed.
+- Content can be a template filled in per device: `{{.Device.Name}}`, `{{.Device.ID}}`,
+  `{{.Device.Channel}}`, `{{index .Device.Labels "site"}}`, `{{.Device.Info.Hostname}}`.
+
+**Which profile applies.** When several enabled profiles of the same kind and target match a device,
+the highest `priority` wins (then the most recently changed). Profiles are not merged, so give a
+site- or customer-specific profile a higher priority than the fleet-wide one.
+
+Manage them in the dashboard, or keep them in version control and apply them with the CLI:
+
+```json
+[
+  { "name": "Kiosk settings", "kind": "files", "target": "kiosk",
+    "selector": { "labels": { "customer": "acme" } },
+    "files": [
+      { "name": "kiosk.ini", "content_file": "kiosk.ini", "template": true },
+      { "name": "secrets.env", "content_file": "acme.env", "mode": "0600" }
+    ] },
+  { "name": "Night installs", "kind": "agent", "agent": { "maintenance_window": "01:00-04:00" } },
+  { "name": "Kiosk app", "kind": "android_app", "target": "com.example.kiosk",
+    "values": { "server_url": "https://api.example.com", "kiosk_mode": true } },
+  { "name": "OS updates at night", "kind": "android_system_update",
+    "system_update": { "type": "windowed", "window_start": "02:00", "window_end": "04:00" } }
+]
+```
+
+```bash
+armadactl config apply -f profiles.json   # creates or updates by name
+armadactl config list
+```
+
+Profile contents are stored in the server database in plain text (and in backups). Don't put secrets
+there that the server's administrators shouldn't see.
 
 ## Alerts
 
@@ -610,6 +699,8 @@ or `ARMADA_TOKEN`.
 | `allow_logs` | `true` | Whether the server may read the systemd journal and the files in `log_files` |
 | `log_files` | none | Log files the server may ask for, by name: `{"myapp": "/var/log/myapp/app.log"}`. No other files can be read. |
 | `disable_push` | `false` | Turn off the long-poll connection; actions then wait for the next heartbeat |
+| `managed_config` | none | Directories configuration profiles may write files into, by name, each with an optional `reload_command` |
+| `allow_remote_settings` | `true` | Whether `agent` profiles may override `maintenance_window` and `auto_update` |
 | `reboot_command` | `["systemctl","reboot"]` | |
 | `command_timeout` | `10m` | Applies to hooks and exec actions |
 
@@ -666,6 +757,7 @@ armadactl deployments create --release <id> [--channel C] [--label K=V] [--devic
                              [--min-samples 3] [--manual] [--allow-downgrade]
 armadactl deployments list|get|pause|resume|advance|retry|complete|abort
 armadactl events [--device ID] [--deployment ID]
+armadactl config list|get|apply -f FILE|enable|disable|delete
 armadactl whoami
 armadactl users list|create|set|delete
 armadactl me password
@@ -727,8 +819,9 @@ endpoints use the per-device key issued at enrollment.
 | `GET /api/v1/summary` | Fleet counts and version distribution |
 | `GET /api/v1/devices` (`?channel=&label=k=v&status=`) | List devices |
 | `GET/PATCH/DELETE /api/v1/devices/{id}` | Device detail (with updates, actions, events), edit name/channel/labels, remove |
-| `GET/POST /api/v1/devices/{id}/actions` | List or queue `reboot`, `restart-agent`, `exec`, `logs` |
+| `GET/POST /api/v1/devices/{id}/actions` | List or queue `reboot`, `restart-agent`, `exec`, `logs`; on Android `lock`, `wipe` |
 | `POST /api/v1/devices/{id}/wake` | Ask a device to check in now |
+| `GET/POST /api/v1/config-profiles`, `GET/PUT/DELETE /api/v1/config-profiles/{id}` | Configuration profiles (with compliance counts) |
 | `GET/POST /api/v1/tokens`, `DELETE /api/v1/tokens/{id}` | Enrollment tokens |
 | `GET/POST /api/v1/releases`, `GET/DELETE /api/v1/releases/{id}`, `GET …/artifact` | Releases (upload is `multipart/form-data`) |
 | `GET/POST /api/v1/deployments`, `GET /api/v1/deployments/{id}` | Deployments |
@@ -817,7 +910,7 @@ deploy/, examples/  service units, compose file, sample agent config and hooks
   device's next heartbeat, which spreads the load. Logs are a snapshot, not a live tail.
 - There are no delta updates; every update downloads the full artifact.
 - The agent's metrics are richest on Linux. Other platforms report the basics.
-- On Android, actions are limited to reboot and restarting the agent (`exec` and `logs` aren't
+- On Android, actions are reboot, restart the agent, lock and wipe (`exec` and `logs` aren't
   supported: Android doesn't let apps read other apps' logs).
 - Android devices can't yet act as BLE gateways. That needs Nordic's Android DFU and mcumgr libraries
   in the Android agent.

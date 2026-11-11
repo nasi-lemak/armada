@@ -43,6 +43,8 @@ Commands:
   devices logs <id> [--unit U | --file NAME] [--lines 200] [--since 1h] [--grep TEXT] [--timeout 2m]
                                              fetch recent journal or log-file lines (waits for the answer)
   devices wake <id>                          ask the device to check in now
+  devices action <id> lock                   Android: lock the screen
+  devices action <id> wipe confirm=<id>      Android: factory reset (lost or stolen devices)
   devices delete <id>
   devices action <id> reboot|restart-agent
   devices action <id> exec -- <command> [args...]
@@ -85,6 +87,13 @@ Monitoring and alerts:
   backup [-o FILE]                           download a full server backup (database, keys, artifacts)
   history checks                             check names with history, and how many devices have each
   history compare --check NAME [--range 7d] [--label K=V]... [--channel C] [--csv]
+
+Configuration profiles:
+  config list                                profiles and how many devices applied each
+  config get <id|name>
+  config apply -f profile.json               create or update by name (one profile or a list;
+                                             files may use "content_file": "./app.conf")
+  config enable|disable|delete <id|name>
 
 Users and access:
   whoami                                     who the token belongs to, role and scope
@@ -176,6 +185,8 @@ func (c *cli) run(args []string) error {
 		return c.backup(append([]string{verb}, rest...))
 	case "android":
 		return c.android(verb, rest)
+	case "config", "profiles", "profile":
+		return c.config(verb, rest)
 	case "whoami":
 		return c.whoami()
 	case "users", "user":

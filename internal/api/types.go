@@ -368,6 +368,12 @@ const (
 	// ("journal" or "file") followed by key=value options: unit=, name=,
 	// lines=, since= (a duration such as 1h) and grep= (case-insensitive).
 	ActionLogs = "logs"
+	// ActionLock locks an Android device's screen now.
+	ActionLock = "lock"
+	// ActionWipe factory-resets an Android device. Args must be
+	// ["confirm=<device ID>"]. The device leaves the fleet until it is
+	// provisioned again.
+	ActionWipe = "wipe"
 )
 
 // WaitResponse answers an agent's long-poll.
@@ -517,6 +523,9 @@ type HeartbeatRequest struct {
 	Health []CheckResult `json:"health"`
 	// Peripherals are devices this agent can reach (e.g. BLE sensors), reported as a gateway.
 	Peripherals []PeripheralReport `json:"peripherals,omitempty"`
+	// Config reports every configuration key the agent has applied or
+	// failed to apply. Nil means the agent doesn't support configuration.
+	Config []ConfigState `json:"config"`
 }
 
 // HeartbeatResponse tells the agent what to do next.
@@ -532,6 +541,8 @@ type HeartbeatResponse struct {
 	Monitors []MonitorCheck `json:"monitors,omitempty"`
 	// PeripheralUpdates are firmware updates for peripherals behind this gateway.
 	PeripheralUpdates []UpdateInstruction `json:"peripheral_updates,omitempty"`
+	// Config is set when the device's configuration needs changing.
+	Config *ConfigSync `json:"config,omitempty"`
 }
 
 // PeripheralReport describes a device a gateway can reach.

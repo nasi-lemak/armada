@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -115,6 +116,22 @@ type Config struct {
 
 	// Peripherals makes this agent a gateway for nearby devices (BLE sensors…).
 	Peripherals *PeripheralsConfig `json:"peripherals,omitempty"`
+
+	// ManagedConfig names directories the server may write configuration
+	// files into (config profiles of kind "files" target these names).
+	// Nothing outside these directories can be written.
+	ManagedConfig map[string]ManagedConfigTarget `json:"managed_config,omitempty"`
+	// AllowRemoteSettings lets config profiles override maintenance_window
+	// and auto_update (default true).
+	AllowRemoteSettings *bool `json:"allow_remote_settings,omitempty"`
+}
+
+// ManagedConfigTarget is a directory the server manages files in.
+type ManagedConfigTarget struct {
+	Dir string `json:"dir"`
+	// ReloadCommand runs after files change (e.g. systemctl reload myapp).
+	// If it fails, the previous files are restored and it runs again.
+	ReloadCommand []string `json:"reload_command,omitempty"`
 }
 
 // LoadConfig reads a JSON config file. A missing file yields an empty config
@@ -160,6 +177,15 @@ func (c *Config) Validate() error {
 	if c.AllowLogs == nil {
 		t := true
 		c.AllowLogs = &t
+	}
+	if c.AllowRemoteSettings == nil {
+		t := true
+		c.AllowRemoteSettings = &t
+	}
+	for name, mc := range c.ManagedConfig {
+		if !filepath.IsAbs(mc.Dir) || filepath.Clean(mc.Dir) == "/" {
+			return fmt.Errorf("managed_config %q: dir must be an absolute path other than /", name)
+		}
 	}
 	if len(c.RebootCommand) == 0 {
 		c.RebootCommand = []string{"systemctl", "reboot"}

@@ -55,6 +55,12 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("block_uninstall", true)
         set(v) = sp.edit().putBoolean("block_uninstall", v).apply()
 
+    /** Applied configuration profiles: {key: {hash, status, message, profile_id, updated_at}}. */
+    @get:Synchronized @set:Synchronized
+    var configState: JSONObject
+        get() = JSONObject(sp.getString("config_state", "{}") ?: "{}")
+        set(v) = sp.edit().putString("config_state", v.toString()).apply()
+
     /** A self-update in flight: {deployment_id, release_id, version}. Written
      *  synchronously: the install kills this process moments later. */
     @get:Synchronized @set:Synchronized

@@ -24,6 +24,7 @@ import java.security.MessageDigest
  */
 class Agent private constructor(private val context: Context) {
     val prefs = Prefs(context)
+    private val config = ConfigSync(context, prefs)
     private val dpm = context.getSystemService(DevicePolicyManager::class.java)
     private val admin = ComponentName(context, AdminReceiver::class.java)
 
@@ -77,6 +78,7 @@ class Agent private constructor(private val context: Context) {
             .put("packages", packageVersions())
             .put("health", Health.checks(context))
             .put("busy", false)
+            .put("config", config.report())
         val r = api().post("/api/v1/agent/heartbeat", body)
         prefs.heartbeatSeconds = r.optInt("heartbeat_interval_seconds", prefs.heartbeatSeconds)
         r.optJSONArray("managed_packages")?.let { a -> prefs.managedPackages = List(a.length()) { a.getString(it) } }
@@ -85,6 +87,7 @@ class Agent private constructor(private val context: Context) {
             prefs.blockUninstall = it.optBoolean("block_uninstall", true)
         }
         applyPolicy()
+        if (isDeviceOwner) r.optJSONObject("config")?.let { config.apply(it) }
         r.optJSONObject("update")?.let { Updater(context, this).apply(it) }
         r.optJSONArray("actions")?.let { a -> for (i in 0 until a.length()) runAction(a.getJSONObject(i)) }
     }
@@ -161,6 +164,21 @@ class Agent private constructor(private val context: Context) {
             "restart-agent" -> {
                 result("succeeded", "restarting agent")
                 AgentService.restart(context)
+            }
+            "lock" -> {
+                if (!isDeviceOwner) return run { result("rejected", "agent is not device owner", -1) }
+                dpm.lockNow()
+                result("succeeded", "screen locked")
+            }
+            "wipe" -> {
+                if (!isDeviceOwner) return run { result("rejected", "agent is not device owner", -1) }
+                // The server only queues a wipe whose confirmation names this device;
+                // check again so a mix-up can never wipe the wrong one.
+                val args = a.optJSONArray("args")
+                val confirmed = args != null && (0 until args.length()).any { args.getString(it) == "confirm=${prefs.deviceId}" }
+                if (!confirmed) return run { result("rejected", "wipe needs confirm=<this device's ID>", -1) }
+                result("succeeded", "factory reset starting")
+                if (Build.VERSION.SDK_INT >= 34) dpm.wipeDevice(0) else dpm.wipeData(0)
             }
             else -> result("rejected", "action ${a.getString("type")} is not supported on Android", -1)
         }

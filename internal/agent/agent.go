@@ -274,6 +274,7 @@ func (a *Agent) CheckIn(ctx context.Context) error {
 		Busy:     busy,
 		Status:   status,
 		Health:   a.health.snapshot(),
+		Config:   a.configReport(),
 	}
 	if a.gw != nil {
 		req.Peripherals = a.gw.reports()
@@ -290,6 +291,14 @@ func (a *Agent) CheckIn(ctx context.Context) error {
 	a.health.setMonitors(resp.Monitors)
 	if a.gw != nil && len(resp.PeripheralUpdates) > 0 {
 		a.gw.enqueue(resp.PeripheralUpdates)
+	}
+	if resp.Config != nil {
+		sync := *resp.Config
+		a.wg.Add(1)
+		go func() {
+			defer a.wg.Done()
+			a.applyConfig(ctx, &sync)
+		}()
 	}
 	a.confirmSelfUpdate()
 	a.flushOutbox(ctx) // the self-update confirmation queued just above
@@ -377,12 +386,12 @@ func (a *Agent) flushOutbox(ctx context.Context) {
 
 func (a *Agent) maybeStartUpdate(ctx context.Context, u api.UpdateInstruction) {
 	desc := fmt.Sprintf("%s %s", u.Package, u.Version)
-	if !*a.cfg.AutoUpdate {
+	if !a.autoUpdate() {
 		a.setStatus("update available: " + desc + " (auto_update disabled)")
 		return
 	}
-	if !InWindow(a.windows, a.Now()) {
-		a.setStatus("update to " + desc + " deferred until maintenance window " + a.cfg.MaintenanceWindow)
+	if text, ws := a.maintenanceWindow(); !InWindow(ws, a.Now()) {
+		a.setStatus("update to " + desc + " deferred until maintenance window " + text)
 		return
 	}
 	if u.Package != api.AgentPackage {

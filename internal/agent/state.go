@@ -53,6 +53,22 @@ type State struct {
 	PendingReboot    *PendingRebootUpdate        `json:"pending_reboot,omitempty"`
 	// Outbox holds update reports that could not be delivered yet.
 	Outbox []api.UpdateReport `json:"outbox,omitempty"`
+	// Config is the configuration applied from server profiles, by key.
+	Config map[string]AppliedConfig `json:"config,omitempty"`
+}
+
+// AppliedConfig records one applied (or failed) configuration key.
+type AppliedConfig struct {
+	Hash      string    `json:"hash"`
+	Status    string    `json:"status"`
+	Message   string    `json:"message,omitempty"`
+	ProfileID string    `json:"profile_id,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+	// Files are the names written into the target directory, so files a
+	// profile no longer has can be removed.
+	Files []string `json:"files,omitempty"`
+	// Agent holds the settings override in force (kind "agent").
+	Agent *api.AgentSettings `json:"agent,omitempty"`
 }
 
 type stateFile struct {
@@ -98,6 +114,11 @@ func (sf *stateFile) get() State {
 		s.Installed[k] = v
 	}
 	s.Outbox = append([]api.UpdateReport(nil), sf.s.Outbox...)
+	s.Config = make(map[string]AppliedConfig, len(sf.s.Config))
+	for k, v := range sf.s.Config {
+		v.Files = append([]string(nil), v.Files...)
+		s.Config[k] = v
+	}
 	if sf.s.SelfUpdate != nil {
 		p := *sf.s.SelfUpdate
 		s.SelfUpdate = &p

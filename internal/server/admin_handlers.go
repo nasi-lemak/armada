@@ -138,6 +138,7 @@ type deviceDetail struct {
 	Updates     []*api.DeviceUpdate `json:"updates"`
 	Actions     []*api.Action       `json:"actions"`
 	Events      []*api.Event        `json:"events"`
+	Config      []DeviceConfigView  `json:"config"`
 }
 
 func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
@@ -172,7 +173,18 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 			det.Peripherals = append(det.Peripherals, p)
 		}
 	}
-	det.Updates, det.Actions, det.Events, det.Peripherals = nonNil(det.Updates), nonNil(det.Actions), nonNil(det.Events), nonNil(det.Peripherals)
+	if !principalFrom(ctx).scoped() { // profiles are fleet-wide
+		profiles, err := s.store.ListConfigProfiles(ctx)
+		if err != nil {
+			s.internalError(w, err)
+			return
+		}
+		if det.Config, err = s.deviceConfigView(ctx, d, profiles); err != nil {
+			s.internalError(w, err)
+			return
+		}
+	}
+	det.Updates, det.Actions, det.Events, det.Peripherals, det.Config = nonNil(det.Updates), nonNil(det.Actions), nonNil(det.Events), nonNil(det.Peripherals), nonNil(det.Config)
 	writeJSON(w, http.StatusOK, det)
 }
 
@@ -330,8 +342,19 @@ func (s *Server) handleCreateAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+	case api.ActionLock, api.ActionWipe:
+		if !strings.EqualFold(d.Info.OS, "android") {
+			writeError(w, http.StatusBadRequest, req.Type+" is only available on Android devices")
+			return
+		}
+		if req.Type == api.ActionLock {
+			req.Args = nil
+		} else if len(req.Args) != 1 || req.Args[0] != "confirm="+d.ID {
+			writeError(w, http.StatusBadRequest, "wipe erases the device: confirm with args [\"confirm="+d.ID+"\"]")
+			return
+		}
 	default:
-		writeError(w, http.StatusBadRequest, "unknown action type; use reboot, restart-agent, exec or logs")
+		writeError(w, http.StatusBadRequest, "unknown action type; use reboot, restart-agent, exec, logs, lock or wipe")
 		return
 	}
 	if d.ParentID != "" {
@@ -355,6 +378,8 @@ func describeAction(a *api.Action) string {
 		return "exec `" + truncate(strings.Join(a.Args, " "), 80) + "`"
 	case api.ActionLogs:
 		return "logs (" + truncate(strings.Join(a.Args, " "), 80) + ")"
+	case api.ActionWipe:
+		return "factory reset (wipe)"
 	}
 	return a.Type
 }

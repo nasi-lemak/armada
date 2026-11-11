@@ -125,6 +125,12 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, dev *ap
 			return
 		}
 	}
+	if req.Config != nil {
+		if resp.Config, err = s.syncConfig(ctx, dev, req.Config, now); err != nil {
+			s.internalError(w, err)
+			return
+		}
+	}
 	if strings.EqualFold(dev.Info.OS, "android") {
 		resp.ManagedPackages = s.managedPackages(r)
 		resp.Policy = &api.DevicePolicy{DisableDebugging: s.cfg.Android.DisableDebugging, BlockUninstall: true}

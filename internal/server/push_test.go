@@ -44,7 +44,7 @@ func TestPushHub(t *testing.T) {
 }
 
 func TestLogsActionValidation(t *testing.T) {
-	_, ts := setup(t)
+	s, ts := setup(t)
 	var tok api.EnrollmentToken
 	call(t, ts, admin, "POST", "/api/v1/tokens", api.CreateTokenRequest{}, &tok)
 	var er api.EnrollResponse
@@ -65,7 +65,26 @@ func TestLogsActionValidation(t *testing.T) {
 			t.Errorf("rejected logs %v: %d", good, code)
 		}
 	}
-	var wr api.WakeResponse
+	if code := call(t, ts, admin, "POST", path, api.CreateActionRequest{Type: api.ActionLock}, nil); code != 400 {
+		t.Errorf("lock on a Linux device: %d", code)
+	}
+	var atok api.EnrollmentToken
+	call(t, ts, admin, "POST", "/api/v1/tokens", api.CreateTokenRequest{}, &atok)
+	s.cfg.Android.RequireAttestation = false
+	var ar api.EnrollResponse
+	if code := call(t, ts, "", "POST", "/api/v1/agent/enroll", api.EnrollRequest{Token: atok.Token, Info: api.DeviceInfo{OS: "android"}}, &ar); code != 200 {
+		t.Fatalf("android enroll: %d", code)
+	}
+	apath := "/api/v1/devices/" + ar.DeviceID + "/actions"
+	for _, args := range [][]string{nil, {"confirm=yes"}, {"confirm=" + er.DeviceID}} {
+		if code := call(t, ts, admin, "POST", apath, api.CreateActionRequest{Type: api.ActionWipe, Args: args}, nil); code != 400 {
+			t.Errorf("wipe with %v: %d", args, code)
+		}
+	}
+	if code := call(t, ts, admin, "POST", apath, api.CreateActionRequest{Type: api.ActionWipe, Args: []string{"confirm=" + ar.DeviceID}}, nil); code != 201 {
+		t.Errorf("confirmed wipe: %d", code)
+	}
+		var wr api.WakeResponse
 	if code := call(t, ts, admin, "POST", "/api/v1/devices/"+er.DeviceID+"/wake", nil, &wr); code != 200 || wr.Connected {
 		t.Fatalf("wake offline device: %d %+v", code, wr)
 	}
