@@ -187,6 +187,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if _, err := db.Exec(historySchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate history: %w", err)
+	}
 	st := &Store{db: db}
 	if err := st.addColumns(); err != nil {
 		db.Close()

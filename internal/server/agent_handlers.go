@@ -97,6 +97,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, dev *ap
 		}
 	}
 
+	s.recordHistory(ctx, dev, now)
+
 	resp := api.HeartbeatResponse{HeartbeatIntervalSeconds: int(s.cfg.HeartbeatInterval.Seconds())}
 
 	update, err := s.decideUpdate(ctx, dev, req.Busy)

@@ -111,7 +111,8 @@ func (e *alertEnv) tick(t *testing.T) {
 
 func (e *alertEnv) heartbeat(t *testing.T, checks []api.CheckResult) {
 	t.Helper()
-	call(t, e.ts, e.key, "POST", "/api/v1/agent/heartbeat", api.HeartbeatRequest{Info: api.DeviceInfo{OS: "linux"}, Health: checks}, nil)
+	call(t, e.ts, e.key, "POST", "/api/v1/agent/heartbeat", api.HeartbeatRequest{Info: api.DeviceInfo{OS: "linux"}, Health: checks,
+		Metrics: api.Metrics{NumCPU: 4, Load1: 0.42, MemTotalBytes: 4 << 30, MemAvailableBytes: 3 << 30}}, nil)
 }
 
 func TestWebhookChannelSigningTemplateAndRedaction(t *testing.T) {

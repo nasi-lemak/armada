@@ -45,6 +45,12 @@ type Config struct {
 	MaxArtifactBytes int64
 	// EventRetention bounds the activity log.
 	EventRetention time.Duration
+	// HistoryResolution is how often a sample of each check/metric is kept (0 disables history).
+	HistoryResolution time.Duration
+	// HistoryRawRetention keeps full-resolution samples; older data is kept as hourly summaries.
+	HistoryRawRetention time.Duration
+	// HistoryRetention is how long hourly summaries are kept.
+	HistoryRetention time.Duration
 	// DefaultStrategy is used for deployments created without one (including auto-deploys).
 	DefaultStrategy api.Strategy
 	Logger          *slog.Logger
@@ -90,6 +96,9 @@ func DefaultConfig() Config {
 		EngineInterval:         10 * time.Second,
 		MaxArtifactBytes:       2 << 30,
 		EventRetention:         30 * 24 * time.Hour,
+		HistoryResolution:      5 * time.Minute,
+		HistoryRawRetention:    72 * time.Hour,
+		HistoryRetention:       90 * 24 * time.Hour,
 		DefaultStrategy: api.Strategy{
 			Stages:               []int{5, 25, 50, 100},
 			StageDurationSeconds: 15 * 60,
@@ -123,6 +132,7 @@ type Server struct {
 	revocations *attestation.RevocationList
 	challenges  *challengeStore
 
+	history      historyState
 	notifyQueue  chan notifyJob
 	notifyClient *http.Client
 }
@@ -180,6 +190,7 @@ func New(cfg Config) (*Server, error) {
 		revocations: revocations,
 		challenges:  newChallengeStore(),
 	}
+	s.history.last = map[string]time.Time{}
 	s.notifyQueue = make(chan notifyJob, 1000)
 	s.notifyClient = &http.Client{Timeout: 15 * time.Second}
 	go s.notifyLoop()
@@ -249,6 +260,8 @@ func (s *Server) Handler() http.Handler {
 	admin("GET /api/v1/signing-key", s.handleSigningKey)
 	admin("GET /api/v1/devices", s.handleListDevices)
 	admin("GET /api/v1/devices/{id}", s.handleGetDevice)
+	admin("GET /api/v1/devices/{id}/history", s.handleDeviceHistory)
+	admin("GET /api/v1/history/fleet", s.handleFleetHistory)
 	admin("PATCH /api/v1/devices/{id}", s.handlePatchDevice)
 	admin("DELETE /api/v1/devices/{id}", s.handleDeleteDevice)
 	admin("GET /api/v1/devices/{id}/actions", s.handleListActions)
@@ -421,5 +434,8 @@ func (s *Server) Tick(ctx context.Context) error {
 			return err
 		}
 	}
-	return s.evaluateAlerts(ctx, now)
+	if err := s.evaluateAlerts(ctx, now); err != nil {
+		return err
+	}
+	return s.historyTick(ctx, now)
 }

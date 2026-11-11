@@ -380,6 +380,24 @@ The types are `http` (status code, body content, latency), `tcp`, `systemd`, `pr
 command follows the Nagios plugin convention: exit 0 is ok, 1 is warning, 2 is critical, and the first
 line of output is the message. That means existing Nagios and Icinga plugins work unchanged.
 
+### History and charts
+
+Every check's status and value is kept as history:
+- **Device page:** a chart for each measured value (temperature, disk and storage wear, memory, load,
+  response times, battery, signal…). Each chart has a crosshair tooltip, arrow-key navigation and a
+  table view.
+- **Status over time:** a timeline for every check, labelled with the share of time it was ok. An
+  `online` row shows when the device was checking in, so gaps are downtime.
+- **Overview:** the fleet's online devices and health problems over time.
+- **Ranges:** 24 hours, 7, 30 or 90 days. Ranges longer than the raw retention show hourly averages,
+  with the min–max range shaded.
+
+Storage stays small: one sample per check every 5 minutes is kept for 3 days, then hourly summaries
+(min, average, max and worst status) for 90 days. A device with a dozen checks levels off at about
+2 MB in total, because older data is dropped as it ages out (measured: ~33 bytes per raw sample and ~51
+bytes per hourly summary). Tune it with `-history-resolution`, `-history-raw-retention` and `-history-retention`
+(`-history-resolution 0` disables history).
+
 ## Alerts
 
 Alerts tie a **rule** to one or more **channels**. You can set them up on the dashboard's **Monitoring**
@@ -571,6 +589,9 @@ Add `--json` to any command for machine-readable output.
 | `-default-stage-duration` | `ARMADA_DEFAULT_STAGE_DURATION` | `15m` |
 | `-default-max-failure-rate` | | `0.2` |
 | `-max-artifact-mb` | | `2048` |
+| `-history-resolution` | `ARMADA_HISTORY_RESOLUTION` | `5m` (0 disables history) |
+| `-history-raw-retention` | `ARMADA_HISTORY_RAW_RETENTION` | `72h` |
+| `-history-retention` | `ARMADA_HISTORY_RETENTION` | `2160h` (90 days) |
 
 The data directory holds `armada.db` (SQLite), `artifacts/`, `signing.key` and
 `admin-token`. **Back it up.** Losing `signing.key` means agents that pinned the old key
@@ -608,6 +629,8 @@ per-device key issued at enrollment.
 | `GET/POST /api/v1/channels`, `PUT/DELETE /api/v1/channels/{id}`, `POST …/{id}/test` | Notification channels |
 | `GET/POST /api/v1/alert-rules`, `PUT/DELETE /api/v1/alert-rules/{id}` | Alert rules |
 | `GET /api/v1/alerts[?status=firing]` | Firing and recent alerts |
+| `GET /api/v1/devices/{id}/history?range=24h\|7d\|30d\|90d` | A device's check and metric history (raw or hourly) |
+| `GET /api/v1/history/fleet?range=…` | Devices online, health problems and firing alerts over time |
 
 ## Security model
 
@@ -666,7 +689,6 @@ deploy/, examples/  service units, compose file, sample agent config and hooks
 - There are no delta updates; every update downloads the full artifact.
 - The agent's metrics are richest on Linux. Other platforms report the basics.
 - On Android, actions are limited to reboot and restarting the agent (`exec` isn't supported).
-- Health and metrics show current values only; there's no history or charts yet.
 - Android devices can't yet act as BLE gateways. That needs Nordic's Android DFU and mcumgr libraries
   in the Android agent.
 - Built-in hardware checks are Linux-only. Program monitors work on every platform.

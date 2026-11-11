@@ -692,3 +692,54 @@ type AlertNotification struct {
 	ResolvedAt   *time.Time        `json:"resolved_at,omitempty"`
 	Count        int               `json:"count"`
 }
+
+// ---- history ----
+
+// HistoryPoint is one sample (raw) or one hourly roll-up of a series.
+type HistoryPoint struct {
+	T   int64    `json:"t"` // unix seconds (start of the hour for roll-ups)
+	V   *float64 `json:"v"` // value, or hourly average
+	Min *float64 `json:"min,omitempty"`
+	Max *float64 `json:"max,omitempty"`
+	S   string   `json:"s"` // status (worst status in a roll-up)
+}
+
+// HistorySeries is the history of one check or metric on one device.
+type HistorySeries struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	Unit string `json:"unit,omitempty"`
+	// Numeric is true when the series has values worth charting.
+	Numeric bool `json:"numeric"`
+	// Availability is the share of the range the check was ok (0..1); for the
+	// "online" series, the share of the range the device was checking in.
+	Availability *float64       `json:"availability,omitempty"`
+	Points       []HistoryPoint `json:"points"`
+}
+
+// DeviceHistory is the response of GET /api/v1/devices/{id}/history.
+type DeviceHistory struct {
+	DeviceID   string          `json:"device_id"`
+	From       time.Time       `json:"from"`
+	To         time.Time       `json:"to"`
+	Resolution int64           `json:"resolution_seconds"`
+	Series     []HistorySeries `json:"series"`
+}
+
+// FleetPoint is the fleet's state at one time bucket (averages over the bucket).
+type FleetPoint struct {
+	T        int64   `json:"t"`
+	Online   float64 `json:"online"`
+	Offline  float64 `json:"offline"`
+	Warning  float64 `json:"warning"`
+	Critical float64 `json:"critical"`
+	Alerts   float64 `json:"alerts"`
+}
+
+// FleetHistory is the response of GET /api/v1/history/fleet.
+type FleetHistory struct {
+	From       time.Time    `json:"from"`
+	To         time.Time    `json:"to"`
+	Resolution int64        `json:"resolution_seconds"`
+	Points     []FleetPoint `json:"points"`
+}

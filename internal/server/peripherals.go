@@ -66,6 +66,7 @@ func (s *Server) handlePeripherals(ctx context.Context, gw *api.Device, reports 
 		if stored, err := s.store.GetDevice(ctx, id); err == nil {
 			dev = stored
 		}
+		s.recordHistory(ctx, dev, now)
 		inst, err := s.decideUpdate(ctx, dev, false)
 		if err != nil {
 			return nil, err

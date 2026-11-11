@@ -62,6 +62,9 @@ func run() error {
 	flag.DurationVar(&cfg.HeartbeatInterval, "heartbeat-interval", envDur("ARMADA_HEARTBEAT_INTERVAL", cfg.HeartbeatInterval), "how often agents check in")
 	flag.DurationVar(&cfg.OfflineAfter, "offline-after", envDur("ARMADA_OFFLINE_AFTER", cfg.OfflineAfter), "mark devices offline after this long without a heartbeat")
 	flag.DurationVar(&cfg.EngineInterval, "engine-interval", envDur("ARMADA_ENGINE_INTERVAL", cfg.EngineInterval), "how often rollouts are evaluated")
+	flag.DurationVar(&cfg.HistoryResolution, "history-resolution", envDur("ARMADA_HISTORY_RESOLUTION", cfg.HistoryResolution), "how often health history is sampled per check (0 disables history)")
+	flag.DurationVar(&cfg.HistoryRawRetention, "history-raw-retention", envDur("ARMADA_HISTORY_RAW_RETENTION", cfg.HistoryRawRetention), "keep full-resolution history this long; older history is kept hourly")
+	flag.DurationVar(&cfg.HistoryRetention, "history-retention", envDur("ARMADA_HISTORY_RETENTION", cfg.HistoryRetention), "keep hourly history this long")
 	flag.DurationVar(&cfg.UpdateTimeout, "update-timeout", envDur("ARMADA_UPDATE_TIMEOUT", cfg.UpdateTimeout), "fail device updates stuck downloading/installing this long")
 	var stageDur time.Duration
 	flag.DurationVar(&stageDur, "default-stage-duration", envDur("ARMADA_DEFAULT_STAGE_DURATION", time.Duration(cfg.DefaultStrategy.StageDurationSeconds)*time.Second), "default soak time per rollout stage")
