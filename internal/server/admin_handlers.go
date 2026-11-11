@@ -804,7 +804,14 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, evs)
 }
 
+// event records an activity-log entry and triggers event-based alerts.
 func (s *Server) event(ctx context.Context, typ, deviceID, deploymentID, msg string) {
+	s.logEvent(ctx, typ, deviceID, deploymentID, msg)
+	s.alertOnEvent(context.WithoutCancel(ctx), typ, deviceID, deploymentID, msg)
+}
+
+// logEvent only records an activity-log entry.
+func (s *Server) logEvent(ctx context.Context, typ, deviceID, deploymentID, msg string) {
 	if err := s.store.AddEvent(context.WithoutCancel(ctx), api.Event{Time: s.now(), Type: typ, DeviceID: deviceID, DeploymentID: deploymentID, Message: msg}); err != nil {
 		s.log.Error("record event", "err", err)
 	}

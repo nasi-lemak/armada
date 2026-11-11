@@ -136,6 +136,28 @@ CREATE TABLE IF NOT EXISTS monitors (
 	updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS channels (
+	id TEXT PRIMARY KEY,
+	spec TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS alert_rules (
+	id TEXT PRIMARY KEY,
+	spec TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+	id TEXT PRIMARY KEY,
+	rule_id TEXT NOT NULL,
+	key TEXT NOT NULL,
+	status TEXT NOT NULL,
+	spec TEXT NOT NULL,
+	started_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS alerts_status ON alerts(status, key);
+
 CREATE TABLE IF NOT EXISTS events (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	time INTEGER NOT NULL,
@@ -1065,4 +1087,137 @@ func (s *Store) DeleteMonitor(ctx context.Context, id string) error {
 		return err
 	}
 	return expectOne(res)
+}
+
+// ---- notification channels, alert rules and alerts (stored as JSON documents) ----
+
+func (s *Store) putDoc(ctx context.Context, table, id string, created time.Time, v any) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO `+table+` (id, spec, created_at) VALUES (?,?,?)
+		ON CONFLICT(id) DO UPDATE SET spec=excluded.spec`, id, mustJSON(v), ts(created))
+	return err
+}
+
+func (s *Store) getDoc(ctx context.Context, table, id string, v any) error {
+	var spec string
+	err := s.db.QueryRowContext(ctx, `SELECT spec FROM `+table+` WHERE id=?`, id).Scan(&spec)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	return json.Unmarshal([]byte(spec), v)
+}
+
+func listDocs[T any](ctx context.Context, s *Store, table string) ([]*T, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT spec FROM `+table+` ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*T
+	for rows.Next() {
+		var spec string
+		if err := rows.Scan(&spec); err != nil {
+			return nil, err
+		}
+		v := new(T)
+		if err := json.Unmarshal([]byte(spec), v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) deleteDoc(ctx context.Context, table, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM `+table+` WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	return expectOne(res)
+}
+
+// PutChannel creates or replaces a notification channel.
+func (s *Store) PutChannel(ctx context.Context, c *api.NotificationChannel) error {
+	return s.putDoc(ctx, "channels", c.ID, c.CreatedAt, c)
+}
+
+// GetChannel loads a notification channel.
+func (s *Store) GetChannel(ctx context.Context, id string) (*api.NotificationChannel, error) {
+	var c api.NotificationChannel
+	return &c, s.getDoc(ctx, "channels", id, &c)
+}
+
+// ListChannels returns all notification channels.
+func (s *Store) ListChannels(ctx context.Context) ([]*api.NotificationChannel, error) {
+	return listDocs[api.NotificationChannel](ctx, s, "channels")
+}
+
+// DeleteChannel removes a notification channel.
+func (s *Store) DeleteChannel(ctx context.Context, id string) error {
+	return s.deleteDoc(ctx, "channels", id)
+}
+
+// PutAlertRule creates or replaces an alert rule.
+func (s *Store) PutAlertRule(ctx context.Context, r *api.AlertRule) error {
+	return s.putDoc(ctx, "alert_rules", r.ID, r.CreatedAt, r)
+}
+
+// GetAlertRule loads an alert rule.
+func (s *Store) GetAlertRule(ctx context.Context, id string) (*api.AlertRule, error) {
+	var r api.AlertRule
+	return &r, s.getDoc(ctx, "alert_rules", id, &r)
+}
+
+// ListAlertRules returns all alert rules.
+func (s *Store) ListAlertRules(ctx context.Context) ([]*api.AlertRule, error) {
+	return listDocs[api.AlertRule](ctx, s, "alert_rules")
+}
+
+// DeleteAlertRule removes an alert rule.
+func (s *Store) DeleteAlertRule(ctx context.Context, id string) error {
+	return s.deleteDoc(ctx, "alert_rules", id)
+}
+
+// PutAlert creates or updates an alert.
+func (s *Store) PutAlert(ctx context.Context, a *api.Alert) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO alerts (id, rule_id, key, status, spec, started_at) VALUES (?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET status=excluded.status, spec=excluded.spec`,
+		a.ID, a.RuleID, a.Key, a.Status, mustJSON(a), ts(a.StartedAt))
+	return err
+}
+
+// ListAlerts returns firing alerts, or the most recent alerts of any status.
+func (s *Store) ListAlerts(ctx context.Context, firingOnly bool, limit int) ([]*api.Alert, error) {
+	q := `SELECT spec FROM alerts`
+	var args []any
+	if firingOnly {
+		q += ` WHERE status=?`
+		args = append(args, api.AlertFiring)
+	}
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, q+` ORDER BY started_at DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*api.Alert
+	for rows.Next() {
+		var spec string
+		if err := rows.Scan(&spec); err != nil {
+			return nil, err
+		}
+		var a api.Alert
+		if err := json.Unmarshal([]byte(spec), &a); err != nil {
+			return nil, err
+		}
+		out = append(out, &a)
+	}
+	return out, rows.Err()
+}
+
+// PruneAlerts deletes resolved alerts older than before.
+func (s *Store) PruneAlerts(ctx context.Context, before time.Time) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM alerts WHERE status<>? AND started_at < ?`, api.AlertFiring, ts(before))
+	return err
 }

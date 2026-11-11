@@ -561,3 +561,124 @@ type FleetSummary struct {
 	PackageVersions   map[string]map[string]int `json:"package_versions"`
 	Channels          map[string]int            `json:"channels"`
 }
+
+// ---- alerting ----
+
+// NotificationChannel is where alerts are sent.
+type NotificationChannel struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Type is webhook | slack | email.
+	Type      string         `json:"type"`
+	Webhook   *WebhookConfig `json:"webhook,omitempty"`
+	Slack     *SlackConfig   `json:"slack,omitempty"`
+	Email     *EmailConfig   `json:"email,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+}
+
+// WebhookConfig posts alerts to any HTTP endpoint (PagerDuty, Opsgenie,
+// Teams, Discord, your own service…).
+type WebhookConfig struct {
+	URL     string            `json:"url"`
+	Method  string            `json:"method,omitempty"` // default POST
+	Headers map[string]string `json:"headers,omitempty"`
+	// Secret, if set, signs the body: X-Armada-Signature: sha256=<hex HMAC>.
+	Secret string `json:"secret,omitempty"`
+	// BodyTemplate is a Go text/template rendering the request body from the
+	// notification (see AlertNotification). Empty sends the JSON notification.
+	BodyTemplate string `json:"body_template,omitempty"`
+}
+
+// SlackConfig posts to a Slack incoming webhook.
+type SlackConfig struct {
+	WebhookURL string `json:"webhook_url"`
+}
+
+// EmailConfig sends alerts over SMTP.
+type EmailConfig struct {
+	Host     string   `json:"host"`
+	Port     int      `json:"port"` // 587 (STARTTLS) by default; 465 uses implicit TLS
+	Username string   `json:"username,omitempty"`
+	Password string   `json:"password,omitempty"`
+	From     string   `json:"from"`
+	To       []string `json:"to"`
+}
+
+// Alert rule conditions.
+const (
+	ConditionDeviceOffline    = "device_offline"
+	ConditionHealth           = "health"
+	ConditionUpdateFailed     = "update_failed"
+	ConditionDeploymentPaused = "deployment_paused"
+)
+
+// AlertRule decides when to notify whom.
+type AlertRule struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+	// Condition is device_offline | health | update_failed | deployment_paused.
+	Condition string `json:"condition"`
+	// Selector limits the rule to some devices (ignored for deployment_paused).
+	Selector Selector `json:"selector"`
+	// OfflineMinutes is how long a device must be silent (device_offline, default 10).
+	OfflineMinutes int `json:"offline_minutes,omitempty"`
+	// MinSeverity is warning or critical (health, default critical).
+	MinSeverity string `json:"min_severity,omitempty"`
+	// CheckKinds limits a health rule to some kinds of check, e.g. ["storage", "power"].
+	CheckKinds []string `json:"check_kinds,omitempty"`
+	// Channels are notification channel IDs.
+	Channels []string `json:"channels"`
+	// RepeatMinutes re-sends a still-firing alert (0 = never).
+	RepeatMinutes int `json:"repeat_minutes,omitempty"`
+	// NotifyResolved also notifies when the condition clears.
+	NotifyResolved bool      `json:"notify_resolved"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// Alert statuses.
+const (
+	AlertFiring   = "firing"
+	AlertResolved = "resolved"
+)
+
+// Alert is one occurrence of a rule's condition.
+type Alert struct {
+	ID             string     `json:"id"`
+	RuleID         string     `json:"rule_id"`
+	RuleName       string     `json:"rule_name"`
+	Condition      string     `json:"condition"`
+	Key            string     `json:"key"`
+	Status         string     `json:"status"`
+	Severity       string     `json:"severity"` // warning | critical
+	Summary        string     `json:"summary"`
+	DeviceID       string     `json:"device_id,omitempty"`
+	DeviceName     string     `json:"device_name,omitempty"`
+	DeploymentID   string     `json:"deployment_id,omitempty"`
+	StartedAt      time.Time  `json:"started_at"`
+	LastNotifiedAt time.Time  `json:"last_notified_at"`
+	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
+	Count          int        `json:"count"` // occurrences folded into this alert
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+// AlertNotification is what channels receive (and what webhook templates render).
+type AlertNotification struct {
+	Version      string            `json:"version"` // "1"
+	AlertID      string            `json:"alert_id"`
+	Status       string            `json:"status"` // firing | resolved | test
+	Severity     string            `json:"severity"`
+	Rule         string            `json:"rule"`
+	Condition    string            `json:"condition"`
+	Summary      string            `json:"summary"`
+	DeviceID     string            `json:"device_id,omitempty"`
+	DeviceName   string            `json:"device_name,omitempty"`
+	DeviceLabels map[string]string `json:"device_labels,omitempty"`
+	DeploymentID string            `json:"deployment_id,omitempty"`
+	URL          string            `json:"url,omitempty"`
+	StartedAt    time.Time         `json:"started_at"`
+	ResolvedAt   *time.Time        `json:"resolved_at,omitempty"`
+	Count        int               `json:"count"`
+}

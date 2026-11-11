@@ -119,6 +119,9 @@ type Server struct {
 	verifier    *attestation.Verifier
 	revocations *attestation.RevocationList
 	challenges  *challengeStore
+
+	notifyQueue  chan notifyJob
+	notifyClient *http.Client
 }
 
 // New opens the data directory (creating the database and signing key if
@@ -161,7 +164,7 @@ func New(cfg Config) (*Server, error) {
 		st.Close()
 		return nil, err
 	}
-	return &Server{
+	s := &Server{
 		cfg:         cfg,
 		store:       st,
 		signKey:     key,
@@ -173,11 +176,18 @@ func New(cfg Config) (*Server, error) {
 		verifier:    verifier,
 		revocations: revocations,
 		challenges:  newChallengeStore(),
-	}, nil
+	}
+	s.notifyQueue = make(chan notifyJob, 1000)
+	s.notifyClient = &http.Client{Timeout: 15 * time.Second}
+	go s.notifyLoop()
+	return s, nil
 }
 
 // Close releases resources.
-func (s *Server) Close() error { return s.store.Close() }
+func (s *Server) Close() error {
+	close(s.notifyQueue)
+	return s.store.Close()
+}
 
 // PublicKey returns the base64 release-signing public key.
 func (s *Server) PublicKey() string { return base64.StdEncoding.EncodeToString(s.pubKey) }
@@ -257,6 +267,16 @@ func (s *Server) Handler() http.Handler {
 	admin("POST /api/v1/monitors", s.handleCreateMonitor)
 	admin("PUT /api/v1/monitors/{id}", s.handleUpdateMonitor)
 	admin("DELETE /api/v1/monitors/{id}", s.handleDeleteMonitor)
+	admin("GET /api/v1/channels", s.handleListChannels)
+	admin("POST /api/v1/channels", s.handleSaveChannel)
+	admin("PUT /api/v1/channels/{id}", s.handleSaveChannel)
+	admin("DELETE /api/v1/channels/{id}", s.handleDeleteChannel)
+	admin("POST /api/v1/channels/{id}/test", s.handleTestChannel)
+	admin("GET /api/v1/alert-rules", s.handleListAlertRules)
+	admin("POST /api/v1/alert-rules", s.handleSaveAlertRule)
+	admin("PUT /api/v1/alert-rules/{id}", s.handleSaveAlertRule)
+	admin("DELETE /api/v1/alert-rules/{id}", s.handleDeleteAlertRule)
+	admin("GET /api/v1/alerts", s.handleListAlerts)
 	admin("GET /api/v1/apps", s.handleListApps)
 	admin("PUT /api/v1/apps/{package}", s.handlePutApp)
 	admin("DELETE /api/v1/apps/{package}", s.handleDeleteApp)
@@ -398,5 +418,5 @@ func (s *Server) Tick(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	return s.evaluateAlerts(ctx, now)
 }
