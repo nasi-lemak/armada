@@ -327,3 +327,24 @@ func (c *cli) deviceLogs(args []string) error {
 		}
 	}
 }
+
+// parseStartAt accepts RFC 3339 or "YYYY-MM-DD HH:MM" in tz (default local).
+func parseStartAt(s, tz string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	loc := time.Local
+	if tz != "" {
+		l, err := time.LoadLocation(tz)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("unknown time zone %q", tz)
+		}
+		loc = l
+	}
+	for _, layout := range []string{"2006-01-02 15:04", "2006-01-02T15:04", "2006-01-02 15:04:05"} {
+		if t, err := time.ParseInLocation(layout, s, loc); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid --start-at %q (use \"2026-12-01 02:00\" or RFC 3339)", s)
+}

@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/nasi-lemak/armada/internal/rollout"
 )
 
 // Duration is a time.Duration that marshals as a string like "30s".
@@ -193,55 +195,10 @@ func (c *Config) Validate() error {
 
 // Window is a daily local-time interval in minutes since midnight. End may be
 // less than Start for windows that span midnight.
-type Window struct{ Start, End int }
+type Window = rollout.Window
 
 // ParseWindows parses "HH:MM-HH:MM[,HH:MM-HH:MM...]".
-func ParseWindows(s string) ([]Window, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return nil, nil
-	}
-	var out []Window
-	for _, part := range strings.Split(s, ",") {
-		a, b, ok := strings.Cut(strings.TrimSpace(part), "-")
-		if !ok {
-			return nil, fmt.Errorf("maintenance window %q must look like 02:00-05:00", part)
-		}
-		start, err := parseClock(a)
-		if err != nil {
-			return nil, err
-		}
-		end, err := parseClock(b)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, Window{start, end})
-	}
-	return out, nil
-}
-
-func parseClock(s string) (int, error) {
-	t, err := time.Parse("15:04", strings.TrimSpace(s))
-	if err != nil {
-		return 0, fmt.Errorf("invalid time %q in maintenance window (use HH:MM)", s)
-	}
-	return t.Hour()*60 + t.Minute(), nil
-}
+func ParseWindows(s string) ([]Window, error) { return rollout.ParseWindows(s) }
 
 // InWindow reports whether t falls in any window. No windows means always.
-func InWindow(ws []Window, t time.Time) bool {
-	if len(ws) == 0 {
-		return true
-	}
-	m := t.Hour()*60 + t.Minute()
-	for _, w := range ws {
-		if w.Start <= w.End {
-			if m >= w.Start && m < w.End {
-				return true
-			}
-		} else if m >= w.Start || m < w.End {
-			return true
-		}
-	}
-	return false
-}
+func InWindow(ws []Window, t time.Time) bool { return rollout.InWindow(ws, t) }

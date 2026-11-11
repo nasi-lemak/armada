@@ -135,6 +135,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, dev *ap
 // decideUpdate evaluates the active deployments for a device, records any
 // progress implied by its reported versions, and returns the update to offer.
 func (s *Server) decideUpdate(ctx context.Context, dev *api.Device, busy bool) (*api.UpdateInstruction, error) {
+	now := s.now()
 	deps, err := s.store.ActiveDeployments(ctx)
 	if err != nil {
 		return nil, err
@@ -181,10 +182,9 @@ func (s *Server) decideUpdate(ctx context.Context, dev *api.Device, busy bool) (
 		} else if err != nil {
 			return nil, err
 		}
-		cands = append(cands, &rollout.Candidate{Deployment: d, Release: rel, Progress: prog})
+		cands = append(cands, &rollout.Candidate{Deployment: d, Release: rel, Progress: prog, Closed: !rollout.WindowOpen(d.Strategy, now)})
 	}
 	dec := rollout.Decide(dev, cands, busy)
-	now := s.now()
 	for _, c := range dec.Confirmed {
 		c.Progress.Status = api.UpdateSucceeded
 		c.Progress.Message = "device reports version " + c.Release.Version

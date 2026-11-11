@@ -239,6 +239,19 @@ type Strategy struct {
 	MinSamples int `json:"min_samples"`
 	// AllowDowngrade permits installing a version lower than the one on the device (rollbacks).
 	AllowDowngrade bool `json:"allow_downgrade"`
+
+	// StartAt schedules the rollout: it stays "scheduled" until then.
+	StartAt *time.Time `json:"start_at,omitempty"`
+	// Windows limits when the rollout offers updates to new devices and
+	// advances stages, e.g. "22:00-05:00" or "01:00-04:00,13:00-14:00".
+	// Installs already under way finish regardless. Empty means any time.
+	Windows string `json:"windows,omitempty"`
+	// Days limits windows to weekdays ("mon".."sun"). An overnight window
+	// belongs to the day it starts on.
+	Days []string `json:"days,omitempty"`
+	// TimeZone (IANA name) the windows are in; default UTC. Devices also
+	// honour their own maintenance_window.
+	TimeZone string `json:"time_zone,omitempty"`
 }
 
 // Deployment rolls a release out to a set of devices.
@@ -276,9 +289,10 @@ func (d *Deployment) CurrentPercent() int {
 
 // Deployment statuses.
 const (
-	DeploymentRunning = "running"
-	DeploymentPaused  = "paused"
-	DeploymentAborted = "aborted"
+	DeploymentScheduled = "scheduled"
+	DeploymentRunning   = "running"
+	DeploymentPaused    = "paused"
+	DeploymentAborted   = "aborted"
 	// DeploymentCompleted means an admin retired the rollout: it no longer
 	// offers its release, including to devices enrolled later.
 	DeploymentCompleted = "completed"

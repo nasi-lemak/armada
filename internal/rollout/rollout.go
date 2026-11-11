@@ -72,6 +72,9 @@ type Candidate struct {
 	Deployment *api.Deployment
 	Release    *api.Release
 	Progress   *api.DeviceUpdate
+	// Closed means the deployment is outside its rollout window: it keeps
+	// its claim on the package but makes no new offers.
+	Closed bool
 }
 
 // Decision is the outcome of evaluating a device against the active deployments.
@@ -128,6 +131,9 @@ func Decide(dev *api.Device, candidates []*Candidate, busy bool) Decision {
 		}
 		if c.Progress != nil && (c.Progress.Status == api.UpdateFailed || c.Progress.Status == api.UpdateRolledBack) {
 			continue // don't hammer a device that already failed this rollout
+		}
+		if c.Closed && c.Progress == nil {
+			continue // outside the rollout window; in-flight installs may resume
 		}
 		if c.Progress != nil && c.Progress.Status == api.UpdateSucceeded {
 			// The agent installed it but reports a different version (e.g. a
@@ -292,7 +298,7 @@ func ValidateStrategy(s *api.Strategy) error {
 	if s.StageDurationSeconds < 0 {
 		return errString("stage_duration_seconds must not be negative")
 	}
-	return nil
+	return validateSchedule(s)
 }
 
 type errString string

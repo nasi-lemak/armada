@@ -758,6 +758,17 @@ func (s *Server) createDeployment(ctx context.Context, req api.CreateDeploymentR
 	if name == "" {
 		name = fmt.Sprintf("%s %s", rel.Package, rel.Version)
 	}
+	status := api.DeploymentRunning
+	if strat.StartAt != nil {
+		if strat.StartAt.After(now.AddDate(1, 0, 0)) {
+			return nil, validationError{errors.New("start_at is more than a year away")}
+		}
+		if strat.StartAt.After(now) {
+			status = api.DeploymentScheduled
+		} else {
+			strat.StartAt = nil
+		}
+	}
 	d := &api.Deployment{
 		ID:             newID("dep"),
 		Name:           truncate(name, 128),
@@ -766,7 +777,7 @@ func (s *Server) createDeployment(ctx context.Context, req api.CreateDeploymentR
 		Version:        rel.Version,
 		Selector:       req.Selector,
 		Strategy:       strat,
-		Status:         api.DeploymentRunning,
+		Status:         status,
 		StageStartedAt: now,
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -774,8 +785,50 @@ func (s *Server) createDeployment(ctx context.Context, req api.CreateDeploymentR
 	if err := s.store.CreateDeployment(ctx, d); err != nil {
 		return nil, err
 	}
-	s.event(ctx, "deployment.created", "", d.ID, fmt.Sprintf("deployment %q started: %s %s, stages %v", d.Name, d.Package, d.Version, strat.Stages))
+	if status == api.DeploymentScheduled {
+		s.event(ctx, "deployment.scheduled", "", d.ID, fmt.Sprintf("deployment %q scheduled for %s: %s %s, stages %v%s",
+			d.Name, strat.StartAt.UTC().Format("2006-01-02 15:04 UTC"), d.Package, d.Version, strat.Stages, describeWindows(strat)))
+	} else {
+		s.event(ctx, "deployment.created", "", d.ID, fmt.Sprintf("deployment %q started: %s %s, stages %v%s", d.Name, d.Package, d.Version, strat.Stages, describeWindows(strat)))
+	}
 	return d, nil
+}
+
+func describeWindows(st api.Strategy) string {
+	if st.Windows == "" && len(st.Days) == 0 {
+		return ""
+	}
+	w := st.Windows
+	if w == "" {
+		w = "all day"
+	}
+	if len(st.Days) > 0 {
+		w += " on " + strings.Join(st.Days, ",")
+	}
+	tz := st.TimeZone
+	if tz == "" {
+		tz = "UTC"
+	}
+	return ", only " + w + " " + tz
+}
+
+// startScheduled starts deployments whose start time has come.
+func (s *Server) startScheduled(ctx context.Context, now time.Time) error {
+	deps, err := s.store.ListDeployments(ctx, api.DeploymentScheduled)
+	if err != nil {
+		return err
+	}
+	for _, d := range deps {
+		if d.Strategy.StartAt != nil && d.Strategy.StartAt.After(now) {
+			continue
+		}
+		d.Status, d.StatusReason, d.StageStartedAt, d.UpdatedAt = api.DeploymentRunning, "", now, now
+		if err := s.store.UpdateDeploymentState(ctx, d); err != nil {
+			return err
+		}
+		s.event(ctx, "deployment.started", "", d.ID, fmt.Sprintf("scheduled deployment %q started: %s %s", d.Name, d.Package, d.Version))
+	}
+	return nil
 }
 
 type deploymentDetail struct {
@@ -844,6 +897,10 @@ func (s *Server) handleDeploymentOp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "deployment is already "+d.Status)
 		return
 	}
+	if d.Status == api.DeploymentScheduled && op != "abort" && op != "resume" {
+		writeError(w, http.StatusConflict, "deployment is scheduled; resume starts it now, abort cancels it")
+		return
+	}
 	switch op {
 	case "pause":
 		d.Status, d.StatusReason = api.DeploymentPaused, "paused by admin"
@@ -905,6 +962,8 @@ func (s *Server) evaluateDeployment(ctx context.Context, d *api.Deployment, now 
 		}
 		s.log.Warn("deployment auto-paused", "deployment", d.ID, "reason", ev.Reason)
 		s.event(ctx, "deployment.paused", "", d.ID, fmt.Sprintf("deployment %q auto-paused: %s", d.Name, ev.Reason))
+	case ev.Advance && !rollout.WindowOpen(d.Strategy, now):
+		// Soak time is up but the rollout window is closed: advance when it opens.
 	case ev.Advance:
 		d.StageIndex++
 		d.StageStartedAt, d.UpdatedAt = now, now

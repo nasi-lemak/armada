@@ -440,6 +440,9 @@ func (s *Server) Run(ctx context.Context) {
 // Tick runs one evaluation pass over all running deployments.
 func (s *Server) Tick(ctx context.Context) error {
 	now := s.now()
+	if err := s.startScheduled(ctx, now); err != nil {
+		return err
+	}
 	stale, err := s.store.FailStaleUpdates(ctx, now.Add(-s.cfg.UpdateTimeout), now)
 	if err != nil {
 		return err

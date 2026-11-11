@@ -170,7 +170,7 @@ const STATUS_TONE = {
   enabled: 'ok', disabled: '',
   running: 'info', paused: 'warn', aborted: 'bad', completed: 'ok',
   succeeded: 'ok', failed: 'bad', rolled_back: 'warn', pending: '', downloading: 'info', installing: 'info',
-  queued: '', sent: 'info', rejected: 'warn', live: 'ok', revoked: 'bad', active: 'ok', attested: 'ok', 'attested (unlocked)': 'warn',
+  queued: '', sent: 'info', rejected: 'warn', live: 'ok', scheduled: 'info', revoked: 'bad', active: 'ok', attested: 'ok', 'attested (unlocked)': 'warn',
 };
 function healthRank(s) { return { ok: 0, unknown: 1, warning: 2, critical: 3 }[s] ?? 1; }
 
@@ -203,6 +203,16 @@ function progressBar(stats, total) {
       h('span', {}, `${s.succeeded || 0} succeeded`),
       h('span', {}, `${(s.failed || 0) + (s.rolled_back || 0)} failed · ${(s.in_progress || 0) + (s.pending || 0)} in flight`)));
 }
+function scheduleLine(d) {
+  const st = d.strategy;
+  const parts = [];
+  if (d.status === 'scheduled' && st.start_at) parts.push('Starts ' + new Date(st.start_at).toLocaleString());
+  if (st.windows || (st.days || []).length) {
+    parts.push('Offers updates and advances only ' + (st.windows || 'all day') + ((st.days || []).length ? ' on ' + st.days.join(', ') : '') + ' (' + (st.time_zone || 'UTC') + ')');
+  }
+  return parts.length ? h('div', { class: 'muted mt' }, parts.join(' · ')) : null;
+}
+
 function stageStrip(d) {
   const steps = [];
   d.strategy.stages.forEach((p, i) => {
@@ -289,7 +299,7 @@ async function viewOverview(root) {
     if (fleetWide()) fleetHist.load();
     const [sum, active, events] = await Promise.all([
       api('GET', '/api/v1/summary'),
-      fleetWide() ? api('GET', '/api/v1/deployments?status=running,paused') : [],
+      fleetWide() ? api('GET', '/api/v1/deployments?status=scheduled,running,paused') : [],
       api('GET', '/api/v1/events?limit=15'),
     ]);
     const tile = (label, value, hint, href) => h(href ? 'a' : 'div', { class: 'card stat', href },
@@ -644,7 +654,13 @@ function strategyFields() {
     minSamples: h('input', { value: '3', type: 'number', min: '1', 'aria-label': 'Min samples' }),
     manual: h('input', { type: 'checkbox' }),
     downgrade: h('input', { type: 'checkbox' }),
+    startAt: h('input', { type: 'datetime-local', 'aria-label': 'Start at' }),
+    windows: h('input', { placeholder: 'any time, or 22:00-05:00', 'aria-label': 'Rollout windows' }),
+    days: h('div', { class: 'btn-row', role: 'group', 'aria-label': 'Days' },
+      ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'].map(d => h('label', { class: 'check chip' }, h('input', { type: 'checkbox', value: d }), d))),
+    tz: h('input', { 'aria-label': 'Time zone' }),
   };
+  try { f.tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { f.tz.value = 'UTC'; }
   f.nodes = [
     h('label', {}, 'Stages (cumulative %)', f.stages),
     h('label', {}, 'Minutes per stage', f.soak),
@@ -652,6 +668,10 @@ function strategyFields() {
     h('label', {}, 'Min results before judging', f.minSamples),
     h('label', { class: 'check' }, f.manual, 'Advance stages manually'),
     h('label', { class: 'check' }, f.downgrade, 'Allow downgrade (rollback)'),
+    h('label', {}, 'Start at (empty = now, your local time)', f.startAt),
+    h('label', {}, 'Only during (HH:MM-HH:MM, comma separated)', f.windows),
+    h('label', {}, 'Window time zone', f.tz),
+    h('div', { class: 'wide' }, h('div', { class: 'muted mb' }, 'Only on these days (none = every day)'), f.days),
   ];
   f.value = () => ({
     stages: f.stages.value.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)),
@@ -660,6 +680,10 @@ function strategyFields() {
     max_failure_rate: parseFloat(f.maxFail.value || '0') / 100,
     min_samples: parseInt(f.minSamples.value || '1', 10),
     allow_downgrade: f.downgrade.checked,
+    start_at: f.startAt.value ? new Date(f.startAt.value).toISOString() : undefined,
+    windows: f.windows.value.trim() || undefined,
+    days: [...f.days.querySelectorAll('input:checked')].map(i => i.value),
+    time_zone: f.windows.value.trim() || f.days.querySelector('input:checked') ? f.tz.value.trim() : undefined,
   });
   return f;
 }
@@ -682,7 +706,8 @@ async function viewDeployments(root) {
         name: nameIn.value, release_id: relSel.value, strategy: strat.value(),
         selector: { channel: chanIn.value.trim(), labels, device_ids: devIn.value.split(/[,\s]+/).filter(Boolean) },
       };
-      const d = await guard(() => api('POST', '/api/v1/deployments', body), 'Deployment started');
+      const d = await guard(() => api('POST', '/api/v1/deployments', body));
+      if (d) toast(d.status === 'scheduled' ? 'Deployment scheduled' : 'Deployment started');
       if (d) location.hash = '#/deployments/' + d.id;
     } },
     h('div', { class: 'form-grid' },
@@ -754,10 +779,10 @@ async function viewDeployment(root, id) {
           h('dt', {}, 'Targets'), h('dd', {}, selParts.join(', ') || 'all devices', h('div', { class: 'muted' }, `${det.targeted} device(s) match · ${det.eligible} in current stage`)),
           h('dt', {}, 'SHA-256'), h('dd', { class: 'mono' }, r.sha256.slice(0, 16) + '…')),
         h('dl', { class: 'kv' },
-          h('dt', {}, 'Stage'), h('dd', {}, `${currentPercent(d)}% · started ${ago(d.stage_started_at)}`),
+          h('dt', {}, 'Stage'), h('dd', {}, d.status === 'scheduled' ? `${currentPercent(d)}% · not started yet` : `${currentPercent(d)}% · started ${ago(d.stage_started_at)}`),
           h('dt', {}, 'Advance'), h('dd', {}, d.strategy.auto_advance ? `automatically every ${duration(d.strategy.stage_duration_seconds)}` : 'manually'),
           h('dt', {}, 'Safety'), h('dd', {}, `pause above ${Math.round(d.strategy.max_failure_rate * 100)}% failures (after ${d.strategy.min_samples} results)`))),
-      h('div', { class: 'mt' }, stageStrip(d), h('div', { class: 'spacer' }), progressBar(s, det.targeted)));
+      h('div', { class: 'mt' }, stageStrip(d), scheduleLine(d), h('div', { class: 'spacer' }), progressBar(s, det.targeted)));
 
     replace(devs, h('h2', {}, 'Devices'), table(['Device', 'From', 'Status', 'Updated', 'Details'],
       (det.updates || []).map(u => h('tr', { class: 'clickable', onclick: () => { location.hash = '#/devices/' + u.device_id; } },

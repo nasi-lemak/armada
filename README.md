@@ -175,6 +175,7 @@ How devices are chosen:
 Deployment lifecycle:
 
 ```
+scheduled ──(start time, or resume)──▶ running
 running ──(failure rate > limit)──▶ paused ──resume──▶ running
    │  advance (soak time elapsed, or manual)                │
    └──────────────▶ complete / abort ◀──────────────────────┘
@@ -186,6 +187,19 @@ does not pause again immediately.
 
 **Rolling back a bad release:** abort its deployment, then deploy the previous release
 with `--allow-downgrade`.
+
+**Scheduling.** A deployment can start later and only roll out at certain times:
+
+```bash
+armadactl deployments create --release rel_... --start-at "2026-12-01 02:00" \
+  --windows 22:00-05:00 --days mon,tue,wed,thu,fri --tz Asia/Singapore
+```
+
+- It stays `scheduled` until `--start-at`. **Resume** starts it early, **Abort** cancels it.
+- Outside its windows it offers no new installs and doesn't advance stages; installs already
+  under way finish. An overnight window belongs to the day it starts on, so `22:00-05:00` on
+  Friday covers early Saturday too.
+- Devices also honour their own `maintenance_window`, in their local time.
 
 ## Android devices
 

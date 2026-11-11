@@ -58,7 +58,8 @@ Commands:
   deployments create --release <id> [--name N] [--channel C] [--label K=V]...
                   [--device ID]... [--stages 5,25,100] [--stage-duration 15m]
                   [--max-failure-rate 0.2] [--min-samples 3] [--manual]
-                  [--allow-downgrade]
+                  [--allow-downgrade] [--start-at "2026-12-01 02:00"]
+                  [--windows 22:00-05:00] [--days mon,tue,wed,thu,fri] [--tz Asia/Singapore]
   deployments pause|resume|advance|retry|complete|abort <id>
   events [--device ID] [--deployment ID] [--limit N]
 
@@ -814,6 +815,10 @@ func (c *cli) deployments(verb string, args []string) error {
 		minSamples := fs.Int("min-samples", -1, "")
 		manual := fs.Bool("manual", false, "")
 		downgrade := fs.Bool("allow-downgrade", false, "")
+		startAt := fs.String("start-at", "", "")
+		windows := fs.String("windows", "", "")
+		days := fs.String("days", "", "")
+		tz := fs.String("tz", "", "")
 		var labels, devices multiFlag
 		fs.Var(&labels, "label", "")
 		fs.Var(&devices, "device", "")
@@ -831,7 +836,8 @@ func (c *cli) deployments(verb string, args []string) error {
 		if req.Selector.Labels, err = labelsOf(labels); err != nil {
 			return err
 		}
-		if *stages != "" || *stageDur >= 0 || *maxFail >= 0 || *minSamples >= 0 || *manual || *downgrade {
+		sched := *startAt != "" || *windows != "" || *days != ""
+		if *stages != "" || *stageDur >= 0 || *maxFail >= 0 || *minSamples >= 0 || *manual || *downgrade || sched {
 			st := api.Strategy{Stages: []int{5, 25, 50, 100}, StageDurationSeconds: 900, AutoAdvance: !*manual, MaxFailureRate: 0.2, MinSamples: 3, AllowDowngrade: *downgrade}
 			if *stages != "" {
 				st.Stages = nil
@@ -852,6 +858,17 @@ func (c *cli) deployments(verb string, args []string) error {
 			if *minSamples >= 0 {
 				st.MinSamples = *minSamples
 			}
+			if *startAt != "" {
+				t, err := parseStartAt(*startAt, *tz)
+				if err != nil {
+					return err
+				}
+				st.StartAt = &t
+			}
+			st.Windows, st.TimeZone = *windows, *tz
+			if *days != "" {
+				st.Days = strings.Split(*days, ",")
+			}
 			req.Strategy = &st
 		}
 		var d api.Deployment
@@ -861,7 +878,11 @@ func (c *cli) deployments(verb string, args []string) error {
 		if c.json {
 			return c.printJSON(d)
 		}
-		fmt.Fprintf(c.out, "deployment %s started: %s %s, stages %v\n", d.ID, d.Package, d.Version, d.Strategy.Stages)
+		if d.Status == api.DeploymentScheduled {
+			fmt.Fprintf(c.out, "deployment %s scheduled for %s: %s %s, stages %v\n", d.ID, d.Strategy.StartAt.Local().Format(time.DateTime), d.Package, d.Version, d.Strategy.Stages)
+		} else {
+			fmt.Fprintf(c.out, "deployment %s started: %s %s, stages %v\n", d.ID, d.Package, d.Version, d.Strategy.Stages)
+		}
 		return nil
 	case "pause", "resume", "abort", "advance", "retry", "complete":
 		if err := need(args, 1, "deployment id"); err != nil {
