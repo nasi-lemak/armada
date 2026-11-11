@@ -50,6 +50,96 @@ type Device struct {
 	Attestation *DeviceAttestation `json:"attestation,omitempty"`
 	// LicenseRevoked stops the device from receiving new app licenses.
 	LicenseRevoked bool `json:"license_revoked"`
+	// Health is the worst status among Checks: ok | unknown | warning | critical.
+	Health string        `json:"health"`
+	Checks []CheckResult `json:"checks,omitempty"`
+	// ParentID is set for peripherals (e.g. BLE devices) reached through a gateway device.
+	ParentID string `json:"parent_id,omitempty"`
+}
+
+// Health statuses, from best to worst.
+const (
+	HealthOK       = "ok"
+	HealthUnknown  = "unknown"
+	HealthWarning  = "warning"
+	HealthCritical = "critical"
+)
+
+// HealthRank orders statuses by severity (higher is worse).
+func HealthRank(s string) int {
+	switch s {
+	case HealthOK:
+		return 0
+	case HealthUnknown:
+		return 1
+	case HealthWarning:
+		return 2
+	case HealthCritical:
+		return 3
+	}
+	return 1
+}
+
+// WorstHealth returns the most severe status among results ("ok" if none).
+func WorstHealth(rs []CheckResult) string {
+	worst := HealthOK
+	for _, r := range rs {
+		if HealthRank(r.Status) > HealthRank(worst) {
+			worst = r.Status
+		}
+	}
+	return worst
+}
+
+// CheckResult is the latest outcome of one health check on a device.
+type CheckResult struct {
+	// Name is unique per device, e.g. "storage /dev/sda", "temperature cpu", "monitor myapp".
+	Name string `json:"name"`
+	// Kind groups checks: storage, temperature, power, battery, disk_space, memory, raid,
+	// systemd, process, http, tcp, command.
+	Kind      string            `json:"kind"`
+	Status    string            `json:"status"`
+	Message   string            `json:"message"`
+	Value     *float64          `json:"value,omitempty"`
+	Unit      string            `json:"unit,omitempty"`
+	Details   map[string]string `json:"details,omitempty"`
+	CheckedAt time.Time         `json:"checked_at"`
+}
+
+// CheckSpec defines a program check that agents run.
+type CheckSpec struct {
+	// Type is systemd | process | http | tcp | command.
+	Type string `json:"type"`
+	// Target is the systemd unit, process name, URL or host:port.
+	Target string `json:"target,omitempty"`
+	// Command (type command) follows the Nagios plugin convention:
+	// exit 0 = ok, 1 = warning, 2 = critical, anything else = unknown.
+	Command []string `json:"command,omitempty"`
+	// ExpectStatus is the HTTP status required (default: any 2xx).
+	ExpectStatus int `json:"expect_status,omitempty"`
+	// Contains must appear in the HTTP body or command output.
+	Contains string `json:"contains,omitempty"`
+	// WarnMs flags slow HTTP/TCP responses as warning.
+	WarnMs          int `json:"warn_ms,omitempty"`
+	IntervalSeconds int `json:"interval_seconds,omitempty"` // default 60
+	TimeoutSeconds  int `json:"timeout_seconds,omitempty"`  // default 10
+}
+
+// Monitor is a server-defined check run on every device its selector matches.
+type Monitor struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Selector  Selector  `json:"selector"`
+	Check     CheckSpec `json:"check"`
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// MonitorCheck is a monitor as sent to an agent.
+type MonitorCheck struct {
+	Name  string    `json:"name"`
+	Check CheckSpec `json:"check"`
 }
 
 // DeviceAttestation summarises a verified Android key attestation.
@@ -60,6 +150,10 @@ type DeviceAttestation struct {
 	OSPatchLevel  int64     `json:"os_patch_level,omitempty"`
 	VerifiedAt    time.Time `json:"verified_at"`
 }
+
+// PeripheralOS is DeviceInfo.OS for peripherals reached over Bluetooth Low
+// Energy. Firmware releases for them are uploaded with this OS.
+const PeripheralOS = "ble"
 
 // Device statuses.
 const (
@@ -378,6 +472,11 @@ type HeartbeatRequest struct {
 	Busy bool `json:"busy"`
 	// Status is a short human-readable note, e.g. "update to myapp 1.2.0 deferred: outside maintenance window".
 	Status string `json:"status,omitempty"`
+	// Health holds the latest result of every health check. Nil means "not
+	// reported" (older agents); an empty list means "no checks".
+	Health []CheckResult `json:"health"`
+	// Peripherals are devices this agent can reach (e.g. BLE sensors), reported as a gateway.
+	Peripherals []PeripheralReport `json:"peripherals,omitempty"`
 }
 
 // HeartbeatResponse tells the agent what to do next.
@@ -389,6 +488,25 @@ type HeartbeatResponse struct {
 	ManagedPackages []string `json:"managed_packages,omitempty"`
 	// Policy is sent to Android devices.
 	Policy *DevicePolicy `json:"policy,omitempty"`
+	// Monitors are the server-defined checks this device should run.
+	Monitors []MonitorCheck `json:"monitors,omitempty"`
+	// PeripheralUpdates are firmware updates for peripherals behind this gateway.
+	PeripheralUpdates []UpdateInstruction `json:"peripheral_updates,omitempty"`
+}
+
+// PeripheralReport describes a device a gateway can reach.
+type PeripheralReport struct {
+	// Address identifies the peripheral, e.g. a BLE MAC address "C0:98:E5:49:00:01".
+	Address string `json:"address"`
+	Name    string `json:"name,omitempty"`
+	// Model is the hardware model; firmware releases use it as their package name.
+	Model string `json:"model"`
+	// Protocol is the firmware update method, e.g. mcumgr, nordic-dfu, esp-ota, or a custom driver name.
+	Protocol        string            `json:"protocol,omitempty"`
+	FirmwareVersion string            `json:"firmware_version,omitempty"`
+	RSSI            int               `json:"rssi,omitempty"`
+	BatteryPercent  int               `json:"battery_percent,omitempty"` // -1 or 0 if unknown
+	Details         map[string]string `json:"details,omitempty"`
 }
 
 // UpdateInstruction asks the agent to install a release.
@@ -405,10 +523,23 @@ type UpdateInstruction struct {
 	// (package name, versionCode, signing certificate) before installing it.
 	VersionCode int64    `json:"version_code,omitempty"`
 	Signers     []string `json:"signers,omitempty"`
+	// Peripheral is set when the update is for a peripheral behind the gateway.
+	Peripheral *PeripheralTarget `json:"peripheral,omitempty"`
+}
+
+// PeripheralTarget says which peripheral a gateway should flash.
+type PeripheralTarget struct {
+	DeviceID        string `json:"device_id"`
+	Address         string `json:"address"`
+	Model           string `json:"model"`
+	Protocol        string `json:"protocol,omitempty"`
+	FirmwareVersion string `json:"firmware_version,omitempty"`
 }
 
 // UpdateReport is sent by the agent as an update progresses.
 type UpdateReport struct {
+	// DeviceID is set by gateways reporting on behalf of a peripheral.
+	DeviceID     string `json:"device_id,omitempty"`
 	DeploymentID string `json:"deployment_id"`
 	ReleaseID    string `json:"release_id"`
 	Status       string `json:"status"`

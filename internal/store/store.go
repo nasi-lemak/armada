@@ -126,6 +126,16 @@ CREATE TABLE IF NOT EXISTS apps (
 	updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS monitors (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL UNIQUE,
+	selector TEXT NOT NULL DEFAULT '{}',
+	spec TEXT NOT NULL,
+	enabled INTEGER NOT NULL DEFAULT 1,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS events (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	time INTEGER NOT NULL,
@@ -169,6 +179,8 @@ func (s *Store) addColumns() error {
 		{"devices", "hw_key", "TEXT NOT NULL DEFAULT ''"},
 		{"devices", "attestation", "TEXT NOT NULL DEFAULT ''"},
 		{"devices", "license_revoked", "INTEGER NOT NULL DEFAULT 0"},
+		{"devices", "health", "TEXT NOT NULL DEFAULT '[]'"},
+		{"devices", "parent_id", "TEXT NOT NULL DEFAULT ''"},
 		{"releases", "version_code", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, c := range cols {
@@ -227,14 +239,14 @@ type scanner interface{ Scan(dest ...any) error }
 
 // ---- devices ----
 
-const deviceCols = `id, name, channel, labels, info, metrics, packages, agent_status, enrolled_at, last_seen_at, attestation, license_revoked`
+const deviceCols = `id, name, channel, labels, info, metrics, packages, agent_status, enrolled_at, last_seen_at, attestation, license_revoked, health, parent_id`
 
 func scanDevice(sc scanner) (*api.Device, error) {
 	var d api.Device
-	var labels, info, metrics, packages, attestation string
+	var labels, info, metrics, packages, attestation, health string
 	var enrolled, seen int64
 	var revoked int
-	if err := sc.Scan(&d.ID, &d.Name, &d.Channel, &labels, &info, &metrics, &packages, &d.AgentStatus, &enrolled, &seen, &attestation, &revoked); err != nil {
+	if err := sc.Scan(&d.ID, &d.Name, &d.Channel, &labels, &info, &metrics, &packages, &d.AgentStatus, &enrolled, &seen, &attestation, &revoked, &health, &d.ParentID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -256,7 +268,18 @@ func scanDevice(sc scanner) (*api.Device, error) {
 		_ = json.Unmarshal([]byte(attestation), d.Attestation)
 	}
 	d.LicenseRevoked = revoked != 0
+	_ = json.Unmarshal([]byte(health), &d.Checks)
+	d.Health = api.WorstHealth(d.Checks)
 	return &d, nil
+}
+
+// SetDeviceHealth stores a device's latest check results.
+func (s *Store) SetDeviceHealth(ctx context.Context, id string, checks []api.CheckResult) error {
+	if checks == nil {
+		checks = []api.CheckResult{}
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE devices SET health=? WHERE id=?`, mustJSON(checks), id)
+	return err
 }
 
 // DeviceHardwareKey returns the device's attested public key (base64 PKIX DER), if any.
@@ -444,9 +467,9 @@ func (s *Store) Enroll(ctx context.Context, tokenHash string, d *api.Device, key
 	if d.Attestation != nil {
 		attestation = mustJSON(d.Attestation)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash, hw_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash, hw_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		d.ID, d.Name, d.Channel, mustJSON(d.Labels), mustJSON(d.Info), mustJSON(d.Metrics), mustJSON(d.Packages),
-		d.AgentStatus, ts(d.EnrolledAt), ts(d.LastSeenAt), attestation, boolInt(d.LicenseRevoked), keyHash, hwKey); err != nil {
+		d.AgentStatus, ts(d.EnrolledAt), ts(d.LastSeenAt), attestation, boolInt(d.LicenseRevoked), "[]", d.ParentID, keyHash, hwKey); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -972,6 +995,72 @@ func (s *Store) ListApps(ctx context.Context) ([]*api.App, error) {
 // DeleteApp removes an app registration.
 func (s *Store) DeleteApp(ctx context.Context, pkg string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM apps WHERE package=?`, pkg)
+	if err != nil {
+		return err
+	}
+	return expectOne(res)
+}
+
+// ---- monitors ----
+
+const monitorCols = `id, name, selector, spec, enabled, created_at, updated_at`
+
+func scanMonitor(sc scanner) (*api.Monitor, error) {
+	var m api.Monitor
+	var sel, spec string
+	var enabled int
+	var created, updated int64
+	if err := sc.Scan(&m.ID, &m.Name, &sel, &spec, &enabled, &created, &updated); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	_ = json.Unmarshal([]byte(sel), &m.Selector)
+	_ = json.Unmarshal([]byte(spec), &m.Check)
+	m.Enabled = enabled != 0
+	m.CreatedAt, m.UpdatedAt = fromTS(created), fromTS(updated)
+	return &m, nil
+}
+
+// UpsertMonitor creates or replaces a monitor.
+func (s *Store) UpsertMonitor(ctx context.Context, m *api.Monitor) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO monitors (`+monitorCols+`) VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET name=excluded.name, selector=excluded.selector, spec=excluded.spec,
+		enabled=excluded.enabled, updated_at=excluded.updated_at`,
+		m.ID, m.Name, mustJSON(m.Selector), mustJSON(m.Check), boolInt(m.Enabled), ts(m.CreatedAt), ts(m.UpdatedAt))
+	if isUnique(err) {
+		return ErrConflict
+	}
+	return err
+}
+
+// GetMonitor loads a monitor.
+func (s *Store) GetMonitor(ctx context.Context, id string) (*api.Monitor, error) {
+	return scanMonitor(s.db.QueryRowContext(ctx, `SELECT `+monitorCols+` FROM monitors WHERE id=?`, id))
+}
+
+// ListMonitors returns all monitors by name.
+func (s *Store) ListMonitors(ctx context.Context) ([]*api.Monitor, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+monitorCols+` FROM monitors ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*api.Monitor
+	for rows.Next() {
+		m, err := scanMonitor(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// DeleteMonitor removes a monitor.
+func (s *Store) DeleteMonitor(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM monitors WHERE id=?`, id)
 	if err != nil {
 		return err
 	}

@@ -50,6 +50,7 @@ type Agent struct {
 	status   string
 	interval time.Duration
 	wg       sync.WaitGroup
+	health   *healthRunner
 }
 
 // New creates an agent from a validated config.
@@ -65,7 +66,8 @@ func New(cfg *Config, log *slog.Logger) (*Agent, error) {
 		return nil, fmt.Errorf("load state: %w", err)
 	}
 	windows, _ := ParseWindows(cfg.MaintenanceWindow)
-	a := &Agent{cfg: cfg, log: log, state: st, windows: windows, Reexec: reexec, Now: time.Now, interval: 30 * time.Second}
+	a := &Agent{cfg: cfg, log: log, state: st, windows: windows, Reexec: reexec, Now: time.Now, interval: 30 * time.Second,
+		health: newHealthRunner(cfg.Health)}
 	a.client, err = newClient(cfg, func() string { return a.state.get().DeviceKey })
 	if err != nil {
 		return nil, err
@@ -88,6 +90,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 	a.log.Info("agent running", "device_id", a.DeviceID(), "version", Version, "server", a.cfg.ServerURL)
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		a.healthLoop(ctx)
+	}()
 	backoff := time.Second
 	for {
 		err := a.CheckIn(ctx)
@@ -109,9 +116,28 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.wg.Wait()
 			return nil
 		case <-time.After(wait):
+		case <-a.health.changed:
+			// A health status changed: report it now rather than at the next interval.
 		}
 	}
 }
+
+// healthLoop runs due health checks every 15 seconds.
+func (a *Agent) healthLoop(ctx context.Context) {
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
+	for {
+		a.health.runDue(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// RunHealthChecks runs all due health checks once (used by -once and tests).
+func (a *Agent) RunHealthChecks(ctx context.Context) { a.health.runDue(ctx) }
 
 func jitter(d time.Duration) time.Duration {
 	// ±10% so a fleet that rebooted together doesn't check in in lockstep.
@@ -197,6 +223,7 @@ func (a *Agent) CheckIn(ctx context.Context) error {
 		Packages: a.packageVersions(ctx),
 		Busy:     busy,
 		Status:   status,
+		Health:   a.health.snapshot(),
 	}
 	var resp api.HeartbeatResponse
 	if err := a.client.do(ctx, "POST", "/api/v1/agent/heartbeat", req, &resp); err != nil {
@@ -207,6 +234,7 @@ func (a *Agent) CheckIn(ctx context.Context) error {
 		a.interval = time.Duration(resp.HeartbeatIntervalSeconds) * time.Second
 		a.mu.Unlock()
 	}
+	a.health.setMonitors(resp.Monitors)
 	a.confirmSelfUpdate()
 	a.flushOutbox(ctx)
 	if resp.Update != nil {

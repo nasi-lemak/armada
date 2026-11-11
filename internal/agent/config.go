@@ -90,6 +90,9 @@ type Config struct {
 	// Packages maps package names to install instructions. The agent always
 	// manages its own package ("armada-agent") without configuration.
 	Packages map[string]PackageConfig `json:"packages,omitempty"`
+
+	// Health tunes the built-in hardware checks (storage, temperature, power…).
+	Health HealthConfig `json:"health,omitempty"`
 }
 
 // LoadConfig reads a JSON config file. A missing file yields an empty config

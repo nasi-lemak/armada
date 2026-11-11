@@ -68,6 +68,12 @@ func run() error {
 		if err := a.Enroll(ctx); err != nil {
 			return err
 		}
+		// Check in to learn the server's monitors, run all checks, then report them.
+		if err := a.CheckIn(ctx); err != nil {
+			return err
+		}
+		a.Wait()
+		a.RunHealthChecks(ctx)
 		if err := a.CheckIn(ctx); err != nil {
 			return err
 		}

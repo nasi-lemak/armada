@@ -92,11 +92,11 @@ func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 		}
 		sel.Labels[k] = v
 	}
-	status := q.Get("status")
+	status, health := q.Get("status"), q.Get("health")
 	out := []*api.Device{}
 	for _, d := range devs {
 		s.decorate(d)
-		if !rollout.Matches(sel, d) || (status != "" && d.Status != status) {
+		if !rollout.Matches(sel, d) || (status != "" && d.Status != status) || (health != "" && d.Health != health) {
 			continue
 		}
 		out = append(out, d)

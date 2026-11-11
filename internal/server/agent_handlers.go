@@ -90,6 +90,12 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, dev *ap
 		s.event(ctx, "device.online", dev.ID, "", dev.Name+" came back online")
 	}
 	dev.Info, dev.Metrics, dev.Packages = req.Info, req.Metrics, req.Packages
+	if req.Health != nil {
+		if err := s.recordHealth(ctx, dev, req.Health); err != nil {
+			s.internalError(w, err)
+			return
+		}
+	}
 
 	resp := api.HeartbeatResponse{HeartbeatIntervalSeconds: int(s.cfg.HeartbeatInterval.Seconds())}
 
@@ -106,6 +112,10 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, dev *ap
 		return
 	}
 	resp.Actions = actions
+	if resp.Monitors, err = s.monitorsFor(ctx, dev); err != nil {
+		s.internalError(w, err)
+		return
+	}
 	if strings.EqualFold(dev.Info.OS, "android") {
 		resp.ManagedPackages = s.managedPackages(r)
 		resp.Policy = &api.DevicePolicy{DisableDebugging: s.cfg.Android.DisableDebugging, BlockUninstall: true}

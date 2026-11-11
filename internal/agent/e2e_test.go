@@ -14,7 +14,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/nasi-lemak/armada/internal/api"
 	"github.com/nasi-lemak/armada/internal/server"
@@ -405,5 +407,77 @@ func TestFailedFreshInstallStaysFailed(t *testing.T) {
 	}
 	if !strings.Contains(detail.Updates[0].Message, "no previous version") {
 		t.Fatalf("unexpected message: %q", detail.Updates[0].Message)
+	}
+}
+
+func TestEndToEndHealthMonitoring(t *testing.T) {
+	h := newHarness(t)
+	var healthy atomic.Bool
+	healthy.Store(true)
+	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !healthy.Load() {
+			w.WriteHeader(500)
+		}
+	}))
+	defer web.Close()
+	// Only devices labelled site=test get this monitor (the harness token sets that label).
+	var mon api.Monitor
+	h.admin("POST", "/api/v1/monitors", api.Monitor{Name: "kiosk-web", Enabled: true,
+		Selector: api.Selector{Labels: map[string]string{"site": "test"}},
+		Check:    api.CheckSpec{Type: "http", Target: web.URL + "/healthz"}}, &mon)
+	h.admin("POST", "/api/v1/monitors", api.Monitor{Name: "elsewhere", Enabled: true,
+		Selector: api.Selector{Labels: map[string]string{"site": "other"}},
+		Check:    api.CheckSpec{Type: "tcp", Target: "127.0.0.1:1"}}, nil)
+
+	a := newTestAgent(t, h, &Config{EnrollmentToken: h.token(), StateDir: t.TempDir(), Health: HealthConfig{Disabled: true}})
+	ctx := context.Background()
+	if err := a.Enroll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cycle := func() {
+		checkIn(t, a)
+		a.health.lastRun = map[string]time.Time{} // make every check due
+		a.RunHealthChecks(ctx)
+		checkIn(t, a)
+	}
+	cycle()
+	var det struct {
+		Device api.Device
+		Events []*api.Event
+	}
+	h.admin("GET", "/api/v1/devices/"+a.DeviceID(), nil, &det)
+	if det.Device.Health != api.HealthOK || len(det.Device.Checks) != 1 || det.Device.Checks[0].Name != "monitor kiosk-web" {
+		t.Fatalf("expected one passing monitor, got %s %+v", det.Device.Health, det.Device.Checks)
+	}
+
+	healthy.Store(false)
+	cycle()
+	h.admin("GET", "/api/v1/devices/"+a.DeviceID(), nil, &det)
+	if det.Device.Health != api.HealthCritical {
+		t.Fatalf("expected critical, got %s %+v", det.Device.Health, det.Device.Checks)
+	}
+	found := false
+	for _, e := range det.Events {
+		if e.Type == "health.critical" && strings.Contains(e.Message, "monitor kiosk-web ok → critical") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no health transition event: %+v", det.Events)
+	}
+	var critical []api.Device
+	h.admin("GET", "/api/v1/devices?health=critical", nil, &critical)
+	if len(critical) != 1 {
+		t.Fatalf("health filter: %d devices", len(critical))
+	}
+
+	// Disabling the monitor removes it from the device on the next check-in.
+	mon.Enabled = false
+	h.admin("PUT", "/api/v1/monitors/"+mon.ID, mon, nil)
+	cycle()
+	det.Device = api.Device{} // decoding doesn't clear fields omitted from the response
+	h.admin("GET", "/api/v1/devices/"+a.DeviceID(), nil, &det)
+	if len(det.Device.Checks) != 0 || det.Device.Health != api.HealthOK {
+		t.Fatalf("disabled monitor still reported: %+v", det.Device.Checks)
 	}
 }
