@@ -195,6 +195,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate history: %w", err)
 	}
+	if _, err := db.Exec(scimSchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate scim: %w", err)
+	}
 	if _, err := db.Exec(passkeySchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate passkeys: %w", err)

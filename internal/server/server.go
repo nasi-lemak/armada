@@ -61,6 +61,9 @@ type Config struct {
 	// can do anything else. Single sign-on users are exempt (their identity
 	// provider handles it).
 	Require2FA bool
+	// SCIMDefaultRole is the role of users the directory provisions, unless
+	// their groups map to another (default viewer).
+	SCIMDefaultRole string
 	// TOTPIssuer is the name authenticator apps show (default "Armada").
 	TOTPIssuer string
 	// OIDC configures single sign-on; empty Issuer disables it.
@@ -118,6 +121,7 @@ func DefaultConfig() Config {
 		SessionTTL:             12 * time.Hour,
 		PasswordLogin:          true,
 		TOTPIssuer:             "Armada",
+		SCIMDefaultRole:        api.RoleViewer,
 		PushHold:               50 * time.Second,
 		DefaultStrategy: api.Strategy{
 			Stages:               []int{5, 25, 50, 100},
@@ -206,6 +210,13 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.TOTPIssuer == "" {
 		cfg.TOTPIssuer = "Armada"
+	}
+	if cfg.SCIMDefaultRole == "" {
+		cfg.SCIMDefaultRole = api.RoleViewer
+	}
+	if !validRole(cfg.SCIMDefaultRole) {
+		st.Close()
+		return nil, fmt.Errorf("invalid SCIM default role %q", cfg.SCIMDefaultRole)
 	}
 	revocations := &attestation.RevocationList{}
 	verifier, err := attestation.NewVerifier(cfg.Android.ExtraRootsPEM, revocations.IsRevoked)
@@ -319,6 +330,22 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/auth/sso/login", s.handleSSOLogin)
 	mux.HandleFunc("GET /api/v1/auth/sso/callback", s.handleSSOCallback)
 	mux.HandleFunc("POST /api/v1/auth/sso/exchange", s.handleSSOExchange)
+	scim := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, s.scimAuth(h)) }
+	scim("GET /scim/v2/ServiceProviderConfig", s.handleSCIMServiceProviderConfig)
+	scim("GET /scim/v2/ResourceTypes", s.handleSCIMResourceTypes)
+	scim("GET /scim/v2/Schemas", s.handleSCIMSchemas)
+	scim("GET /scim/v2/Users", s.handleSCIMListUsers)
+	scim("POST /scim/v2/Users", s.handleSCIMCreateUser)
+	scim("GET /scim/v2/Users/{id}", s.handleSCIMGetUser)
+	scim("PUT /scim/v2/Users/{id}", s.handleSCIMReplaceUser)
+	scim("PATCH /scim/v2/Users/{id}", s.handleSCIMPatchUser)
+	scim("DELETE /scim/v2/Users/{id}", s.handleSCIMDeleteUser)
+	scim("GET /scim/v2/Groups", s.handleSCIMListGroups)
+	scim("POST /scim/v2/Groups", s.handleSCIMCreateGroup)
+	scim("GET /scim/v2/Groups/{id}", s.handleSCIMGetGroup)
+	scim("PUT /scim/v2/Groups/{id}", s.handleSCIMReplaceGroup)
+	scim("PATCH /scim/v2/Groups/{id}", s.handleSCIMPatchGroup)
+	scim("DELETE /scim/v2/Groups/{id}", s.handleSCIMDeleteGroup)
 	mux.HandleFunc("POST /api/v1/auth/passkey/begin", s.handlePasskeyLoginBegin)
 	mux.HandleFunc("POST /api/v1/auth/passkey/finish", s.handlePasskeyLoginFinish)
 	mux.HandleFunc("POST /api/v1/auth/2fa/passkey/begin", s.handlePasskeyTwoFactorBegin)
@@ -391,6 +418,9 @@ func (s *Server) Handler() http.Handler {
 	admin("DELETE /api/v1/alert-rules/{id}", s.handleDeleteAlertRule)
 	admin("PUT /api/v1/apps/{package}", s.handlePutApp)
 	admin("DELETE /api/v1/apps/{package}", s.handleDeleteApp)
+	admin("GET /api/v1/scim/tokens", s.handleListSCIMTokens)
+	admin("POST /api/v1/scim/tokens", s.handleCreateSCIMToken)
+	admin("DELETE /api/v1/scim/tokens/{id}", s.handleDeleteSCIMToken)
 	admin("GET /api/v1/users", s.handleListUsers)
 	admin("POST /api/v1/users", s.handleCreateUser)
 	admin("PATCH /api/v1/users/{id}", s.handlePatchUser)

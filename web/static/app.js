@@ -1322,6 +1322,26 @@ async function viewUsers(root) {
   const syncRole = () => { roleHint.textContent = ROLE_HELP[roleIn.value]; scopeIn.disabled = roleIn.value === 'admin'; if (scopeIn.disabled) scopeIn.value = ''; };
   roleIn.addEventListener('change', syncRole);
 
+  const scimBox = h('div', { class: 'card' });
+  async function refreshSCIM(created) {
+    const toks = await api('GET', '/api/v1/scim/tokens');
+    const nameIn = h('input', { placeholder: 'e.g. Okta, Entra ID', 'aria-label': 'SCIM token name' });
+    replace(scimBox, h('h2', {}, 'Directory sync (SCIM)'),
+      h('p', { class: 'muted' }, 'Let your identity provider (Okta, Microsoft Entra ID, OneLogin, JumpCloud…) create, update and deactivate users here automatically. Deactivated people are signed out at once. Groups mapped with -oidc-group-roles set roles.'),
+      created ? h('div', { class: 'callout mb' }, h('div', {}, h('strong', {}, 'Give these to your identity provider now'), ' — the token is not shown again.'),
+        h('div', { class: 'muted mt' }, 'SCIM base URL (tenant URL)'), h('div', { class: 'secret' }, created.url),
+        h('div', { class: 'muted mt' }, 'Secret token (bearer)'), h('div', { class: 'secret' }, created.token)) : null,
+      toks.length ? h('ul', { class: 'keylist' }, toks.map(t => h('li', {},
+        h('div', {}, h('strong', {}, t.name), h('div', { class: 'muted' }, 'created ' + ago(t.created_at) + (t.last_used_at ? ' · last sync ' + ago(t.last_used_at) : ' · not used yet'))),
+        h('button', { class: 'btn small danger', onclick: async () => {
+          if (confirm(`Revoke ${t.name}? Your directory stops syncing until you give it a new token.`) && await guard(() => api('DELETE', '/api/v1/scim/tokens/' + t.id), 'Token revoked') !== undefined) refreshSCIM();
+        } }, 'Revoke')))) : null,
+      h('form', { class: 'inline mt', onsubmit: async e => {
+        e.preventDefault();
+        const t = await guard(() => api('POST', '/api/v1/scim/tokens', { name: nameIn.value.trim() }));
+        if (t) refreshSCIM(t);
+      } }, nameIn, h('button', { class: 'btn', type: 'submit' }, 'Create SCIM token')));
+  }
   append(root, pageHead('Users', 'People who can sign in to this dashboard and the API'),
     h('div', { class: 'card' }, h('h2', {}, 'Add a user'),
       h('form', { class: 'stack', onsubmit: async e => {
@@ -1338,8 +1358,9 @@ async function viewUsers(root) {
         h('label', {}, 'Only devices with labels (client accounts)', scopeIn), h('label', {}, 'Initial password (10+ characters)', passIn)),
       h('p', { class: 'muted' }, 'A scoped user sees only matching devices, their alerts, history and activity. They never see releases, deployments, other customers or fleet-wide settings, and devices they enroll get the scope labels.'),
       h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Add user')))),
-    h('div', { class: 'spacer' }), list);
+    h('div', { class: 'spacer' }), list, h('div', { class: 'spacer' }), scimBox);
   syncRole();
+  guard(() => refreshSCIM());
 
   async function refresh() {
     const users = await api('GET', '/api/v1/users');
@@ -1357,6 +1378,7 @@ async function viewUsers(root) {
               u.two_factor ? h('span', { class: 'chip', title: 'Uses an authenticator app' }, '2FA') : null,
               u.passkeys ? h('span', { class: 'chip', title: 'Passkeys or security keys' }, u.passkeys === 1 ? '1 passkey' : u.passkeys + ' passkeys') : null,
               u.sso ? h('span', { class: 'chip', title: 'Has signed in with single sign-on' }, u.no_password ? 'SSO only' : 'SSO') : null,
+              u.provisioned ? h('span', { class: 'chip', title: 'Managed by your directory over SCIM: name, active state and (with group mapping) role come from there' }, 'Directory') : null,
               self ? h('span', { class: 'muted' }, 'you') : null)),
           h('td', {}, roleSel),
           h('td', {}, scopeText(u.scope) ? labelChips(u.scope.labels) : h('span', { class: 'muted' }, 'whole fleet')),

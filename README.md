@@ -75,7 +75,8 @@ It has three parts, all in Go with no external services:
   and admin roles, and accounts limited to one customer's devices. Every change in the activity log names
   who made it. Sign in with single sign-on (Google, Microsoft, Okta or any OpenID Connect provider,
   with roles from groups), passkeys (passwordless, or as a second step), and authenticator codes.
-  Two-factor sign-in can be required.
+  Two-factor sign-in can be required. SCIM provisioning lets your directory create and deactivate
+  accounts automatically.
 - **Web dashboard** built into the server binary (no build step, strict CSP).
 - **One-line onboarding** with `curl …/install.sh | sh`.
 - **Android devices you provide to customers** (see [below](#android-devices)):
@@ -777,6 +778,46 @@ Always set `-oidc-allowed-domains` for providers where users can change their ow
 example multi-tenant Entra apps). Users who signed in with SSO can't use a password unless an admin
 sets one. Their MFA happens at the provider.
 
+### SCIM provisioning
+
+With SCIM, your identity provider manages Armada accounts for you. Assigning someone to the Armada
+app creates their account. Changes to their name or email follow. Deactivating or unassigning them
+disables them here immediately and ends their sessions. Okta, Microsoft Entra ID, OneLogin, JumpCloud
+and others support it.
+
+1. In Armada, go to **Users → Directory sync (SCIM)** and create a token (or run
+   `armadactl scim tokens create --name Okta`). Copy the **SCIM base URL**
+   (`https://fleet.example.com/scim/v2`) and the token.
+2. In your identity provider, turn on provisioning for the Armada app:
+   - **Okta:** in the app's *Provisioning* tab, set *SCIM connector base URL*, *Unique identifier field
+     for users* = `userName`, and *Authentication mode* = *HTTP Header* with the token. Enable
+     *Create*, *Update attributes* and *Deactivate users*, and *Push groups*.
+   - **Entra ID:** in the enterprise app, go to *Provisioning*, choose *Automatic*, and enter the
+     *Tenant URL* and *Secret token*. The default attribute mappings work (`userPrincipalName` →
+     `userName`, `mail` → `emails[type eq "work"].value`).
+3. Use SSO for sign-in (see above). Provisioned users have no password.
+
+**Roles from groups.** Groups the directory pushes are matched by name against `-oidc-group-roles`
+(the same mapping SSO uses), for example `"Fleet Admins=admin,Fleet Ops=operator"`. A provisioned
+user's role is the highest one their groups give, or `-scim-default-role` (default `viewer`) when
+they're in none. Taking someone out of *Fleet Admins* in the directory demotes them here within a
+sync. Their role can't be changed by hand in Armada while group mapping is on. Client scopes
+(`customer=acme`) are still set in Armada.
+
+**Existing accounts.** If the directory sends a user whose email already has an Armada account, it
+takes that account over: from then on, the directory manages it. With group mapping on, the
+account's role then follows its groups. **Put existing admins in your admin group before turning on
+sync.** The admin token keeps working if anyone gets locked out.
+
+Details:
+- Supported: Users and Groups with create, read, replace, PATCH and delete; `attr eq "value"` filters
+  (`userName`, `externalId`, `emails`, `displayName`); paging; and the discovery endpoints. Unknown
+  user attributes (title, department and the like) are accepted and ignored.
+- Deactivation (`active: false`) keeps the account but disables it. Deleting it in the directory
+  deletes it here.
+- SCIM tokens can only call `/scim/v2`, not the rest of the API. Revoke them on the Users page. The
+  activity log records every directory change as *SCIM (token name)*.
+
 **Security details.** The flow is the authorization-code flow with PKCE and a nonce. The callback must
 come back to the browser that started it (a cookie check). The session token never appears in a URL;
 the browser exchanges a one-time ticket, valid for a minute, for it.
@@ -883,6 +924,7 @@ armadactl deployments create --release <id> [--channel C] [--label K=V] [--devic
 armadactl deployments list|get|pause|resume|advance|retry|complete|abort
 armadactl events [--device ID] [--deployment ID]
 armadactl config list|get|apply -f FILE|enable|disable|delete
+armadactl scim tokens [list|create --name N|revoke ID]
 armadactl whoami
 armadactl users list|create|set|delete      (create --sso-only; set --reset-2fa, --unlink-sso)
 armadactl me password
@@ -917,6 +959,7 @@ Add `--json` to any command for machine-readable output.
 | `-oidc-issuer`, `-oidc-client-id` | `ARMADA_OIDC_ISSUER`, `ARMADA_OIDC_CLIENT_ID` | SSO off |
 | | `ARMADA_OIDC_CLIENT_SECRET` | (environment only) |
 | `-oidc-name`, `-oidc-allowed-domains`, `-oidc-create-role`, `-oidc-group-roles`, `-oidc-groups-claim`, `-oidc-scopes`, `-oidc-redirect-url` | `ARMADA_OIDC_…` | see [Single sign-on](#single-sign-on) |
+| `-scim-default-role` | `ARMADA_SCIM_DEFAULT_ROLE` | `viewer` (see [SCIM provisioning](#scim-provisioning)) |
 | `-push-hold` | `ARMADA_PUSH_HOLD` | `50s` (agent long-poll; keep below your proxy's idle timeout; `0` disables) |
 
 The data directory holds `armada.db` (SQLite), `artifacts/`, `signing.key`, `license.key`, `secrets.key` and
@@ -983,6 +1026,8 @@ endpoints use the per-device key issued at enrollment.
 | `GET /api/v1/me`, `POST /api/v1/me/password` | Who is signed in (role, scope); change password |
 | `GET/POST /api/v1/me/tokens`, `DELETE /api/v1/me/tokens/{id}` | Personal API tokens |
 | `GET/POST /api/v1/users`, `PATCH/DELETE /api/v1/users/{id}` | Users (admin) |
+| `GET/POST /api/v1/scim/tokens`, `DELETE …/{id}` | SCIM tokens (admin) |
+| `/scim/v2/Users`, `/scim/v2/Groups`, `/scim/v2/ServiceProviderConfig`, `…/ResourceTypes`, `…/Schemas` | SCIM 2.0 for your identity provider (SCIM token) |
 
 ## Security model
 
@@ -1045,8 +1090,8 @@ deploy/, examples/  service units, compose file, sample agent config and hooks
   heartbeat. Running several replicas on Postgres is designed but not built; see
   [docs/scaling.md](docs/scaling.md).
 - Passkey users have no recovery codes unless they also set up an authenticator app. Losing every
-  passkey means asking an admin for a reset. SAML needs a broker such as Keycloak. There's no SCIM provisioning: use group mapping, or
-  disable people in Armada as well.
+  passkey means asking an admin for a reset. SAML needs a broker such as Keycloak. SCIM doesn't map
+  directory groups to client scopes yet; set scopes in Armada.
 - Push wakes one device at a time (actions, logs, check-in). New rollouts still start at each
   device's next heartbeat, which spreads the load. Logs are a snapshot, not a live tail.
 - Android app updates always download the full APK (APKs are compressed, so deltas save little).

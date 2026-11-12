@@ -68,6 +68,17 @@ func (s *Store) UpdateUser(ctx context.Context, u *api.User) error {
 	return expectOne(res)
 }
 
+// UpdateUserEmail changes a user's sign-in email (and saves their profile).
+func (s *Store) UpdateUserEmail(ctx context.Context, u *api.User) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET email=?, spec=? WHERE id=?`, strings.ToLower(u.Email), mustJSON(u), u.ID)
+	if isUnique(err) {
+		return ErrConflict
+	} else if err != nil {
+		return err
+	}
+	return expectOne(res)
+}
+
 // SetPassword replaces a user's password hash and ends their sessions.
 func (s *Store) SetPassword(ctx context.Context, id, hash string) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE users SET password_hash=? WHERE id=?`, hash, id)

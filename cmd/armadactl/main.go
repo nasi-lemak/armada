@@ -105,6 +105,9 @@ Users and access:
                        [--reset-2fa]          turn off their authenticator (lost phone)
                        [--unlink-sso]         forget their single sign-on identity
   users delete <id|email>
+  scim tokens [list]                         SCIM tokens for directory sync
+  scim tokens create --name N                prints the SCIM URL and token once
+  scim tokens revoke <id>
   me password                                change your password (prompts on stdin)
   me tokens [list]
   me tokens create --name N                  prints the token once
@@ -191,6 +194,8 @@ func (c *cli) run(args []string) error {
 		return c.config(verb, rest)
 	case "whoami":
 		return c.whoami()
+	case "scim":
+		return c.scim(verb, rest)
 	case "users", "user":
 		return c.users(verb, rest)
 	case "me":

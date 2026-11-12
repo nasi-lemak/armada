@@ -849,6 +849,33 @@ type User struct {
 	NoPassword bool `json:"no_password,omitempty"`
 	// Passkeys is how many passkeys (or security keys) the user has.
 	Passkeys int `json:"passkeys"`
+	// Provisioned users are managed by your directory over SCIM: it sets
+	// their name, active state and (with group mapping) their role.
+	Provisioned bool       `json:"provisioned,omitempty"`
+	ExternalID  string     `json:"external_id,omitempty"`
+	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
+}
+
+// SCIMToken authenticates an identity provider's SCIM client.
+type SCIMToken struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	Token      string     `json:"token,omitempty"` // only in the create response
+	// URL is the SCIM base URL to give the identity provider (create response).
+	URL string `json:"url,omitempty"`
+}
+
+// SCIMGroup is a directory group pushed over SCIM. Groups named in the
+// group-to-role mapping set their members' roles.
+type SCIMGroup struct {
+	ID          string    `json:"id"`
+	DisplayName string    `json:"display_name"`
+	ExternalID  string    `json:"external_id,omitempty"`
+	Members     []string  `json:"members"` // user IDs
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // Passkey is a registered passkey or security key.

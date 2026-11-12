@@ -99,6 +99,7 @@ func run() error {
 	oidcDomains := flag.String("oidc-allowed-domains", env("ARMADA_OIDC_ALLOWED_DOMAINS", ""), "comma-separated email domains allowed to sign in with SSO")
 	flag.StringVar(&cfg.OIDC.CreateRole, "oidc-create-role", env("ARMADA_OIDC_CREATE_ROLE", ""), "create unknown SSO users with this role (viewer, operator or admin); empty: only users an admin added")
 	flag.StringVar(&cfg.OIDC.GroupsClaim, "oidc-groups-claim", env("ARMADA_OIDC_GROUPS_CLAIM", "groups"), "ID token claim with the user's groups")
+	flag.StringVar(&cfg.SCIMDefaultRole, "scim-default-role", env("ARMADA_SCIM_DEFAULT_ROLE", "viewer"), "role of users your directory provisions over SCIM when their groups don't map to one")
 	oidcGroupRoles := flag.String("oidc-group-roles", env("ARMADA_OIDC_GROUP_ROLES", ""), "map groups to roles, e.g. fleet-admins=admin,fleet-ops=operator,support=viewer; users in none can't sign in")
 	flag.Parse()
 	// The client secret only comes from the environment, never argv (visible in ps).

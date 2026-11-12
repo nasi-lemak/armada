@@ -370,3 +370,51 @@ func parseStartAt(s, tz string) (time.Time, error) {
 	}
 	return time.Time{}, fmt.Errorf("invalid --start-at %q (use \"2026-12-01 02:00\" or RFC 3339)", s)
 }
+
+func (c *cli) scim(verb string, args []string) error {
+	if verb != "tokens" && verb != "token" {
+		return fmt.Errorf("unknown scim command %q (try: scim tokens)", verb)
+	}
+	sub := ""
+	if len(args) > 0 {
+		sub, args = args[0], args[1:]
+	}
+	switch sub {
+	case "", "list", "ls":
+		var ts []api.SCIMToken
+		if err := c.do("GET", "/api/v1/scim/tokens", nil, &ts); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(ts)
+		}
+		var rows [][]string
+		for _, t := range ts {
+			last := "never"
+			if t.LastUsedAt != nil {
+				last = t.LastUsedAt.Local().Format(time.DateTime)
+			}
+			rows = append(rows, []string{t.ID, t.Name, t.CreatedAt.Local().Format(time.DateTime), last})
+		}
+		c.table("ID\tNAME\tCREATED\tLAST SYNC", rows)
+		return nil
+	case "create", "new":
+		fs := flag.NewFlagSet("scim tokens create", flag.ContinueOnError)
+		name := fs.String("name", "", "")
+		if _, err := parse(fs, args); err != nil {
+			return err
+		}
+		var t api.SCIMToken
+		if err := c.do("POST", "/api/v1/scim/tokens", map[string]string{"name": *name}, &t); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(t)
+		}
+		fmt.Fprintf(c.out, "SCIM base URL: %s\nToken:         %s\n\nEnter both in your identity provider's provisioning settings. The token is not shown again.\n", t.URL, t.Token)
+		return nil
+	case "revoke", "delete", "rm":
+		return c.simpleDelete("SCIM token", "/api/v1/scim/tokens/", args)
+	}
+	return fmt.Errorf("unknown scim tokens command %q", sub)
+}

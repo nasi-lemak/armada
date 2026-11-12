@@ -387,6 +387,10 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 	if req.Name != nil {
 		u.Name = truncate(strings.TrimSpace(*req.Name), 128)
 	}
+	if req.Role != nil && *req.Role != u.Role && u.Provisioned && len(s.cfg.OIDC.GroupRoles) > 0 {
+		writeError(w, http.StatusBadRequest, "this user's role comes from their directory groups; change their groups instead")
+		return
+	}
 	if req.Role != nil {
 		u.Role = *req.Role
 	}
