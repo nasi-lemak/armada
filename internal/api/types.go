@@ -847,6 +847,35 @@ type User struct {
 	SSO bool `json:"sso"`
 	// NoPassword marks users who can only sign in with single sign-on.
 	NoPassword bool `json:"no_password,omitempty"`
+	// Passkeys is how many passkeys (or security keys) the user has.
+	Passkeys int `json:"passkeys"`
+}
+
+// Passkey is a registered passkey or security key.
+type Passkey struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	// Synced passkeys are backed up by a password manager or platform
+	// (iCloud Keychain, Google Password Manager…); others live on one device.
+	Synced bool `json:"synced"`
+}
+
+// PasskeyCeremony starts a WebAuthn registration or sign-in: pass Options
+// to navigator.credentials.create() or .get(), then send the result back
+// with Ceremony.
+type PasskeyCeremony struct {
+	Ceremony string `json:"ceremony"`
+	Options  any    `json:"options"`
+}
+
+// PasskeyFinish completes a WebAuthn ceremony.
+type PasskeyFinish struct {
+	Ceremony   string          `json:"ceremony"`
+	Challenge  string          `json:"challenge,omitempty"` // second-factor sign-in only
+	Name       string          `json:"name,omitempty"`      // registration only
+	Credential json.RawMessage `json:"credential"`
 }
 
 // CreateUserRequest creates a user (admin only).
@@ -877,6 +906,8 @@ type LoginResponse struct {
 	// with "code" set).
 	TwoFactorRequired bool   `json:"two_factor_required,omitempty"`
 	Challenge         string `json:"challenge,omitempty"`
+	// TwoFactorMethods lists what the user can use: "code" and/or "passkey".
+	TwoFactorMethods []string `json:"two_factor_methods,omitempty"`
 }
 
 // TwoFactorLoginRequest completes a sign-in with an authenticator or recovery code.
@@ -887,9 +918,11 @@ type TwoFactorLoginRequest struct {
 
 // AuthConfig tells the sign-in page which methods are available.
 type AuthConfig struct {
-	PasswordLogin bool   `json:"password_login"`
-	SSO           bool   `json:"sso"`
-	SSOName       string `json:"sso_name,omitempty"` // e.g. "Google" or "Okta"
+	PasswordLogin bool `json:"password_login"`
+	// Passkeys means passwordless passkey sign-in is available.
+	Passkeys bool   `json:"passkeys"`
+	SSO      bool   `json:"sso"`
+	SSOName  string `json:"sso_name,omitempty"` // e.g. "Google" or "Okta"
 }
 
 // TwoFactorSetup starts authenticator setup. Confirm with a code to enable.

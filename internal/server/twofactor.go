@@ -144,10 +144,18 @@ func (s *Server) finishPasswordLogin(w http.ResponseWriter, r *http.Request, u *
 	ctx := r.Context()
 	now := s.now()
 	keys := []string{"email:" + strings.ToLower(u.Email), "ip:" + clientIP(r)}
-	method := ""
-	if u.TwoFactor {
+	factor := ""
+	if hasSecondFactor(u) {
 		if code == "" {
-			writeJSON(w, http.StatusOK, api.LoginResponse{TwoFactorRequired: true, Challenge: s.mfa.create(u.ID, now), User: api.User{Email: u.Email}})
+			var methods []string
+			if u.TwoFactor {
+				methods = append(methods, "code")
+			}
+			if u.Passkeys > 0 {
+				methods = append(methods, "passkey")
+			}
+			writeJSON(w, http.StatusOK, api.LoginResponse{TwoFactorRequired: true, Challenge: s.mfa.create(u.ID, now),
+				TwoFactorMethods: methods, User: api.User{Email: u.Email}})
 			return
 		}
 		ok, how, err := s.checkSecondFactor(ctx, u, code)
@@ -160,20 +168,33 @@ func (s *Server) finishPasswordLogin(w http.ResponseWriter, r *http.Request, u *
 			writeError(w, http.StatusUnauthorized, "that code is not valid")
 			return
 		}
-		method = how
-		if challenge != "" {
-			s.mfa.done(challenge)
-		}
+		factor = how
 	}
-	s.logins.reset(keys[0])
-	tok, exp, err := s.startSession(ctx, u, "password")
+	s.completeLogin(w, r, u, "password", factor, challenge)
+}
+
+// hasSecondFactor reports whether password sign-in needs a second step.
+func hasSecondFactor(u *api.User) bool { return u.TwoFactor || u.Passkeys > 0 }
+
+// completeLogin starts a session after every check has passed. method is
+// the session's sign-in method; factor describes the second factor used.
+func (s *Server) completeLogin(w http.ResponseWriter, r *http.Request, u *api.User, method, factor, challenge string) {
+	ctx := r.Context()
+	if challenge != "" {
+		s.mfa.done(challenge)
+	}
+	s.logins.reset("email:" + strings.ToLower(u.Email))
+	tok, exp, err := s.startSession(ctx, u, method)
 	if err != nil {
 		s.internalError(w, err)
 		return
 	}
 	msg := u.Email + " signed in"
-	if method != "" {
-		msg += " (password + " + method + ")"
+	switch {
+	case method == "passkey":
+		msg += " with a passkey"
+	case factor != "":
+		msg += " (password + " + factor + ")"
 	}
 	s.logEvent(context.WithValue(ctx, principalKey{}, &principal{user: u, name: u.Email, role: u.Role}), "user.login", "", "", msg)
 	writeJSON(w, http.StatusOK, api.LoginResponse{Token: tok, ExpiresAt: exp, User: *u})
@@ -184,7 +205,7 @@ func (s *Server) startSession(ctx context.Context, u *api.User, method string) (
 	now := s.now()
 	tok := newSecret("st")
 	exp := now.Add(s.cfg.SessionTTL)
-	if err := s.store.CreateSession(ctx, newID("ses"), hashSecret(tok), u.ID, method, exp); err != nil {
+	if err := s.store.CreateSession(ctx, newID("ses"), hashSecret(tok), u.ID, method, now, exp); err != nil {
 		return "", time.Time{}, err
 	}
 	u.LastLoginAt = &now

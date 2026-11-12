@@ -74,7 +74,8 @@ It has three parts, all in Go with no external services:
 - **Users, roles and client accounts** (see [below](#users-roles-and-client-accounts)): viewer, operator
   and admin roles, and accounts limited to one customer's devices. Every change in the activity log names
   who made it. Sign in with single sign-on (Google, Microsoft, Okta or any OpenID Connect provider,
-  with roles from groups) and two-factor authenticator codes, which can be required.
+  with roles from groups), passkeys (passwordless, or as a second step), and authenticator codes.
+  Two-factor sign-in can be required.
 - **Web dashboard** built into the server binary (no build step, strict CSP).
 - **One-line onboarding** with `curl …/install.sh | sh`.
 - **Android devices you provide to customers** (see [below](#android-devices)):
@@ -690,7 +691,8 @@ confirm with a code. After that, signing in takes the password and then a 6-digi
   Wrong codes also count towards the email's lockout.
 - Turning it on signs out the user's other sessions, because those only had the password.
 - **Lost phone:** an admin clicks **Reset 2FA** on the Users page, or runs
-  `armadactl users set <email> --reset-2fa`. That turns it off and signs the user out everywhere.
+  `armadactl users set <email> --reset-2fa`. That removes the authenticator and any passkeys, and signs the
+  user out everywhere.
   Check who is asking before doing this.
 - **Require it for everyone:** start the server with `-require-2fa`. Password users who haven't set it
   up can only reach their account page until they do. Single sign-on users are exempt, because their
@@ -699,6 +701,33 @@ confirm with a code. After that, signing in takes the password and then a 6-digi
   `{"email", "password", "code"}` in one request.
 - Authenticator secrets are encrypted with `<data-dir>/secrets.key` (included in backups), so a copy of
   the database alone doesn't reveal them.
+
+### Passkeys
+
+Under **My account**, users can add passkeys: Touch ID or Face ID, Windows Hello, Android screen lock,
+a password manager's passkeys (iCloud Keychain, Google Password Manager, 1Password, Bitwarden), or a
+hardware security key such as a YubiKey. Passkeys can't be phished, because they only work on the
+site they were made for.
+
+They work two ways:
+
+- **Passwordless.** **Sign in with a passkey** on the sign-in page needs no email or password. The
+  device checks the user's fingerprint, face or PIN, which counts as the second factor, so it
+  satisfies `-require-2fa`.
+- **As the second step** after a password, instead of an authenticator code. Simple security keys
+  without a PIN work this way.
+
+Details:
+
+- Adding a passkey needs a sign-in from the last 15 minutes. A stolen session therefore can't add a
+  permanent way in. Adding the first second factor signs out the user's other sessions.
+- A security key whose signature counter goes backwards (a sign of cloning) is refused.
+- **Reset 2FA** (admin) removes a user's passkeys along with their authenticator app.
+- Passkeys belong to the host name in `-public-url` (for example `fleet.example.com`). The dashboard
+  must be opened at that address, over HTTPS (or at `localhost` for testing). If you move the server
+  to a new domain, users need to add passkeys again. IP addresses can't be used.
+- Single sign-on users use their provider's sign-in (which can have its own passkeys), so offboarding
+  and group rules at the provider can't be bypassed. Passkey sign-in is off when `-password-login=false`.
 
 ### Single sign-on
 
@@ -948,6 +977,9 @@ endpoints use the per-device key issued at enrollment.
 | `GET /api/v1/auth/config` | Which sign-in methods are on (public) |
 | `GET /api/v1/auth/sso/login`, `GET …/callback`, `POST …/exchange` | Single sign-on (browser flow) |
 | `POST /api/v1/me/2fa/{setup,enable,disable,recovery-codes}` | Manage your own two-factor sign-in (dashboard sessions only) |
+| `POST /api/v1/auth/passkey/{begin,finish}` | Passwordless passkey sign-in (WebAuthn) |
+| `POST /api/v1/auth/2fa/passkey/{begin,finish}` | Passkey as the second step after a password |
+| `GET /api/v1/me/passkeys`, `POST …/register/{begin,finish}`, `DELETE …/{id}` | Manage your passkeys |
 | `GET /api/v1/me`, `POST /api/v1/me/password` | Who is signed in (role, scope); change password |
 | `GET/POST /api/v1/me/tokens`, `DELETE /api/v1/me/tokens/{id}` | Personal API tokens |
 | `GET/POST /api/v1/users`, `PATCH/DELETE /api/v1/users/{id}` | Users (admin) |
@@ -957,7 +989,7 @@ endpoints use the per-device key issued at enrollment.
 - Admin, session, personal and device credentials are random 256-bit secrets. The server stores
   only their SHA-256 hashes. Deleting a device revokes its key immediately. User passwords are
   bcrypt hashes. Authenticator secrets are encrypted (AES-GCM) with `secrets.key`; recovery codes
-  are stored as hashes.
+  are stored as hashes. Passkeys store only public keys.
 - Roles and client scopes are enforced by the server on every request. The dashboard only hides
   what a user can't use.
 - Enrollment tokens can expire, have a use limit, and be revoked.
@@ -1012,8 +1044,8 @@ deploy/, examples/  service units, compose file, sample agent config and hooks
 - A single server with SQLite comfortably handles thousands of devices at a 30s
   heartbeat. Running several replicas on Postgres is designed but not built; see
   [docs/scaling.md](docs/scaling.md).
-- Two-factor sign-in uses authenticator codes; passkeys and security keys (WebAuthn) aren't supported
-  yet. SAML needs a broker such as Keycloak. There's no SCIM provisioning: use group mapping, or
+- Passkey users have no recovery codes unless they also set up an authenticator app. Losing every
+  passkey means asking an admin for a reset. SAML needs a broker such as Keycloak. There's no SCIM provisioning: use group mapping, or
   disable people in Armada as well.
 - Push wakes one device at a time (actions, logs, check-in). New rollouts still start at each
   device's next heartbeat, which spreads the load. Logs are a snapshot, not a live tail.

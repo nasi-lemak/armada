@@ -121,31 +121,40 @@ func (s *Store) DeleteUser(ctx context.Context, id string) error {
 
 // CreateSession stores a session token hash. method records how the user
 // signed in ("password" or "sso").
-func (s *Store) CreateSession(ctx context.Context, id, tokenHash, userID, method string, expires time.Time) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions (id, token_hash, user_id, method, expires_at) VALUES (?,?,?,?,?)`, id, tokenHash, userID, method, ts(expires))
+func (s *Store) CreateSession(ctx context.Context, id, tokenHash, userID, method string, created, expires time.Time) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions (id, token_hash, user_id, method, expires_at, created_at) VALUES (?,?,?,?,?,?)`,
+		id, tokenHash, userID, method, ts(expires), ts(created))
 	return err
+}
+
+// SessionInfo describes how and when a session was signed in.
+type SessionInfo struct {
+	Method    string
+	CreatedAt time.Time
 }
 
 // SessionUser resolves a session token hash to its user, extending the
 // session (sliding expiry) when more than half of its lifetime has passed.
-func (s *Store) SessionUser(ctx context.Context, tokenHash string, now time.Time, ttl time.Duration) (*api.User, string, error) {
-	var userID, method string
-	var exp int64
-	err := s.db.QueryRowContext(ctx, `SELECT user_id, method, expires_at FROM sessions WHERE token_hash=?`, tokenHash).Scan(&userID, &method, &exp)
+func (s *Store) SessionUser(ctx context.Context, tokenHash string, now time.Time, ttl time.Duration) (*api.User, SessionInfo, error) {
+	var userID string
+	var info SessionInfo
+	var exp, created int64
+	err := s.db.QueryRowContext(ctx, `SELECT user_id, method, expires_at, created_at FROM sessions WHERE token_hash=?`, tokenHash).Scan(&userID, &info.Method, &exp, &created)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, "", ErrNotFound
+		return nil, info, ErrNotFound
 	} else if err != nil {
-		return nil, "", err
+		return nil, info, err
 	}
+	info.CreatedAt = fromTS(created)
 	if now.After(fromTS(exp)) {
 		_, _ = s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash=?`, tokenHash)
-		return nil, "", ErrNotFound
+		return nil, info, ErrNotFound
 	}
 	if fromTS(exp).Sub(now) < ttl/2 {
 		_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET expires_at=? WHERE token_hash=?`, ts(now.Add(ttl)), tokenHash)
 	}
 	u, err := s.GetUser(ctx, userID)
-	return u, method, err
+	return u, info, err
 }
 
 // DeleteUserSessionsExcept signs a user out of every session but one

@@ -1071,15 +1071,22 @@ function scopeText(sel) {
 
 let tokenMode = false;
 let challenge = ''; // set while waiting for a second-factor code
-let authConfig = { password_login: true, sso: false };
+let challengeMethods = []; // "code" and/or "passkey"
+let authConfig = { password_login: true, sso: false, passkeys: false };
+const passkeysSupported = () => !!(window.PublicKeyCredential && navigator.credentials);
 function syncLoginMode() {
   const pw = authConfig.password_login;
   $('#login-sso').classList.toggle('hidden', !authConfig.sso || tokenMode || !!challenge);
-  $('#login-or').classList.toggle('hidden', !authConfig.sso || !pw || tokenMode || !!challenge);
+  const pkLogin = authConfig.passkeys && passkeysSupported();
+  $('#login-passkey').classList.toggle('hidden', !pkLogin || tokenMode || !!challenge);
+  $('#login-or').classList.toggle('hidden', !(authConfig.sso || pkLogin) || !pw || tokenMode || !!challenge);
+  $('#login-2fa-passkey').classList.toggle('hidden', !challengeMethods.includes('passkey') || !passkeysSupported());
+  $('#login-code-box').classList.toggle('hidden', !challengeMethods.includes('code') && challengeMethods.includes('passkey'));
   $('#login-user').classList.toggle('hidden', tokenMode || !pw || !!challenge);
   $('#login-2fa').classList.toggle('hidden', !challenge);
   $('#login-admin').classList.toggle('hidden', !tokenMode);
-  $('#login-form button[type=submit]').classList.toggle('hidden', !tokenMode && !pw && !challenge);
+  const passkeyOnlyStep = !!challenge && !challengeMethods.includes('code');
+  $('#login-form button[type=submit]').classList.toggle('hidden', (!tokenMode && !pw && !challenge) || passkeyOnlyStep);
   $('#login-switch').textContent = tokenMode ? (pw ? 'Sign in with email instead' : 'Back') : 'Sign in with a token instead';
   $('#login-switch').classList.toggle('hidden', !!challenge);
 }
@@ -1112,6 +1119,7 @@ async function signedIn(candidate) {
   if (!res || !res.ok) return showLogin(res ? 'That token was not accepted.' : 'Could not reach the server.');
   token = candidate;
   challenge = '';
+  challengeMethods = [];
   store.set('armada.token', token);
   $('#login-token').value = $('#login-password').value = $('#login-code').value = '';
   $('#login').classList.add('hidden');
@@ -1151,11 +1159,127 @@ $('#login-form').addEventListener('submit', async e => {
   const lr = await res.json();
   if (lr.two_factor_required) {
     challenge = lr.challenge;
+    challengeMethods = lr.two_factor_methods || ['code'];
     $('#login-password').value = '';
     return showLogin();
   }
   signedIn(lr.token);
 });
+
+// ---------- passkeys (WebAuthn) ----------
+
+const b64u = {
+  dec: s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), c => c.charCodeAt(0)).buffer,
+  enc: buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+};
+function creationOptions(o) {
+  const pk = { ...o.publicKey, challenge: b64u.dec(o.publicKey.challenge), user: { ...o.publicKey.user, id: b64u.dec(o.publicKey.user.id) } };
+  pk.excludeCredentials = (pk.excludeCredentials || []).map(c => ({ ...c, id: b64u.dec(c.id) }));
+  return { publicKey: pk };
+}
+function requestOptions(o) {
+  const pk = { ...o.publicKey, challenge: b64u.dec(o.publicKey.challenge) };
+  pk.allowCredentials = (pk.allowCredentials || []).map(c => ({ ...c, id: b64u.dec(c.id) }));
+  return { publicKey: pk };
+}
+function credentialJSON(c) {
+  const r = c.response, out = { id: c.id, rawId: b64u.enc(c.rawId), type: c.type, authenticatorAttachment: c.authenticatorAttachment || undefined,
+    clientExtensionResults: c.getClientExtensionResults ? c.getClientExtensionResults() : {}, response: { clientDataJSON: b64u.enc(r.clientDataJSON) } };
+  if (r.attestationObject) {
+    out.response.attestationObject = b64u.enc(r.attestationObject);
+    if (r.getTransports) out.response.transports = r.getTransports();
+  } else {
+    out.response.authenticatorData = b64u.enc(r.authenticatorData);
+    out.response.signature = b64u.enc(r.signature);
+    if (r.userHandle) out.response.userHandle = b64u.enc(r.userHandle);
+  }
+  return out;
+}
+// passkeyError turns a browser WebAuthn failure into something readable.
+function passkeyError(e) {
+  if (e && e.name === 'NotAllowedError') return 'The passkey request was cancelled or timed out.';
+  if (e && e.name === 'InvalidStateError') return 'This passkey is already registered.';
+  if (e && e.name === 'SecurityError') return 'Passkeys need the dashboard on HTTPS (or localhost) at the server\'s public URL.';
+  return (e && e.message) || String(e);
+}
+async function postJSON(path, body) {
+  const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new APIError(res.status, data.error || res.statusText);
+  return data;
+}
+$('#login-passkey').addEventListener('click', async () => {
+  try {
+    const cr = await postJSON('/api/v1/auth/passkey/begin');
+    const cred = await navigator.credentials.get(requestOptions(cr.options));
+    const lr = await postJSON('/api/v1/auth/passkey/finish', { ceremony: cr.ceremony, credential: credentialJSON(cred) });
+    signedIn(lr.token);
+  } catch (e) { showLogin(e instanceof APIError ? e.message : passkeyError(e)); }
+});
+$('#login-2fa-passkey').addEventListener('click', async () => {
+  try {
+    const cr = await postJSON('/api/v1/auth/2fa/passkey/begin', { challenge });
+    const cred = await navigator.credentials.get(requestOptions(cr.options));
+    const lr = await postJSON('/api/v1/auth/2fa/passkey/finish', { challenge, ceremony: cr.ceremony, credential: credentialJSON(cred) });
+    signedIn(lr.token);
+  } catch (e) {
+    if (e instanceof APIError && e.message.includes('expired')) { challenge = ''; challengeMethods = []; }
+    showLogin(e instanceof APIError ? e.message : passkeyError(e));
+  }
+});
+
+// Passkeys on My account.
+function passkeysCard() {
+  const card = h('div', { class: 'card' });
+  const nameIn = h('input', { placeholder: 'e.g. MacBook, iPhone, YubiKey', 'aria-label': 'Passkey name', maxlength: '64' });
+  const list = h('div', {});
+  const note = h('div', {});
+  async function refresh() {
+    const ps = await api('GET', '/api/v1/me/passkeys');
+    replace(list, ps.length ? h('ul', { class: 'keylist' }, ps.map(p => h('li', {},
+      h('div', {}, h('strong', {}, p.name), h('div', { class: 'muted' }, (p.synced ? 'Synced passkey' : 'Device-bound key') + ' · added ' + ago(p.created_at) +
+        (p.last_used_at ? ' · used ' + ago(p.last_used_at) : ' · not used yet'))),
+      h('button', { class: 'btn small danger', onclick: async () => {
+        if (!confirm(`Remove the passkey "${p.name}"? You won't be able to sign in with it any more.`)) return;
+        if (await guard(() => api('DELETE', '/api/v1/me/passkeys/' + p.id), 'Passkey removed') === undefined) return;
+        me = null; await guard(loadMe); refresh();
+      } }, 'Remove')))) : h('p', { class: 'muted' }, 'No passkeys yet.'));
+  }
+  const add = async e => {
+    e.preventDefault();
+    replace(note);
+    try {
+      const cr = await postJSONAuth('/api/v1/me/passkeys/register/begin');
+      const cred = await navigator.credentials.create(creationOptions(cr.options));
+      await postJSONAuth('/api/v1/me/passkeys/register/finish', { ceremony: cr.ceremony, name: nameIn.value.trim(), credential: credentialJSON(cred) });
+      nameIn.value = '';
+      toast('Passkey added');
+      me = null; await guard(loadMe);
+      if (location.hash === '#/account') route(); else refresh();
+    } catch (err) {
+      if (err instanceof APIError && err.status === 403 && /sign in again/.test(err.message)) {
+        replace(note, h('div', { class: 'callout mt' }, err.message + ' ',
+          h('button', { class: 'btn small', type: 'button', onclick: () => $('#logout').click() }, 'Sign out and back in')));
+      } else replace(note, h('p', { class: 'error' }, err instanceof APIError ? err.message : passkeyError(err)));
+    }
+  };
+  append(card, h('h2', {}, 'Passkeys'),
+    h('p', { class: 'muted' }, 'Sign in with your fingerprint, face or device PIN instead of a password, or use a passkey or security key as your second step after the password. Passkeys can\'t be phished: they only work on this site.'),
+    list,
+    passkeysSupported()
+      ? h('form', { class: 'inline mt', onsubmit: add }, nameIn, h('button', { class: 'btn', type: 'submit' }, 'Add a passkey'))
+      : h('p', { class: 'muted' }, 'This browser doesn\'t support passkeys.'),
+    note);
+  guard(refresh);
+  return card;
+}
+// postJSONAuth is postJSON with the session token (for account changes).
+async function postJSONAuth(path, body) {
+  const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }, body: JSON.stringify(body || {}) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new APIError(res.status, data.error || res.statusText);
+  return data;
+}
 
 // Single sign-on comes back to #/sso?ticket=… (or ?error=…).
 async function finishSSO() {
@@ -1231,6 +1355,7 @@ async function viewUsers(root) {
           h('td', {}, h('strong', {}, u.name || u.email), u.name ? h('div', { class: 'muted' }, u.email) : null,
             h('div', { class: 'btn-row mt' }, u.disabled ? badge('disabled') : null,
               u.two_factor ? h('span', { class: 'chip', title: 'Uses an authenticator app' }, '2FA') : null,
+              u.passkeys ? h('span', { class: 'chip', title: 'Passkeys or security keys' }, u.passkeys === 1 ? '1 passkey' : u.passkeys + ' passkeys') : null,
               u.sso ? h('span', { class: 'chip', title: 'Has signed in with single sign-on' }, u.no_password ? 'SSO only' : 'SSO') : null,
               self ? h('span', { class: 'muted' }, 'you') : null)),
           h('td', {}, roleSel),
@@ -1248,8 +1373,8 @@ async function viewUsers(root) {
               const pw = prompt(`New password for ${u.email} (10+ characters). Their sessions are signed out.`);
               if (pw) patch(u, { password: pw }, 'Password reset');
             } }, u.no_password ? 'Set password' : 'Reset password'),
-            u.two_factor ? h('button', { class: 'btn small', title: 'For a lost phone: turns off their authenticator and signs them out', onclick: () => {
-              if (confirm(`Turn off two-factor sign-in for ${u.email}? Do this only after confirming who is asking (lost phone). They are signed out everywhere.`)) patch(u, { reset_two_factor: true }, 'Two-factor sign-in reset');
+            u.two_factor || u.passkeys ? h('button', { class: 'btn small', title: 'For a lost phone or key: removes their authenticator and passkeys and signs them out', onclick: () => {
+              if (confirm(`Remove ${u.email}'s authenticator app and passkeys? Do this only after confirming who is asking (lost device). They are signed out everywhere.`)) patch(u, { reset_two_factor: true }, 'Two-factor sign-in reset');
             } }, 'Reset 2FA') : null,
             u.sso ? h('button', { class: 'btn small', title: 'Forget their single sign-on identity; the next sign-in links again by email', onclick: () => {
               if (confirm(`Unlink ${u.email} from their single sign-on identity?`)) patch(u, { unlink_sso: true }, 'Unlinked');
@@ -1350,7 +1475,8 @@ async function viewAccount(root) {
   }
   if (me.two_factor_setup_required) {
     append(root, h('div', { class: 'banner' }, h('strong', {}, 'Set up two-factor sign-in to continue. '),
-      'This server requires an authenticator app for password sign-in. It takes a minute.'), twoFactorCard());
+      'This server requires a second step for password sign-in: add a passkey or an authenticator app. It takes a minute.'),
+      h('div', { class: 'grid cols-2' }, passkeysCard(), twoFactorCard()));
     return;
   }
   const cur = h('input', { type: 'password', required: true, autocomplete: 'current-password', 'aria-label': 'Current password' });
@@ -1363,6 +1489,7 @@ async function viewAccount(root) {
         ? h('div', { class: 'card' }, h('h2', {}, 'Sign-in'),
           h('p', {}, `You sign in with ${ssoName}. Your password and two-factor settings are managed there.`))
         : twoFactorCard(),
+      me.user.no_password ? null : passkeysCard(),
       me.user.no_password ? null : h('div', { class: 'card' }, h('h2', {}, 'Change password'),
         h('form', { class: 'stack', onsubmit: async e => {
           e.preventDefault();

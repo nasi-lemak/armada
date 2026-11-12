@@ -99,6 +99,9 @@ func (c *cli) users(verb string, args []string) error {
 			if u.TwoFactor {
 				signIn = append(signIn, "2FA")
 			}
+			if u.Passkeys > 0 {
+				signIn = append(signIn, fmt.Sprintf("%d passkey(s)", u.Passkeys))
+			}
 			if u.SSO || u.NoPassword {
 				signIn = append(signIn, "SSO")
 			}

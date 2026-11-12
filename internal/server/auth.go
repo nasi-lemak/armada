@@ -25,8 +25,10 @@ type principal struct {
 	scope api.Selector
 	// sessionHash is set when signed in with a dashboard session.
 	sessionHash string
-	// method is how they signed in: password, sso, token or admin-token.
+	// method is how they signed in: password, passkey, sso, token or admin-token.
 	method string
+	// signedInAt is when the dashboard session started.
+	signedInAt time.Time
 	// setupRequired means two-factor sign-in is required and not set up yet:
 	// only account and sign-out routes are allowed.
 	setupRequired bool
@@ -66,7 +68,9 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 	switch {
 	case strings.HasPrefix(tok, "st_"):
 		p.sessionHash = hashSecret(tok)
-		u, p.method, err = s.store.SessionUser(r.Context(), p.sessionHash, s.now(), s.cfg.SessionTTL)
+		var info store.SessionInfo
+		u, info, err = s.store.SessionUser(r.Context(), p.sessionHash, s.now(), s.cfg.SessionTTL)
+		p.method, p.signedInAt = info.Method, info.CreatedAt
 	case strings.HasPrefix(tok, "ut_"):
 		p.method = "token"
 		u, err = s.store.TokenUser(r.Context(), hashSecret(tok), s.now())
@@ -80,14 +84,15 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 		return nil, errors.New("this account is disabled")
 	}
 	p.user, p.name, p.role, p.scope = u, u.Email, u.Role, u.Scope
-	p.setupRequired = s.cfg.Require2FA && p.method == "password" && !u.TwoFactor
+	p.setupRequired = s.cfg.Require2FA && p.method == "password" && !hasSecondFactor(u)
 	return p, nil
 }
 
 // allowedDuringSetup are the routes a user who must still set up two-factor
 // sign-in can reach.
 func allowedDuringSetup(path string) bool {
-	return path == "/api/v1/me" || path == "/api/v1/auth/logout" || strings.HasPrefix(path, "/api/v1/me/2fa/")
+	return path == "/api/v1/me" || path == "/api/v1/auth/logout" || strings.HasPrefix(path, "/api/v1/me/2fa/") ||
+		strings.HasPrefix(path, "/api/v1/me/passkeys")
 }
 
 // guard requires at least minRole. Routes that are not scopedOK are refused
@@ -228,7 +233,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
-	c := api.AuthConfig{PasswordLogin: s.cfg.PasswordLogin}
+	c := api.AuthConfig{PasswordLogin: s.cfg.PasswordLogin, Passkeys: s.cfg.PasswordLogin}
 	if s.sso != nil {
 		c.SSO, c.SSOName = true, s.cfg.OIDC.Name
 	}
@@ -407,11 +412,17 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		}
 		u.NoPassword = false
 	}
-	if req.ResetTwoFactor && u.TwoFactor {
+	if req.ResetTwoFactor && hasSecondFactor(u) {
+		// Removes every second factor: authenticator, recovery codes, passkeys.
 		if err := s.store.DeleteMFA(ctx, u.ID); err != nil {
 			s.internalError(w, err)
 			return
 		}
+		if err := s.store.DeletePasskeys(ctx, u.ID); err != nil {
+			s.internalError(w, err)
+			return
+		}
+		u.Passkeys = 0
 		if err := s.store.DeleteUserSessions(ctx, u.ID); err != nil {
 			s.internalError(w, err)
 			return

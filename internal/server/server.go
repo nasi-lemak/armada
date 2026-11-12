@@ -160,6 +160,7 @@ type Server struct {
 	chunks       chunkIndexes
 	secrets      *secretBox
 	mfa          mfaChallenges
+	passkeys     passkeyState
 	sso          *ssoState
 	bg           sync.WaitGroup // background work Close waits for
 }
@@ -318,6 +319,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/auth/sso/login", s.handleSSOLogin)
 	mux.HandleFunc("GET /api/v1/auth/sso/callback", s.handleSSOCallback)
 	mux.HandleFunc("POST /api/v1/auth/sso/exchange", s.handleSSOExchange)
+	mux.HandleFunc("POST /api/v1/auth/passkey/begin", s.handlePasskeyLoginBegin)
+	mux.HandleFunc("POST /api/v1/auth/passkey/finish", s.handlePasskeyLoginFinish)
+	mux.HandleFunc("POST /api/v1/auth/2fa/passkey/begin", s.handlePasskeyTwoFactorBegin)
+	mux.HandleFunc("POST /api/v1/auth/2fa/passkey/finish", s.handlePasskeyTwoFactorFinish)
+	viewer(scopedOK, "GET /api/v1/me/passkeys", s.handleListPasskeys)
+	viewer(scopedOK, "POST /api/v1/me/passkeys/register/begin", s.handlePasskeyRegisterBegin)
+	viewer(scopedOK, "POST /api/v1/me/passkeys/register/finish", s.handlePasskeyRegisterFinish)
+	viewer(scopedOK, "DELETE /api/v1/me/passkeys/{id}", s.handleDeletePasskey)
 	viewer(scopedOK, "POST /api/v1/me/2fa/setup", s.handleTwoFactorSetup)
 	viewer(scopedOK, "POST /api/v1/me/2fa/enable", s.handleTwoFactorEnable)
 	viewer(scopedOK, "POST /api/v1/me/2fa/disable", s.handleTwoFactorDisable)
