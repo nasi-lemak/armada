@@ -143,6 +143,14 @@ func (s *Server) handleUpdateMonitor(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) saveMonitor(w http.ResponseWriter, r *http.Request, m *api.Monitor, create bool) {
+	// A command check runs arbitrary code as root on every matching device
+	// (where the agent allows exec), so only admins may set one up or change it.
+	if m.Check.Type == "command" || (!create && s.wasCommandMonitor(r, m.ID)) {
+		if principalFrom(r.Context()).fleetRole() != api.RoleAdmin {
+			writeError(w, http.StatusForbidden, "command checks run code as root on devices; only admins can create or change them")
+			return
+		}
+	}
 	m.Name = strings.TrimSpace(m.Name)
 	if m.Name == "" || len(m.Name) > 64 {
 		writeError(w, http.StatusBadRequest, "name is required (max 64 characters)")
@@ -184,4 +192,9 @@ func (s *Server) handleDeleteMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) wasCommandMonitor(r *http.Request, id string) bool {
+	old, err := s.store.GetMonitor(r.Context(), id)
+	return err == nil && old.Check.Type == "command"
 }

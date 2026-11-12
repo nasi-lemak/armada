@@ -128,6 +128,7 @@ func TestSingleSignOn(t *testing.T) {
 		c.OIDC = OIDCConfig{Issuer: idp.srv.URL, ClientID: "armada-test", ClientSecret: "s", Name: "Acme SSO", AllowedDomains: []string{"vendor.com"}}
 		c.Require2FA = true // SSO sign-ins are exempt
 	})
+	s.cfg.Android.PublicURL = ts.URL
 	var ac api.AuthConfig
 	call(t, ts, "", "GET", "/api/v1/auth/config", nil, &ac)
 	if !ac.SSO || ac.SSOName != "Acme SSO" {
@@ -201,10 +202,11 @@ func TestSingleSignOn(t *testing.T) {
 
 func TestSingleSignOnGroupsAndAutoCreate(t *testing.T) {
 	idp := newFakeIdP(t)
-	_, ts := setupWith(t, func(c *Config) {
+	s, ts := setupWith(t, func(c *Config) {
 		c.OIDC = OIDCConfig{Issuer: idp.srv.URL, ClientID: "armada-test", GroupsClaim: "groups",
 			GroupRoles: map[string]string{"fleet-admins": api.RoleAdmin, "fleet-ops": api.RoleOperator}}
 	})
+	s.cfg.Android.PublicURL = ts.URL
 	idp.as(map[string]any{"sub": "a", "email": "new@vendor.com", "groups": []string{"staff", "fleet-ops"}})
 	ticket, msg := ssoSignIn(t, ts, true)
 	if ticket == "" {

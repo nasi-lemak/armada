@@ -72,6 +72,7 @@ func New(cfg *Config, log *slog.Logger) (*Agent, error) {
 	windows, _ := ParseWindows(cfg.MaintenanceWindow)
 	a := &Agent{cfg: cfg, log: log, state: st, windows: windows, Reexec: reexec, Now: time.Now, interval: 30 * time.Second,
 		health: newHealthRunner(cfg.Health), wake: make(chan struct{}, 1)}
+	a.health.allowCommands = cfg.AllowExec
 	if cfg.Peripherals != nil {
 		a.gw = newGateway(a, cfg.Peripherals)
 	}

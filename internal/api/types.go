@@ -273,6 +273,14 @@ type Deployment struct {
 	CreatedAt            time.Time       `json:"created_at"`
 	UpdatedAt            time.Time       `json:"updated_at"`
 	Stats                DeploymentStats `json:"stats"`
+	// CreatedBy and ApprovedBy name who started and who approved the
+	// rollout. With rollout approval on, it can't go past its first
+	// (canary) stage until someone else approves it.
+	CreatedBy  string     `json:"created_by,omitempty"`
+	ApprovedBy string     `json:"approved_by,omitempty"`
+	ApprovedAt *time.Time `json:"approved_at,omitempty"`
+	// NeedsApproval is set in responses while approval is outstanding.
+	NeedsApproval bool `json:"needs_approval,omitempty"`
 }
 
 // CurrentPercent is the share of targeted devices currently eligible.
@@ -290,9 +298,12 @@ func (d *Deployment) CurrentPercent() int {
 // Deployment statuses.
 const (
 	DeploymentScheduled = "scheduled"
-	DeploymentRunning   = "running"
-	DeploymentPaused    = "paused"
-	DeploymentAborted   = "aborted"
+	// DeploymentAwaitingApproval offers nothing until someone other than
+	// its creator approves it (when rollout approval is on).
+	DeploymentAwaitingApproval = "awaiting_approval"
+	DeploymentRunning          = "running"
+	DeploymentPaused           = "paused"
+	DeploymentAborted          = "aborted"
 	// DeploymentCompleted means an admin retired the rollout: it no longer
 	// offers its release, including to devices enrolled later.
 	DeploymentCompleted = "completed"

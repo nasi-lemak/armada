@@ -171,7 +171,7 @@ const STATUS_TONE = {
   enabled: 'ok', disabled: '',
   running: 'info', paused: 'warn', aborted: 'bad', completed: 'ok',
   succeeded: 'ok', failed: 'bad', rolled_back: 'warn', pending: '', downloading: 'info', installing: 'info',
-  queued: '', sent: 'info', rejected: 'warn', 'no access': 'bad', live: 'ok', scheduled: 'info', applied: 'ok', removing: 'info', revoked: 'bad', active: 'ok', attested: 'ok', 'attested (unlocked)': 'warn',
+  queued: '', sent: 'info', rejected: 'warn', 'no access': 'bad', awaiting_approval: 'warn', live: 'ok', scheduled: 'info', applied: 'ok', removing: 'info', revoked: 'bad', active: 'ok', attested: 'ok', 'attested (unlocked)': 'warn',
 };
 function healthRank(s) { return { ok: 0, unknown: 1, warning: 2, critical: 3 }[s] ?? 1; }
 
@@ -787,15 +787,22 @@ async function viewDeployment(root, id) {
     const d = det.deployment, r = det.release, s = d.stats;
     const last = d.stage_index >= d.strategy.stages.length - 1;
     const buttons = [];
+    if (d.needs_approval) {
+      const mine = me && d.created_by === me.name;
+      buttons.push(h('button', { class: 'btn primary', disabled: mine || undefined,
+        title: mine ? 'Someone other than you must approve a rollout you started' : 'Let this rollout go past its first stage',
+        onclick: () => confirm(`Approve ${d.name} (${d.package} ${d.version}), started by ${d.created_by}? It will continue to every targeted device.`) && op('approve', 'Approved') }, 'Approve'));
+    }
     if (d.status === 'running') buttons.push(h('button', { class: 'btn', onclick: () => op('pause', 'Paused') }, 'Pause'));
     if (d.status === 'paused') buttons.push(h('button', { class: 'btn primary', onclick: () => op('resume', 'Resumed') }, 'Resume'));
-    if (d.status === 'running' && !last) buttons.push(h('button', { class: 'btn', onclick: () => op('advance', 'Advanced') }, 'Advance to ' + d.strategy.stages[d.stage_index + 1] + '%'));
+    if (d.status === 'running' && !last && !d.needs_approval) buttons.push(h('button', { class: 'btn', onclick: () => op('advance', 'Advanced') }, 'Advance to ' + d.strategy.stages[d.stage_index + 1] + '%'));
     if ((d.status === 'running' || d.status === 'paused') && (s.failed || s.rolled_back)) buttons.push(h('button', { class: 'btn', onclick: () => op('retry', 'Failed devices will retry') }, 'Retry failed'));
     const open = d.status === 'running' || d.status === 'paused';
     if (open && last) buttons.push(h('button', { class: 'btn', title: 'Stop offering this release, including to devices enrolled later', onclick: () => confirm('Mark this rollout complete? It stops offering the release to devices that have not updated yet.') && op('complete', 'Marked complete') }, 'Complete'));
     if (open) buttons.push(h('button', { class: 'btn danger', onclick: () => confirm('Abort this rollout? Devices that already updated keep the new version.') && op('abort', 'Aborted') }, 'Abort'));
     replace(head, h('div', { class: 'crumb' }, h('a', { href: '#/deployments' }, 'Deployments'), ' / ', d.id),
-      pageHead(d.name, h('span', {}, badge(d.status), ' ', d.status_reason || ''), ...buttons.map(b => (b.classList.add('need-operator'), b))));
+      pageHead(d.name, h('span', {}, badge(d.status), ' ', d.status_reason || '',
+        d.created_by ? h('div', { class: 'muted' }, 'started by ' + d.created_by + (d.approved_by ? ' · approved by ' + d.approved_by : d.needs_approval ? ' · needs approval by someone else to go past the first stage' : '')) : null), ...buttons.map(b => (b.classList.add('need-operator'), b))));
 
     const sel = d.selector;
     const selParts = [sel.channel && 'channel ' + sel.channel, ...sortedEntries(sel.labels).map(([k, v]) => k + '=' + v),

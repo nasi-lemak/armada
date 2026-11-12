@@ -62,6 +62,7 @@ Commands:
                   [--max-failure-rate 0.2] [--min-samples 3] [--manual]
                   [--allow-downgrade] [--start-at "2026-12-01 02:00"]
                   [--windows 22:00-05:00] [--days mon,tue,wed,thu,fri] [--tz Asia/Singapore]
+  deployments approve <id>                   let a rollout go past its canary (someone other than its creator)
   deployments pause|resume|advance|retry|complete|abort <id>
   events [--device ID] [--deployment ID] [--limit N]
 
@@ -912,7 +913,7 @@ func (c *cli) deployments(verb string, args []string) error {
 			fmt.Fprintf(c.out, "deployment %s started: %s %s, stages %v\n", d.ID, d.Package, d.Version, d.Strategy.Stages)
 		}
 		return nil
-	case "pause", "resume", "abort", "advance", "retry", "complete":
+	case "approve", "pause", "resume", "abort", "advance", "retry", "complete":
 		if err := need(args, 1, "deployment id"); err != nil {
 			return err
 		}

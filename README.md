@@ -153,7 +153,14 @@ dashboard's **Enrollment** page shows this command, filled in, when you create a
 ```
 
 This creates a deployment to the `stable` channel using the default strategy:
-5% → 25% → 50% → 100%, 15 minutes per stage, pausing above 20% failures. Follow it with:
+5% → 25% → 50% → 100%, 15 minutes per stage, pausing above 20% failures. The 5% canary starts right
+away. Going further needs a second person to approve it (see [rollout approval](#security-model)):
+
+```bash
+./bin/armadactl deployments approve <deployment-id>
+```
+
+Follow it with:
 
 ```bash
 ./bin/armadactl deployments list
@@ -456,6 +463,9 @@ armadactl monitors create --name queue --type command -- /usr/lib/nagios/plugins
 The types are `http` (status code, body content, latency), `tcp`, `systemd`, `process` and `command`. A
 command follows the Nagios plugin convention: exit 0 is ok, 1 is warning, 2 is critical, and the first
 line of output is the message. That means existing Nagios and Icinga plugins work unchanged.
+
+Command checks run as root, so they only run on devices whose agent config has `allow_exec: true`
+(elsewhere they report "unknown"), and only admins can create or change them.
 
 ### History and charts
 
@@ -982,7 +992,7 @@ armadactl releases upload|list|delete
 armadactl deployments create --release <id> [--channel C] [--label K=V] [--device ID]
                              [--stages 5,25,100] [--stage-duration 15m] [--max-failure-rate 0.2]
                              [--min-samples 3] [--manual] [--allow-downgrade]
-armadactl deployments list|get|pause|resume|advance|retry|complete|abort
+armadactl deployments list|get|approve|pause|resume|advance|retry|complete|abort
 armadactl events [--device ID] [--deployment ID]
 armadactl config list|get|apply -f FILE|enable|disable|delete
 armadactl groups [list|map --group G --role R [--scope K=V]...|unmap G]
@@ -1016,6 +1026,11 @@ Add `--json` to any command for machine-readable output.
 | `-history-raw-retention` | `ARMADA_HISTORY_RAW_RETENTION` | `72h` |
 | `-history-retention` | `ARMADA_HISTORY_RETENTION` | `2160h` (90 days) |
 | `-session-ttl` | `ARMADA_SESSION_TTL` | `12h` (dashboard sign-in, sliding) |
+| `-rollout-approval` | `ARMADA_ROLLOUT_APPROVAL` | `second-person` (or `off`) |
+| `-unapproved-max-percent` | | `10` (largest first stage allowed before approval) |
+| `-trusted-proxies` | `ARMADA_TRUSTED_PROXIES` | none (comma-separated IPs/CIDRs) |
+| `-disable-admin-token` | `ARMADA_DISABLE_ADMIN_TOKEN` | `false` |
+| `-rotate-admin-token` | | replace the generated token at startup |
 | `-password-login` | `ARMADA_PASSWORD_LOGIN` | `true` |
 | `-require-2fa` | `ARMADA_REQUIRE_2FA` | `false` |
 | `-oidc-issuer`, `-oidc-client-id` | `ARMADA_OIDC_ISSUER`, `ARMADA_OIDC_CLIENT_ID` | SSO off |
@@ -1060,7 +1075,7 @@ endpoints use the per-device key issued at enrollment.
 | `GET/POST /api/v1/tokens`, `DELETE /api/v1/tokens/{id}` | Enrollment tokens |
 | `GET/POST /api/v1/releases`, `GET/DELETE /api/v1/releases/{id}`, `GET …/artifact` | Releases (upload is `multipart/form-data`) |
 | `GET/POST /api/v1/deployments`, `GET /api/v1/deployments/{id}` | Deployments |
-| `POST /api/v1/deployments/{id}/{pause,resume,advance,retry,complete,abort}` | Control a rollout |
+| `POST /api/v1/deployments/{id}/{approve,pause,resume,advance,retry,complete,abort}` | Control a rollout (`approve`: someone other than its creator) |
 | `GET /api/v1/events` | Activity log |
 | `GET /api/v1/signing-key` | Release-signing public key |
 | `POST /api/v1/agent/enroll`, `/heartbeat`, `/updates`, `/actions/{id}/result`, `GET /api/v1/agent/releases/{id}/artifact`, `GET /api/v1/agent/wait`, `GET /api/v1/agent/releases/{id}/chunks` | Agent protocol (`wait` is the push long-poll; `chunks` the delta-update index) |
@@ -1094,6 +1109,19 @@ endpoints use the per-device key issued at enrollment.
 
 ## Security model
 
+**Production checklist.**
+
+1. Set `-public-url https://fleet.example.com`. Single sign-on and passkeys stay off without it, and
+   links are never built from request headers.
+2. Behind a reverse proxy or load balancer, set `-trusted-proxies` to its addresses. Otherwise every
+   user shares the proxy's address for sign-in throttling (the server logs a warning when it sees
+   this).
+3. Add admin users (ideally with SSO, passkeys or 2FA), then start with `-disable-admin-token`.
+4. Keep `-rollout-approval second-person` (the default), so one stolen operator account can't push
+   code to the whole fleet.
+
+How it works:
+
 - Admin, session, personal and device credentials are random 256-bit secrets. The server stores
   only their SHA-256 hashes. Deleting a device revokes its key immediately. User passwords are
   bcrypt hashes. Authenticator secrets are encrypted (AES-GCM) with `secrets.key`; recovery codes
@@ -1106,9 +1134,35 @@ endpoints use the per-device key issued at enrollment.
 - Releases are signed with a server-held ed25519 key over
   `(package, version, sha256)`. An artifact therefore can't be replayed under another
   name or version.
-- `exec` actions are disabled unless a device sets `allow_exec: true`.
+- **Rollout approval.** A release is code that runs as root on devices. With `-rollout-approval
+  second-person` (the default), every rollout stops after its first stage until someone other than
+  the person who started it approves it: **Approve** on the deployment page, or `armadactl
+  deployments approve <id>`.
+  - Before approval, a rollout runs only its first stage, and only if that stage is at most
+    `-unapproved-max-percent` (10%). Rollouts that start bigger (for example a single 100% stage)
+    wait in `awaiting_approval` and offer nothing.
+  - Uploads with `--auto-deploy` still canary automatically and then wait.
+  - The admin token counts as one person, so it can't approve its own rollouts.
+  - Use `-rollout-approval off` for a one-person team.
+- **Code execution on devices is opt-in on the device and limited to fleet-wide staff.**
+  - `exec` actions and **command** health checks both need `allow_exec: true` in the agent config.
+    Without it, command checks report "unknown" and never run.
+  - Only admins can create or change command checks.
+  - `exec` and Android `wipe` need the operator role on the whole fleet. Per-client operators can
+    reboot, restart the agent, lock, fetch logs and ask for a check-in on their devices.
 - `logs` actions read only the systemd journal and the files a device lists in `log_files`. Set
-  `allow_logs: false` to refuse them. Client accounts can read logs from their own devices.
+  `allow_logs: false` to refuse them. Client operators can read logs from their own devices.
+- **Sign-in throttling** counts failures per email *and* address (5 in 15 minutes), per address (20),
+  and per email from anywhere (50). A stranger therefore can't lock a known user out with a few bad
+  guesses, and spreading a guessing attack over many addresses still hits a limit.
+  `X-Forwarded-For`, `-Proto` and `-Host` are only believed from `-trusted-proxies`.
+- **Admin token.** It bypasses SSO, 2FA and SCIM rules, so:
+  - each new address using it is recorded in the activity log (`auth.admin_token`);
+  - `-disable-admin-token` turns it off once an enabled admin user exists (the server refuses to start
+    otherwise, so you can't lock yourself out);
+  - `-rotate-admin-token` replaces the generated token.
+- Dashboard sessions are kept in the browser's localStorage. The strict Content-Security-Policy
+  below is the protection against scripts reading them.
 - The dashboard sends a strict Content-Security-Policy and renders all device-supplied
   text as text.
 

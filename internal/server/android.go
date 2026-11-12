@@ -453,11 +453,12 @@ func (s *Server) publicURL(r *http.Request) string {
 		return strings.TrimRight(s.cfg.Android.PublicURL, "/")
 	}
 	scheme := "http"
-	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+	proxied := s.fromTrustedProxy(r)
+	if r.TLS != nil || (proxied && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")) {
 		scheme = "https"
 	}
 	host := r.Host
-	if fh := r.Header.Get("X-Forwarded-Host"); fh != "" {
+	if fh := r.Header.Get("X-Forwarded-Host"); fh != "" && proxied {
 		host = fh
 	}
 	return scheme + "://" + host

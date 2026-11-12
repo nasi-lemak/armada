@@ -364,6 +364,13 @@ func (s *Server) handleCreateAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "peripherals run no agent; send actions to their gateway")
 		return
 	}
+	// Running commands as root and factory-resetting devices you supplied
+	// are vendor powers: per-client operators can reboot, restart, lock
+	// and read logs, but not these.
+	if (req.Type == api.ActionExec || req.Type == api.ActionWipe) && api.RoleRank(principalFrom(r.Context()).fleetRole()) < api.RoleRank(api.RoleOperator) {
+		writeError(w, http.StatusForbidden, req.Type+" needs the operator role on the whole fleet")
+		return
+	}
 	now := s.now()
 	a := &api.Action{ID: newID("act"), DeviceID: d.ID, Type: req.Type, Args: req.Args, Status: api.ActionQueued, CreatedAt: now, UpdatedAt: now}
 	if err := s.store.CreateAction(r.Context(), a); err != nil {
@@ -781,6 +788,9 @@ func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 	if deps == nil {
 		deps = []*api.Deployment{}
 	}
+	for _, d := range deps {
+		s.markApproval(d)
+	}
 	writeJSON(w, http.StatusOK, deps)
 }
 
@@ -831,12 +841,23 @@ func (s *Server) createDeployment(ctx context.Context, req api.CreateDeploymentR
 		name = fmt.Sprintf("%s %s", rel.Package, rel.Version)
 	}
 	status := api.DeploymentRunning
+	createdBy := ""
+	if p := principalFrom(ctx); p != nil {
+		createdBy = p.name
+	}
+	if s.cfg.RolloutApproval != "" && strat.Stages[0] > s.cfg.UnapprovedMaxPercent {
+		// The canary would already be too big: wait for approval before
+		// offering anything.
+		status = api.DeploymentAwaitingApproval
+	}
 	if strat.StartAt != nil {
 		if strat.StartAt.After(now.AddDate(1, 0, 0)) {
 			return nil, validationError{errors.New("start_at is more than a year away")}
 		}
 		if strat.StartAt.After(now) {
-			status = api.DeploymentScheduled
+			if status != api.DeploymentAwaitingApproval {
+				status = api.DeploymentScheduled
+			}
 		} else {
 			strat.StartAt = nil
 		}
@@ -850,6 +871,7 @@ func (s *Server) createDeployment(ctx context.Context, req api.CreateDeploymentR
 		Selector:       req.Selector,
 		Strategy:       strat,
 		Status:         status,
+		CreatedBy:      createdBy,
 		StageStartedAt: now,
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -857,7 +879,11 @@ func (s *Server) createDeployment(ctx context.Context, req api.CreateDeploymentR
 	if err := s.store.CreateDeployment(ctx, d); err != nil {
 		return nil, err
 	}
-	if status == api.DeploymentScheduled {
+	s.markApproval(d)
+	if status == api.DeploymentAwaitingApproval {
+		s.event(ctx, "deployment.created", "", d.ID, fmt.Sprintf("deployment %q created by %s: %s %s, waiting for approval by someone else (first stage %d%% is above the %d%% allowed before approval)",
+			d.Name, createdBy, d.Package, d.Version, strat.Stages[0], s.cfg.UnapprovedMaxPercent))
+	} else if status == api.DeploymentScheduled {
 		s.event(ctx, "deployment.scheduled", "", d.ID, fmt.Sprintf("deployment %q scheduled for %s: %s %s, stages %v%s",
 			d.Name, strat.StartAt.UTC().Format("2006-01-02 15:04 UTC"), d.Package, d.Version, strat.Stages, describeWindows(strat)))
 	} else {
@@ -922,6 +948,7 @@ func (s *Server) handleGetDeployment(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
+	s.markApproval(d)
 	det := deploymentDetail{Deployment: d}
 	if det.Release, err = s.store.GetRelease(ctx, d.ReleaseID); err != nil {
 		s.internalError(w, err)
@@ -969,11 +996,39 @@ func (s *Server) handleDeploymentOp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "deployment is already "+d.Status)
 		return
 	}
-	if d.Status == api.DeploymentScheduled && op != "abort" && op != "resume" {
+	if d.Status == api.DeploymentScheduled && op != "abort" && op != "resume" && op != "approve" {
 		writeError(w, http.StatusConflict, "deployment is scheduled; resume starts it now, abort cancels it")
 		return
 	}
+	if d.Status == api.DeploymentAwaitingApproval && op != "abort" && op != "approve" {
+		writeError(w, http.StatusConflict, "deployment is waiting for approval; approve or abort it")
+		return
+	}
+	if op == "advance" && s.needsApproval(d) {
+		writeError(w, http.StatusConflict, "this rollout can't go past its first stage until someone other than "+d.CreatedBy+" approves it")
+		return
+	}
 	switch op {
+	case "approve":
+		if !s.needsApproval(d) {
+			writeError(w, http.StatusConflict, "this rollout doesn't need approval")
+			return
+		}
+		approver := principalFrom(ctx).name
+		if approver == d.CreatedBy {
+			writeError(w, http.StatusForbidden, "someone other than the person who started this rollout must approve it")
+			return
+		}
+		d.ApprovedBy, d.ApprovedAt = approver, &now
+		if d.Status == api.DeploymentAwaitingApproval {
+			d.Status, d.StageStartedAt = api.DeploymentRunning, now
+			if d.Strategy.StartAt != nil && d.Strategy.StartAt.After(now) {
+				d.Status = api.DeploymentScheduled
+			}
+		}
+		if strings.HasPrefix(d.StatusReason, "waiting for approval") {
+			d.StatusReason = ""
+		}
 	case "pause":
 		d.Status, d.StatusReason = api.DeploymentPaused, "paused by admin"
 	case "resume":
@@ -1002,7 +1057,7 @@ func (s *Server) handleDeploymentOp(w http.ResponseWriter, r *http.Request) {
 		d.StageIndex++
 		d.StageStartedAt = now
 	default:
-		writeError(w, http.StatusNotFound, "unknown operation; use pause, resume, advance, retry, complete or abort")
+		writeError(w, http.StatusNotFound, "unknown operation; use approve, pause, resume, advance, retry, complete or abort")
 		return
 	}
 	d.UpdatedAt = now
@@ -1011,6 +1066,8 @@ func (s *Server) handleDeploymentOp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch op {
+	case "approve":
+		s.event(ctx, "deployment.approved", "", d.ID, fmt.Sprintf("deployment %q (started by %s) approved by %s", d.Name, d.CreatedBy, d.ApprovedBy))
 	case "advance":
 		s.event(ctx, "deployment.advance", "", d.ID, fmt.Sprintf("deployment %q advanced to %d%% by admin", d.Name, d.CurrentPercent()))
 	case "retry":
@@ -1021,6 +1078,7 @@ func (s *Server) handleDeploymentOp(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
+	s.markApproval(d)
 	writeJSON(w, http.StatusOK, d)
 }
 
@@ -1036,6 +1094,15 @@ func (s *Server) evaluateDeployment(ctx context.Context, d *api.Deployment, now 
 		s.event(ctx, "deployment.paused", "", d.ID, fmt.Sprintf("deployment %q auto-paused: %s", d.Name, ev.Reason))
 	case ev.Advance && !rollout.WindowOpen(d.Strategy, now):
 		// Soak time is up but the rollout window is closed: advance when it opens.
+	case ev.Advance && s.needsApproval(d):
+		reason := fmt.Sprintf("waiting for approval to go past %d%% (someone other than %s)", d.CurrentPercent(), d.CreatedBy)
+		if d.StatusReason != reason {
+			d.StatusReason, d.UpdatedAt = reason, now
+			if err := s.store.UpdateDeploymentState(ctx, d); err != nil {
+				return err
+			}
+			s.event(ctx, "deployment.waiting", "", d.ID, fmt.Sprintf("deployment %q finished its canary and is waiting for approval", d.Name))
+		}
 	case ev.Advance:
 		d.StageIndex++
 		d.StageStartedAt, d.UpdatedAt = now, now
@@ -1135,3 +1202,12 @@ func (s *Server) visibleAlerts(ctx context.Context, p *principal, alerts []*api.
 	}
 	return out
 }
+
+// needsApproval reports whether a rollout still needs a second person's
+// approval before it may go past its first stage.
+func (s *Server) needsApproval(d *api.Deployment) bool {
+	return s.cfg.RolloutApproval != "" && d.ApprovedBy == "" &&
+		d.Status != api.DeploymentAborted && d.Status != api.DeploymentCompleted
+}
+
+func (s *Server) markApproval(d *api.Deployment) { d.NeedsApproval = s.needsApproval(d) }

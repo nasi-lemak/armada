@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -61,6 +62,20 @@ type Config struct {
 	// can do anything else. Single sign-on users are exempt (their identity
 	// provider handles it).
 	Require2FA bool
+	// AdminTokenDisabled turns the admin token off, so every action is tied
+	// to a person who went through SSO, 2FA and SCIM rules. New refuses to
+	// start without an enabled admin user.
+	AdminTokenDisabled bool
+	// TrustedProxies are reverse proxies whose X-Forwarded-For/-Proto/-Host
+	// headers are believed. Headers from anyone else are ignored.
+	TrustedProxies []*net.IPNet
+	// RolloutApproval "second-person" stops every rollout after its first
+	// (canary) stage until someone other than its creator approves it.
+	// Empty turns approval off.
+	RolloutApproval string
+	// UnapprovedMaxPercent is the largest first stage that may run before
+	// approval (default 10). Larger first stages wait for approval.
+	UnapprovedMaxPercent int
 	// SCIMDefaultRole is the role of users the directory provisions, unless
 	// their groups map to another (default viewer).
 	SCIMDefaultRole string
@@ -165,8 +180,13 @@ type Server struct {
 	secrets      *secretBox
 	mfa          mfaChallenges
 	passkeys     passkeyState
-	sso          *ssoState
-	bg           sync.WaitGroup // background work Close waits for
+	closeOnce    sync.Once
+	adminSeen    struct {
+		sync.Mutex
+		m map[string]time.Time
+	}
+	sso *ssoState
+	bg  sync.WaitGroup // background work Close waits for
 }
 
 // New opens the data directory (creating the database and signing key if
@@ -175,8 +195,8 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	if len(cfg.AdminTokens) == 0 {
-		return nil, errors.New("at least one admin token is required")
+	if len(cfg.AdminTokens) == 0 && !cfg.AdminTokenDisabled {
+		return nil, errors.New("at least one admin token is required (or disable it once admin users exist)")
 	}
 	if err := rollout.ValidateStrategy(&cfg.DefaultStrategy); err != nil {
 		return nil, fmt.Errorf("default rollout strategy: %w", err)
@@ -203,6 +223,22 @@ func New(cfg Config) (*Server, error) {
 		st.Close()
 		return nil, err
 	}
+	if cfg.AdminTokenDisabled {
+		cfg.AdminTokens = nil
+		users, err := st.ListUsers(context.Background())
+		if err != nil {
+			st.Close()
+			return nil, err
+		}
+		ok := false
+		for _, u := range users {
+			ok = ok || (u.Role == api.RoleAdmin && !u.Disabled && !u.NoGroupAccess)
+		}
+		if !ok {
+			st.Close()
+			return nil, errors.New("the admin token can't be disabled until an enabled admin user exists (add one under Users first)")
+		}
+	}
 	secrets, err := loadSecretBox(filepath.Join(cfg.DataDir, "secrets.key"))
 	if err != nil {
 		st.Close()
@@ -210,6 +246,13 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.TOTPIssuer == "" {
 		cfg.TOTPIssuer = "Armada"
+	}
+	if cfg.RolloutApproval != "" && cfg.RolloutApproval != "second-person" {
+		st.Close()
+		return nil, fmt.Errorf("rollout approval must be second-person or off, not %q", cfg.RolloutApproval)
+	}
+	if cfg.UnapprovedMaxPercent <= 0 {
+		cfg.UnapprovedMaxPercent = 10
 	}
 	if cfg.SCIMDefaultRole == "" {
 		cfg.SCIMDefaultRole = api.RoleViewer
@@ -253,11 +296,16 @@ func New(cfg Config) (*Server, error) {
 }
 
 // Close releases resources.
+// Close is safe to call more than once.
 func (s *Server) Close() error {
-	s.push.close()
-	s.bg.Wait()
-	close(s.notifyQueue)
-	return s.store.Close()
+	var err error
+	s.closeOnce.Do(func() {
+		s.push.close()
+		s.bg.Wait()
+		close(s.notifyQueue)
+		err = s.store.Close()
+	})
+	return err
 }
 
 // PublicKey returns the base64 release-signing public key.

@@ -143,7 +143,7 @@ func (s *Server) handleTwoFactorLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) finishPasswordLogin(w http.ResponseWriter, r *http.Request, u *api.User, code, challenge string) {
 	ctx := r.Context()
 	now := s.now()
-	keys := []string{"email:" + strings.ToLower(u.Email), "ip:" + clientIP(r)}
+	keys := loginKeys(u.Email, s.clientIP(r))
 	factor := ""
 	if hasSecondFactor(u) {
 		if code == "" {
@@ -187,7 +187,11 @@ func (s *Server) completeLogin(w http.ResponseWriter, r *http.Request, u *api.Us
 	if challenge != "" {
 		s.mfa.done(challenge)
 	}
-	s.logins.reset("email:" + strings.ToLower(u.Email))
+	for _, k := range loginKeys(u.Email, s.clientIP(r)) {
+		if !strings.HasPrefix(k, "ip:") { // others behind this address keep their count
+			s.logins.reset(k)
+		}
+	}
 	tok, exp, err := s.startSession(ctx, u, method)
 	if err != nil {
 		s.internalError(w, err)

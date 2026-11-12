@@ -70,9 +70,12 @@ type healthRunner struct {
 
 	mu       sync.Mutex
 	monitors []api.MonitorCheck
-	results  map[string][]api.CheckResult // keyed by check group
-	lastRun  map[string]time.Time
-	changed  chan struct{}
+	// allowCommands lets server-defined monitors run commands. A command
+	// check is arbitrary code as root, so it needs allow_exec like exec.
+	allowCommands bool
+	results       map[string][]api.CheckResult // keyed by check group
+	lastRun       map[string]time.Time
+	changed       chan struct{}
 }
 
 func newHealthRunner(cfg HealthConfig) *healthRunner {
@@ -130,6 +133,10 @@ func (h *healthRunner) runDue(ctx context.Context) bool {
 			iv = 60 * time.Second
 		}
 		jobs = append(jobs, job{"monitor " + m.Name, iv, func(ctx context.Context) []api.CheckResult {
+			if m.Check.Type == "command" && !h.allowCommands {
+				return []api.CheckResult{{Name: "monitor " + m.Name, Kind: "command", Status: api.HealthUnknown,
+					Message: "command checks are disabled on this device (they need allow_exec: true in the agent config)"}}
+			}
 			return []api.CheckResult{runMonitor(ctx, m)}
 		}})
 	}

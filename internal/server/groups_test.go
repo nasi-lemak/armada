@@ -9,9 +9,10 @@ import (
 
 func TestGroupScopesForClientAccounts(t *testing.T) {
 	idp := newFakeIdP(t)
-	_, ts := setupWith(t, func(c *Config) {
+	s, ts := setupWith(t, func(c *Config) {
 		c.OIDC = OIDCConfig{Issuer: idp.srv.URL, ClientID: "armada-test", GroupsClaim: "groups", CreateRole: api.RoleViewer}
 	})
+	s.cfg.Android.PublicURL = ts.URL
 	// Devices for two customers.
 	devs := map[string]string{}
 	for _, c := range []string{"acme", "globex", "initech"} {

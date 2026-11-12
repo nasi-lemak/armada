@@ -53,6 +53,11 @@ type passkeyCeremony struct {
 
 // webauthnFor returns the relying party for the server's public origin.
 func (s *Server) webauthnFor(r *http.Request) (*webauthn.WebAuthn, string, error) {
+	if s.cfg.Android.PublicURL == "" {
+		// Passkeys are bound to the server's domain; never take it from
+		// request headers.
+		return nil, "", errors.New("passkeys need the server's address: start it with -public-url")
+	}
 	origin := s.publicURL(r)
 	ps := &s.passkeys
 	ps.mu.Lock()
@@ -348,7 +353,7 @@ func (s *Server) handlePasskeyLoginBegin(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusForbidden, "sign-in with Armada accounts is turned off; use single sign-on")
 		return
 	}
-	if s.logins.blocked([]string{"ip:" + clientIP(r)}, s.now()) {
+	if s.logins.blocked([]string{"ip:" + s.clientIP(r)}, s.now()) {
 		writeError(w, http.StatusTooManyRequests, "too many failed sign-ins; try again in 15 minutes")
 		return
 	}
@@ -383,7 +388,7 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		return
 	}
 	fail := func(msg string) {
-		s.logins.fail([]string{"ip:" + clientIP(r)}, s.now())
+		s.logins.fail([]string{"ip:" + s.clientIP(r)}, s.now())
 		writeError(w, http.StatusUnauthorized, msg)
 	}
 	wa, origin, err := s.webauthnFor(r)
@@ -517,7 +522,7 @@ func (s *Server) handlePasskeyTwoFactorFinish(w http.ResponseWriter, r *http.Req
 	}
 	if err != nil {
 		s.log.Info("passkey second factor rejected", "user", u.Email, "err", err)
-		s.logins.fail([]string{"email:" + strings.ToLower(u.Email), "ip:" + clientIP(r)}, s.now())
+		s.logins.fail(loginKeys(u.Email, s.clientIP(r)), s.now())
 		writeError(w, http.StatusUnauthorized, "the passkey couldn't be verified")
 		return
 	}

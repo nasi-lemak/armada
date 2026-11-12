@@ -135,6 +135,11 @@ func (s *Server) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "single sign-on is not configured")
 		return
 	}
+	if s.cfg.Android.PublicURL == "" && s.sso.cfg.RedirectURL == "" {
+		// Never build the redirect address from request headers.
+		ssoFail(w, r, "Single sign-on needs the server's address: start it with -public-url.")
+		return
+	}
 	p, err := s.sso.getProvider(r.Context())
 	if err != nil {
 		s.log.Error("SSO provider unavailable", "issuer", s.sso.cfg.Issuer, "err", err)

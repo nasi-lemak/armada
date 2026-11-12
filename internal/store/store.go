@@ -230,6 +230,9 @@ func (s *Store) addColumns() error {
 		{"events", "actor", "TEXT NOT NULL DEFAULT ''"},
 		{"releases", "version_code", "INTEGER NOT NULL DEFAULT 0"},
 		{"sessions", "method", "TEXT NOT NULL DEFAULT 'password'"},
+		{"deployments", "created_by", "TEXT NOT NULL DEFAULT ''"},
+		{"deployments", "approved_by", "TEXT NOT NULL DEFAULT ''"},
+		{"deployments", "approved_at", "INTEGER NOT NULL DEFAULT 0"},
 		{"sessions", "created_at", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, c := range cols {
@@ -608,14 +611,14 @@ func (s *Store) DeleteRelease(ctx context.Context, id string) error {
 
 // ---- deployments ----
 
-const deploymentCols = `id, name, release_id, package, version, selector, strategy, status, status_reason, stage_index, stage_started_at, acknowledged_failures, created_at, updated_at`
+const deploymentCols = `id, name, release_id, package, version, selector, strategy, status, status_reason, stage_index, stage_started_at, acknowledged_failures, created_at, updated_at, created_by, approved_by, approved_at`
 
 func scanDeployment(sc scanner) (*api.Deployment, error) {
 	var d api.Deployment
 	var sel, strat string
-	var stageStarted, created, updated int64
+	var stageStarted, created, updated, approved int64
 	if err := sc.Scan(&d.ID, &d.Name, &d.ReleaseID, &d.Package, &d.Version, &sel, &strat, &d.Status, &d.StatusReason,
-		&d.StageIndex, &stageStarted, &d.AcknowledgedFailures, &created, &updated); err != nil {
+		&d.StageIndex, &stageStarted, &d.AcknowledgedFailures, &created, &updated, &d.CreatedBy, &d.ApprovedBy, &approved); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -624,14 +627,18 @@ func scanDeployment(sc scanner) (*api.Deployment, error) {
 	_ = json.Unmarshal([]byte(sel), &d.Selector)
 	_ = json.Unmarshal([]byte(strat), &d.Strategy)
 	d.StageStartedAt, d.CreatedAt, d.UpdatedAt = fromTS(stageStarted), fromTS(created), fromTS(updated)
+	if approved > 0 {
+		t := fromTS(approved)
+		d.ApprovedAt = &t
+	}
 	return &d, nil
 }
 
 // CreateDeployment stores a new deployment.
 func (s *Store) CreateDeployment(ctx context.Context, d *api.Deployment) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO deployments (`+deploymentCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := s.db.ExecContext(ctx, `INSERT INTO deployments (`+deploymentCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		d.ID, d.Name, d.ReleaseID, d.Package, d.Version, mustJSON(d.Selector), mustJSON(d.Strategy), d.Status, d.StatusReason,
-		d.StageIndex, ts(d.StageStartedAt), d.AcknowledgedFailures, ts(d.CreatedAt), ts(d.UpdatedAt))
+		d.StageIndex, ts(d.StageStartedAt), d.AcknowledgedFailures, ts(d.CreatedAt), ts(d.UpdatedAt), d.CreatedBy, d.ApprovedBy, approvedTS(d))
 	return err
 }
 
@@ -739,10 +746,17 @@ func (s *Store) deploymentStats(ctx context.Context, deploymentID string) (map[s
 	return out, rows.Err()
 }
 
+func approvedTS(d *api.Deployment) int64 {
+	if d.ApprovedAt == nil {
+		return 0
+	}
+	return ts(*d.ApprovedAt)
+}
+
 // UpdateDeploymentState changes a deployment's status and stage.
 func (s *Store) UpdateDeploymentState(ctx context.Context, d *api.Deployment) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE deployments SET status=?, status_reason=?, stage_index=?, stage_started_at=?, acknowledged_failures=?, updated_at=? WHERE id=?`,
-		d.Status, d.StatusReason, d.StageIndex, ts(d.StageStartedAt), d.AcknowledgedFailures, ts(d.UpdatedAt), d.ID)
+	res, err := s.db.ExecContext(ctx, `UPDATE deployments SET status=?, status_reason=?, stage_index=?, stage_started_at=?, acknowledged_failures=?, updated_at=?, approved_by=?, approved_at=? WHERE id=?`,
+		d.Status, d.StatusReason, d.StageIndex, ts(d.StageStartedAt), d.AcknowledgedFailures, ts(d.UpdatedAt), d.ApprovedBy, approvedTS(d), d.ID)
 	if err != nil {
 		return err
 	}

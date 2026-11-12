@@ -101,7 +101,19 @@ func run() error {
 	flag.StringVar(&cfg.OIDC.GroupsClaim, "oidc-groups-claim", env("ARMADA_OIDC_GROUPS_CLAIM", "groups"), "ID token claim with the user's groups")
 	flag.StringVar(&cfg.SCIMDefaultRole, "scim-default-role", env("ARMADA_SCIM_DEFAULT_ROLE", "viewer"), "role of users your directory provisions over SCIM while no group mappings exist (with mappings, access comes only from mapped groups)")
 	oidcGroupRoles := flag.String("oidc-group-roles", env("ARMADA_OIDC_GROUP_ROLES", ""), "map groups to roles, e.g. fleet-admins=admin,fleet-ops=operator,support=viewer; users in none can't sign in")
+	flag.BoolVar(&cfg.AdminTokenDisabled, "disable-admin-token", envBool("ARMADA_DISABLE_ADMIN_TOKEN", false), "turn the admin token off once admin users exist, so every action is tied to a person (ARMADA_DISABLE_ADMIN_TOKEN)")
+	rotateToken := flag.Bool("rotate-admin-token", false, "replace the generated admin token with a new one at startup (the old one stops working)")
+	trusted := flag.String("trusted-proxies", env("ARMADA_TRUSTED_PROXIES", ""), "comma-separated IPs/CIDRs of reverse proxies whose X-Forwarded-* headers are trusted, e.g. 10.0.0.0/8 (ARMADA_TRUSTED_PROXIES)")
+	flag.StringVar(&cfg.RolloutApproval, "rollout-approval", env("ARMADA_ROLLOUT_APPROVAL", "second-person"), "second-person: rollouts stop after their canary until someone other than their creator approves; off: no approval")
+	flag.IntVar(&cfg.UnapprovedMaxPercent, "unapproved-max-percent", 10, "largest first stage a rollout may run before approval")
 	flag.Parse()
+	if cfg.RolloutApproval == "off" || cfg.RolloutApproval == "none" {
+		cfg.RolloutApproval = ""
+	}
+	var perr error
+	if cfg.TrustedProxies, perr = server.ParseTrustedProxies(*trusted); perr != nil {
+		return perr
+	}
 	// The client secret only comes from the environment, never argv (visible in ps).
 	cfg.OIDC.ClientSecret = os.Getenv("ARMADA_OIDC_CLIENT_SECRET")
 	split := func(s string) []string {
@@ -153,11 +165,27 @@ func run() error {
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return err
 	}
-	tok, err := resolveAdminToken(*adminToken, cfg.DataDir, log)
-	if err != nil {
-		return err
+	if *rotateToken {
+		if *adminToken != "" {
+			return errors.New("-rotate-admin-token only applies to the generated token in <data-dir>/admin-token; change ARMADA_ADMIN_TOKEN yourself")
+		}
+		if err := os.Remove(filepath.Join(cfg.DataDir, "admin-token")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		log.Warn("admin token rotated: the old one no longer works")
 	}
-	cfg.AdminTokens = []string{tok}
+	if cfg.Android.PublicURL == "" && (cfg.OIDC.Issuer != "" || cfg.PasswordLogin) {
+		log.Warn("-public-url is not set: single sign-on and passkeys stay off until it is")
+	}
+	if !cfg.AdminTokenDisabled {
+		tok, err := resolveAdminToken(*adminToken, cfg.DataDir, log)
+		if err != nil {
+			return err
+		}
+		cfg.AdminTokens = []string{tok}
+	} else {
+		log.Info("admin token disabled; sign in as an admin user")
+	}
 
 	srv, err := server.New(cfg)
 	if err != nil {

@@ -111,6 +111,7 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 	}
 	for _, t := range s.cfg.AdminTokens {
 		if subtle.ConstantTimeCompare([]byte(tok), []byte(t)) == 1 {
+			s.noteAdminTokenUse(r)
 			return &principal{name: "admin token", role: api.RoleAdmin, method: "admin-token", grants: []api.Grant{{Role: api.RoleAdmin}}}, nil
 		}
 	}
@@ -194,10 +195,13 @@ type loginLimiter struct {
 const loginWindow = 15 * time.Minute
 
 func loginLimit(key string) int {
-	if strings.HasPrefix(key, "ip:") {
+	switch {
+	case strings.HasPrefix(key, "pair:"):
+		return 5
+	case strings.HasPrefix(key, "ip:"):
 		return 20
 	}
-	return 5
+	return 50
 }
 
 func (l *loginLimiter) recent(k string, now time.Time) int {
@@ -256,12 +260,13 @@ func (l *loginLimiter) reset(key string) {
 // dummyHash keeps login timing the same for unknown emails.
 var dummyHash, _ = bcrypt.GenerateFromPassword([]byte("armada-timing-equaliser"), bcrypt.DefaultCost)
 
-func clientIP(r *http.Request) string {
-	host := r.RemoteAddr
-	if i := strings.LastIndex(host, ":"); i > 0 {
-		host = host[:i]
-	}
-	return host
+// loginKeys are the throttling buckets for a sign-in attempt: this email
+// from this address (tight), this address (looser, shared behind NAT), and
+// this email from anywhere (loosest: stops distributed guessing without
+// letting one stranger lock a known user out).
+func loginKeys(email, ip string) []string {
+	email = strings.ToLower(email)
+	return []string{"pair:" + email + "|" + ip, "ip:" + ip, "email:" + email}
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -275,7 +280,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	now := s.now()
 	email := strings.ToLower(strings.TrimSpace(req.Email))
-	keys := []string{"email:" + email, "ip:" + clientIP(r)}
+	keys := loginKeys(email, s.clientIP(r))
 	if s.logins.blocked(keys, now) {
 		writeError(w, http.StatusTooManyRequests, "too many failed sign-ins; try again in 15 minutes")
 		return
@@ -293,7 +298,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
-	c := api.AuthConfig{PasswordLogin: s.cfg.PasswordLogin, Passkeys: s.cfg.PasswordLogin}
+	c := api.AuthConfig{PasswordLogin: s.cfg.PasswordLogin, Passkeys: s.cfg.PasswordLogin && s.cfg.Android.PublicURL != ""}
 	if s.sso != nil {
 		c.SSO, c.SSOName = true, s.cfg.OIDC.Name
 	}
@@ -675,4 +680,24 @@ func (s *Server) handleDeleteMyToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// noteAdminTokenUse records admin-token use in the activity log, at most
+// once per address an hour, so its use is visible without flooding.
+func (s *Server) noteAdminTokenUse(r *http.Request) {
+	ip := s.clientIP(r)
+	now := s.now()
+	s.adminSeen.Lock()
+	if s.adminSeen.m == nil {
+		s.adminSeen.m = map[string]time.Time{}
+	}
+	last, seen := s.adminSeen.m[ip]
+	if !seen || now.Sub(last) > time.Hour {
+		s.adminSeen.m[ip] = now
+	}
+	s.adminSeen.Unlock()
+	if !seen || now.Sub(last) > time.Hour {
+		ctx := context.WithValue(r.Context(), principalKey{}, &principal{name: "admin token"})
+		s.logEvent(ctx, "auth.admin_token", "", "", "admin token used from "+ip)
+	}
 }

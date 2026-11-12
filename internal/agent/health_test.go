@@ -93,6 +93,8 @@ func TestHealthRunnerScheduling(t *testing.T) {
 	h.runDue(context.Background())
 	if snap := h.snapshot(); len(snap) != 2 || snap[1].Name != "monitor m" {
 		t.Fatalf("snapshot: %+v", snap)
+	} else if snap[1].Status != api.HealthUnknown || !strings.Contains(snap[1].Message, "allow_exec") {
+		t.Fatalf("command check ran without allow_exec: %+v", snap[1])
 	}
 	h.setMonitors(nil) // a removed monitor's result disappears
 	if snap := h.snapshot(); len(snap) != 1 {
