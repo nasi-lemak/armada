@@ -263,6 +263,8 @@ async function route() {
     document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('active', a.dataset.route === nav));
     const root = $('#view');
     root.replaceChildren();
+    root.classList.toggle('fleet-page', need === 'fleet');
+    root.classList.remove('device-readonly');
     const refresh = await view(root, ...m.slice(1));
     if (typeof refresh === 'function') {
       currentRefresh = refresh;
@@ -504,6 +506,7 @@ async function viewDevice(root, id) {
     replace(labelBox, labelChips(d.labels, async k => {
       if (await guard(() => api('PATCH', '/api/v1/devices/' + id, { remove_labels: [k] }))) refresh();
     }));
+    root.classList.toggle('device-readonly', (ROLE_RANK[roleForDevice(d)] || 0) < ROLE_RANK.operator);
     replace(head, h('div', { class: 'crumb' }, h('a', { href: '#/devices' }, 'Devices'), ' / ', d.id),
       pageHead(d.name, h('span', {}, badge(d.status),
         d.connected ? [' ', h('span', { title: 'Holding a live connection: actions reach it within seconds' }, badge('live'))] : null,
@@ -1018,7 +1021,7 @@ async function viewEnroll(root) {
       h('div', { class: 'mt' }, created)),
     h('div', { class: 'spacer' }), list);
 
-  if (!fleetWide()) {
+  if ((ROLE_RANK[me.fleet_role] || 0) < ROLE_RANK.operator) {
     list.classList.add('hidden');
     created.before(h('p', { class: 'muted' }, 'Devices enrolled with these tokens are added to your account automatically.'));
     return;
@@ -1059,14 +1062,64 @@ async function loadMe() {
   me = await api('GET', '/api/v1/me');
   document.body.dataset.role = me.role;
   document.body.dataset.scoped = String(!!me.scoped);
+  document.body.dataset.fleetRole = me.fleet_role || '';
   const who = me.user ? (me.user.name || me.user.email) : me.name;
-  replace($('#whoami'), who, h('span', { class: 'role muted' }, ' · ' + me.role + (me.scoped ? ' · ' + scopesText(me) : '')));
+  replace($('#whoami'), who, h('span', { class: 'role muted', title: me.grants && me.grants.length > 1 ? grantsText(me.grants) : '' },
+    ' · ' + (me.grants && me.grants.length > 1 ? 'per-client access' : me.role + (me.scoped ? ' · ' + scopesText(me) : ''))));
   return me;
 }
 
 function scopeText(sel) {
   if (!sel) return '';
   return [sel.channel && 'channel ' + sel.channel, ...sortedEntries(sel.labels || {}).map(([k, v]) => k + '=' + v)].filter(Boolean).join(' ');
+}
+// accessEditor edits a user's grants: one row per set of devices.
+function accessEditor(u, save, close) {
+  const rowsBox = h('div', { class: 'stack' });
+  const addRow = (g = { role: 'viewer', scope: {} }) => {
+    const roleSel = h('select', { 'aria-label': 'Role' }, Object.keys(ROLE_HELP).map(r => h('option', { value: r }, r)));
+    roleSel.value = g.role;
+    const labels = h('input', { placeholder: 'empty = whole fleet, or customer=acme', 'aria-label': 'Devices (labels)',
+      value: sortedEntries((g.scope && g.scope.labels) || {}).map(([k, v]) => k + '=' + v).join(' ') });
+    const sync = () => { labels.disabled = roleSel.value === 'admin'; if (labels.disabled) labels.value = ''; };
+    roleSel.addEventListener('change', sync);
+    const row = h('div', { class: 'inline' }, roleSel, labels, h('button', { class: 'btn small ghost', type: 'button', onclick: () => row.remove() }, 'Remove'));
+    row.read = () => ({ role: roleSel.value, scope: { labels: parseLabels(labels.value) } });
+    sync();
+    rowsBox.append(row);
+  };
+  const current = (u.grants || []).length ? u.grants : [{ role: u.role, scope: u.scope || {} }];
+  current.forEach(addRow);
+  return h('form', { class: 'stack access-editor', onsubmit: e => {
+    e.preventDefault();
+    let gs;
+    try { gs = [...rowsBox.children].map(r => r.read()); } catch (err) { return toast(err.message, true); }
+    if (!gs.length) return toast('Give at least one grant', true);
+    save(gs.length === 1 ? { grants: [], role: gs[0].role, scope: gs[0].scope } : { grants: gs });
+    close();
+  } },
+  h('div', { class: 'muted' }, `Access for ${u.email}: a role on each set of devices. On a device, the highest matching role applies; a row with no labels covers the whole fleet (and fleet-wide pages such as releases and rollouts).`),
+  rowsBox,
+  h('div', { class: 'btn-row' }, h('button', { class: 'btn small', type: 'button', onclick: () => addRow() }, 'Add client'),
+    h('button', { class: 'btn small primary', type: 'submit' }, 'Save access'),
+    h('button', { class: 'btn small ghost', type: 'button', onclick: close }, 'Cancel')));
+}
+
+// Per-client access: a role on the devices each grant's scope matches.
+function selMatches(sel, d) {
+  if (sel.channel && sel.channel !== d.channel) return false;
+  return Object.entries(sel.labels || {}).every(([k, v]) => d.labels && k in d.labels && (v === '*' || d.labels[k] === v));
+}
+function roleForDevice(d) {
+  let best = '';
+  for (const g of (me && me.grants) || []) {
+    const fleet = !g.scope || (!g.scope.channel && !Object.keys(g.scope.labels || {}).length);
+    if ((fleet || selMatches(g.scope, d)) && (ROLE_RANK[g.role] || 0) > (ROLE_RANK[best] || 0)) best = g.role;
+  }
+  return best;
+}
+function grantsText(gs) {
+  return gs.map(g => g.role + ' on ' + (scopeText(g.scope) || 'the whole fleet')).join(' · ');
 }
 // scopesText describes several scopes (a device in any of them is visible).
 function scopesText(m) {
@@ -1337,7 +1390,7 @@ async function viewUsers(root) {
     const syncAdmin = () => { lIn.disabled = rIn.value === 'admin'; if (lIn.disabled) lIn.value = ''; };
     rIn.addEventListener('change', syncAdmin);
     replace(mapBox, h('h2', {}, 'Group mappings'),
-      h('p', { class: 'muted' }, 'Give members of a directory group (from SCIM, or the SSO groups claim) a role, and optionally limit them to some devices: a client account per customer group. Someone in several client groups sees all of those devices with the lowest of the roles; a fleet-wide group takes precedence. Once any mapping exists, directory users in no mapped group can\'t sign in.'),
+      h('p', { class: 'muted' }, 'Give members of a directory group (from SCIM, or the SSO groups claim) a role, and optionally limit them to some devices: a client account per customer group. Someone in several groups gets each group\'s role on that group\'s devices (operator for one client, viewer for another). Once any mapping exists, directory users in no mapped group can\'t sign in.'),
       ms.length ? table(['Group', 'Role', 'Devices', ''], ms.map(m => h('tr', {},
         h('td', {}, h('strong', {}, m.group), m.from_flag ? h('div', { class: 'muted' }, 'from -oidc-group-roles') : null),
         h('td', {}, m.role),
@@ -1397,15 +1450,17 @@ async function viewUsers(root) {
   async function refresh() {
     const users = await api('GET', '/api/v1/users');
     const patch = (u, body, msg) => guard(() => api('PATCH', '/api/v1/users/' + u.id, body), msg).then(r => r && refresh());
-    replace(list, table(['User', 'Role', 'Scope', 'Last sign-in', ''],
+    replace(list, table(['User', 'Role', 'Devices', 'Last sign-in', ''],
       users.map(u => {
         const self = me.user && me.user.id === u.id;
-        const roleSel = h('select', { 'aria-label': 'Role for ' + u.email, disabled: self || u.group_managed || undefined,
-          title: u.group_managed ? 'Set by group mappings' : undefined },
+        const multi = (u.grants || []).length > 0;
+        const roleSel = h('select', { 'aria-label': 'Role for ' + u.email, disabled: self || u.group_managed || multi || undefined,
+          title: u.group_managed ? 'Set by group mappings' : multi ? 'Per-client roles: use Access' : undefined },
           Object.keys(ROLE_HELP).map(r => h('option', { value: r }, r)));
         roleSel.value = u.role;
         roleSel.addEventListener('change', () => patch(u, { role: roleSel.value }, 'Role changed').then(r => r === undefined && (roleSel.value = u.role)));
-        return h('tr', {},
+        const editorRow = h('tr', { class: 'hidden' }, h('td', { colspan: '5' }, accessEditor(u, gs => patch(u, gs, 'Access updated'), () => editorRow.classList.add('hidden'))));
+        return [h('tr', {},
           h('td', {}, h('strong', {}, u.name || u.email), u.name ? h('div', { class: 'muted' }, u.email) : null,
             h('div', { class: 'btn-row mt' }, u.disabled ? badge('disabled') : null,
               u.two_factor ? h('span', { class: 'chip', title: 'Uses an authenticator app' }, '2FA') : null,
@@ -1413,21 +1468,16 @@ async function viewUsers(root) {
               u.sso ? h('span', { class: 'chip', title: 'Has signed in with single sign-on' }, u.no_password ? 'SSO only' : 'SSO') : null,
               u.provisioned ? h('span', { class: 'chip', title: 'Managed by your directory over SCIM: name, active state and (with group mapping) role come from there' }, 'Directory') : null,
               self ? h('span', { class: 'muted' }, 'you') : null)),
-          h('td', {}, roleSel),
+          h('td', {}, multi ? h('span', { class: 'muted' }, 'per client') : roleSel),
           h('td', {}, u.no_group_access ? [badge('no access'), h('div', { class: 'muted' }, u.group_managed ? 'in no mapped group' : 'set access by hand')]
-            : u.group_managed
-              ? [(u.scopes || []).length ? (u.scopes || []).map((sc, i) => [i ? h('span', { class: 'muted' }, ' or ') : null, labelChips(sc.labels)]) : h('span', { class: 'muted' }, 'whole fleet'),
-                h('div', { class: 'muted', title: (u.groups || []).join(', ') }, 'from groups')]
-              : scopeText(u.scope) ? labelChips(u.scope.labels) : h('span', { class: 'muted' }, 'whole fleet')),
+            : [multi
+              ? h('ul', { class: 'grants' }, u.grants.map(g => h('li', {}, h('strong', {}, g.role), ' ',
+                scopeText(g.scope) ? labelChips(g.scope.labels) : h('span', { class: 'muted' }, 'whole fleet'))))
+              : scopeText(u.scope) ? labelChips(u.scope.labels) : h('span', { class: 'muted' }, 'whole fleet'),
+            u.group_managed ? h('div', { class: 'muted', title: (u.groups || []).join(', ') }, 'from groups') : null]),
           h('td', { class: 'nowrap' }, u.last_login_at ? ago(u.last_login_at) : h('span', { class: 'muted' }, 'never')),
           h('td', {}, self ? null : h('div', { class: 'btn-row' },
-            u.group_managed ? null : h('button', { class: 'btn small', onclick: () => {
-              const scope = prompt(`Scope for ${u.email} as labels (empty = whole fleet):`, sortedEntries(u.scope.labels || {}).map(([k, v]) => k + '=' + v).join(' '));
-              if (scope === null) return;
-              let labels;
-              try { labels = parseLabels(scope); } catch (err) { return toast(err.message, true); }
-              patch(u, { scope: { labels } }, 'Scope updated');
-            } }, 'Scope'),
+            u.group_managed ? null : h('button', { class: 'btn small', title: 'Role per client: which devices this person can see and manage', onclick: () => editorRow.classList.toggle('hidden') }, 'Access'),
             h('button', { class: 'btn small', onclick: () => {
               const pw = prompt(`New password for ${u.email} (10+ characters). Their sessions are signed out.`);
               if (pw) patch(u, { password: pw }, 'Password reset');
@@ -1442,7 +1492,7 @@ async function viewUsers(root) {
               u.disabled ? 'Enable' : 'Disable'),
             h('button', { class: 'btn small danger', onclick: async () => {
               if (confirm(`Delete ${u.email}? Their personal API tokens stop working.`) && await guard(() => api('DELETE', '/api/v1/users/' + u.id), 'User deleted') !== undefined) refresh();
-            } }, 'Delete'))));
+            } }, 'Delete')))), editorRow];
       }), 'No users yet. Until you add one, sign in with the admin token.'));
   }
   await guard(refresh);
@@ -1526,7 +1576,7 @@ function twoFactorCard() {
 async function viewAccount(root) {
   const tokens = h('div', { class: 'card flush' });
   const created = h('div', {});
-  append(root, pageHead('My account', [me.user ? me.user.email : me.name, ' · ', me.role, me.scoped ? ' · devices with ' + scopesText(me) : ' · whole fleet']));
+  append(root, pageHead('My account', [me.user ? me.user.email : me.name, ' · ', me.grants && me.grants.length > 1 ? grantsText(me.grants) : me.role + (me.scoped ? ' · devices with ' + scopesText(me) : ' · whole fleet')]));
   if (!me.user) {
     append(root, h('div', { class: 'card' }, h('p', {}, 'You are signed in with the server admin token. ',
       atLeast('admin') ? [h('a', { href: '#/users' }, 'Add a user'), ' for each person, so actions are attributed to them and access can be revoked individually.'] : null)));

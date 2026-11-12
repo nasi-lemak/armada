@@ -14,16 +14,11 @@ import (
 )
 
 // Group mappings turn directory groups (pushed over SCIM, or in the SSO
-// groups claim) into a role and device access:
-//
-//   - A user in any fleet-wide mapped group (no scope) gets the whole
-//     fleet, with the highest role among those groups.
-//   - Otherwise a user in client groups (with a scope) sees the devices of
-//     every one of them, with the LOWEST of their roles: being a viewer for
-//     one client and an operator for another must not make someone an
-//     operator for both.
-//   - Once mappings exist, a group-managed user in no mapped group has no
-//     access at all.
+// groups claim) into access grants: each mapped group a user is in gives
+// them its role on its devices (or on the whole fleet). On any device the
+// highest grant that covers it applies, so someone can be an operator for
+// one client and a viewer for another. Once mappings exist, a
+// group-managed user in no mapped group has no access at all.
 
 // groupMappings merges -oidc-group-roles (fleet-wide, read-only) with the
 // mappings admins manage; a managed mapping wins for the same group.
@@ -47,18 +42,77 @@ func (s *Server) groupMappings(ctx context.Context) ([]*api.GroupMapping, error)
 
 func scopeEmpty(sel api.Selector) bool { return sel.Channel == "" && len(sel.Labels) == 0 }
 
-// applyGroupAccess sets a user's role, scopes and access from their
-// groups. It reports a short description of what changed ("" if nothing).
+// normalizeGrants merges grants on the same devices (keeping the highest
+// role), drops grants a fleet-wide grant already covers with an equal or
+// higher role, and sorts fleet-wide first.
+func normalizeGrants(gs []api.Grant) []api.Grant {
+	var out []api.Grant
+	for _, g := range gs {
+		merged := false
+		for i := range out {
+			if reflect.DeepEqual(out[i].Scope.Labels, g.Scope.Labels) && out[i].Scope.Channel == g.Scope.Channel {
+				if api.RoleRank(g.Role) > api.RoleRank(out[i].Role) {
+					out[i].Role = g.Role
+				}
+				merged = true
+			}
+		}
+		if !merged {
+			out = append(out, g)
+		}
+	}
+	fleet := ""
+	for _, g := range out {
+		if scopeEmpty(g.Scope) && api.RoleRank(g.Role) > api.RoleRank(fleet) {
+			fleet = g.Role
+		}
+	}
+	kept := out[:0]
+	for _, g := range out {
+		if scopeEmpty(g.Scope) || api.RoleRank(g.Role) > api.RoleRank(fleet) {
+			kept = append(kept, g)
+		}
+	}
+	sort.SliceStable(kept, func(i, j int) bool {
+		if scopeEmpty(kept[i].Scope) != scopeEmpty(kept[j].Scope) {
+			return scopeEmpty(kept[i].Scope)
+		}
+		return selText(kept[i].Scope) < selText(kept[j].Scope)
+	})
+	return kept
+}
+
+func highestRole(gs []api.Grant) string {
+	r := ""
+	for _, g := range gs {
+		if api.RoleRank(g.Role) > api.RoleRank(r) {
+			r = g.Role
+		}
+	}
+	return r
+}
+
+func grantsText(gs []api.Grant) string {
+	var parts []string
+	for _, g := range gs {
+		parts = append(parts, g.Role+" on "+selText(g.Scope))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// applyGroupAccess sets a user's grants and access from their groups. It
+// reports a short description of what changed ("" if nothing).
 func applyGroupAccess(u *api.User, mappings []*api.GroupMapping, defaultRole string) string {
-	before := fmt.Sprint(u.Role, u.Scopes, u.NoGroupAccess, u.GroupManaged)
+	state := func() string { return fmt.Sprint(u.Role, u.Grants, u.NoGroupAccess, u.GroupManaged) }
+	before := state()
 	managed := len(mappings) > 0 && (u.Provisioned || u.GroupsFromSSO)
 	if !managed {
 		if u.GroupManaged {
 			// The mappings that gave this user access are gone. Falling back
 			// to their manual settings could widen access (a client account
 			// would see the whole fleet), so they get none until an admin
-			// sets their role and devices by hand.
-			u.GroupManaged, u.Scopes, u.NoGroupAccess = false, nil, true
+			// sets their access by hand.
+			u.GroupManaged, u.Grants, u.NoGroupAccess = false, nil, true
 			return "group mappings no longer apply; no access until an admin sets it by hand"
 		}
 		return ""
@@ -68,52 +122,21 @@ func applyGroupAccess(u *api.User, mappings []*api.GroupMapping, defaultRole str
 	for _, g := range u.Groups {
 		in[strings.ToLower(g)] = true
 	}
-	var fleet, client []*api.GroupMapping
+	var grants []api.Grant
 	for _, m := range mappings {
-		if !in[strings.ToLower(m.Group)] {
-			continue
-		}
-		if scopeEmpty(m.Scope) {
-			fleet = append(fleet, m)
-		} else {
-			client = append(client, m)
+		if in[strings.ToLower(m.Group)] {
+			grants = append(grants, api.Grant{Role: m.Role, Scope: m.Scope})
 		}
 	}
-	var why string
-	switch {
-	case len(fleet) > 0:
-		role, from := "", ""
-		for _, m := range fleet {
-			if api.RoleRank(m.Role) > api.RoleRank(role) {
-				role, from = m.Role, m.Group
-			}
-		}
-		u.Role, u.Scopes, u.NoGroupAccess = role, nil, false
-		why = fmt.Sprintf("%s, whole fleet (group %s)", role, from)
-	case len(client) > 0:
-		role := ""
-		var scopes []api.Selector
-		var names []string
-		for _, m := range client {
-			if role == "" || api.RoleRank(m.Role) < api.RoleRank(role) {
-				role = m.Role
-			}
-			dup := false
-			for _, sc := range scopes {
-				dup = dup || reflect.DeepEqual(sc, m.Scope)
-			}
-			if !dup {
-				scopes = append(scopes, m.Scope)
-			}
-			names = append(names, m.Group)
-		}
-		u.Role, u.Scopes, u.NoGroupAccess = role, scopes, false
-		why = fmt.Sprintf("%s for %s (groups %s)", role, scopesText(scopes), strings.Join(names, ", "))
-	default:
-		u.NoGroupAccess, u.Scopes = true, nil
-		why = "no access (in no mapped group)"
+	why := "no access (in no mapped group)"
+	if len(grants) == 0 {
+		u.NoGroupAccess, u.Grants = true, nil
+	} else {
+		u.Grants = normalizeGrants(grants)
+		u.Role, u.NoGroupAccess = highestRole(u.Grants), false
+		why = grantsText(u.Grants)
 	}
-	if fmt.Sprint(u.Role, u.Scopes, u.NoGroupAccess, u.GroupManaged) == before {
+	if state() == before {
 		return ""
 	}
 	return why
@@ -143,16 +166,13 @@ func selText(sel api.Selector) string {
 	return strings.Join(parts, " ")
 }
 
-// userScopes is the device access a user has: group scopes for
-// group-managed users, else their manual scope.
-func userScopes(u *api.User) []api.Selector {
-	if u.GroupManaged {
-		return u.Scopes
+// userGrants is the access a user has: their grants, or else their
+// single role and scope.
+func userGrants(u *api.User) []api.Grant {
+	if u.GroupManaged || len(u.Grants) > 0 {
+		return u.Grants
 	}
-	if !scopeEmpty(u.Scope) {
-		return []api.Selector{u.Scope}
-	}
-	return nil
+	return []api.Grant{{Role: u.Role, Scope: u.Scope}}
 }
 
 // refreshGroupAccess recomputes and saves the access of the given users

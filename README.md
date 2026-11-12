@@ -666,7 +666,27 @@ for example `customer=acme`. A scoped user:
 So a customer can watch and manage their own devices, while you decide what software they run.
 
 Set scopes by hand on the Users page, or let your directory do it with
-[group mappings](#group-mappings-and-client-accounts), which also lets one person cover several customers.
+[group mappings](#group-mappings-and-client-accounts).
+
+**Per-client roles.** A person can have a different role for each client. Their access is a list of
+*grants*, each a role on some devices (or on the whole fleet). For example:
+
+| Role | Devices |
+|---|---|
+| viewer | whole fleet |
+| operator | `customer=acme` |
+
+This support engineer can look at every device, and fleet-wide pages read-only, but can only reboot,
+edit, fetch logs from or enroll Acme's devices. On any device, the highest grant that covers it
+applies. Fleet-wide pages (releases, rollouts, monitors, Android apps) need a fleet-wide grant, at
+the level the page needs. Set grants with **Access** on the Users page, or:
+
+```bash
+armadactl users set sam@vendor.com --grant viewer --grant operator:customer=acme
+```
+
+Admin is always fleet-wide. A person whose grants are all for some clients is a client account: no
+fleet-wide pages at all.
 
 **Tokens for scripts.** Each user can create personal API tokens (`ut_…`) on **My account** or with
 `armadactl me tokens create --name ci`. A token acts as its owner with the same role and scope, and
@@ -840,12 +860,12 @@ armadactl groups
 
 Groups come from SCIM (for provisioned users) or from the SSO groups claim at each sign-in. The rules:
 
-- **Fleet-wide groups win.** Someone in any mapped group without a device limit sees the whole fleet,
-  with the highest role among those groups.
-- **Several client groups add up devices, not privileges.** Someone in *Acme IT* and *Globex IT* (an
-  MSP, say) sees both customers' devices, with the **lowest** of the two roles (here viewer). Being
-  an operator for one client never makes them an operator for another. Give people who need more a
-  group of their own.
+- **Each group is a grant.** Someone in *Acme IT* and *Globex IT* (an MSP, say) is an operator on
+  Acme's devices and a viewer on Globex's. Being an operator for one client never makes them an
+  operator for another. On any device, the highest grant covering it applies.
+- A fleet-wide group adds access everywhere. *Fleet Ops* plus *Acme IT* makes someone an operator
+  everywhere, while *Support (viewer, whole fleet)* plus *Acme IT* lets them see everything and
+  operate only Acme's devices.
 - **No mapped group, no access.** Once any mapping exists, a directory user in none of the mapped
   groups can't sign in, and their live sessions stop working.
 - **Changes apply at once.** Editing a mapping or someone's groups updates every affected account
@@ -968,7 +988,7 @@ armadactl config list|get|apply -f FILE|enable|disable|delete
 armadactl groups [list|map --group G --role R [--scope K=V]...|unmap G]
 armadactl scim tokens [list|create --name N|revoke ID]
 armadactl whoami
-armadactl users list|create|set|delete      (create --sso-only; set --reset-2fa, --unlink-sso)
+armadactl users list|create|set|delete      (create --sso-only; set --grant ROLE[:K=V], --reset-2fa, --unlink-sso)
 armadactl me password
 armadactl me tokens [list|create --name N|revoke ID]
 ```
@@ -1067,7 +1087,7 @@ endpoints use the per-device key issued at enrollment.
 | `GET /api/v1/me/passkeys`, `POST …/register/{begin,finish}`, `DELETE …/{id}` | Manage your passkeys |
 | `GET /api/v1/me`, `POST /api/v1/me/password` | Who is signed in (role, scope); change password |
 | `GET/POST /api/v1/me/tokens`, `DELETE /api/v1/me/tokens/{id}` | Personal API tokens |
-| `GET/POST /api/v1/users`, `PATCH/DELETE /api/v1/users/{id}` | Users (admin) |
+| `GET/POST /api/v1/users`, `PATCH/DELETE /api/v1/users/{id}` | Users (admin); `grants` sets per-client roles |
 | `GET/POST /api/v1/scim/tokens`, `DELETE …/{id}` | SCIM tokens (admin) |
 | `GET/POST /api/v1/group-mappings`, `PUT/DELETE …/{id}` | Group mappings: group → role and devices (admin) |
 | `/scim/v2/Users`, `/scim/v2/Groups`, `/scim/v2/ServiceProviderConfig`, `…/ResourceTypes`, `…/Schemas` | SCIM 2.0 for your identity provider (SCIM token) |
@@ -1133,8 +1153,7 @@ deploy/, examples/  service units, compose file, sample agent config and hooks
   heartbeat. Running several replicas on Postgres is designed but not built; see
   [docs/scaling.md](docs/scaling.md).
 - Passkey users have no recovery codes unless they also set up an authenticator app. Losing every
-  passkey means asking an admin for a reset. SAML needs a broker such as Keycloak. A person's role is
-  the same across all the clients they can see; per-client roles need separate accounts.
+  passkey means asking an admin for a reset. SAML needs a broker such as Keycloak.
 - Push wakes one device at a time (actions, logs, check-in). New rollouts still start at each
   device's next heartbeat, which spreads the load. Logs are a snapshot, not a live tail.
 - Android app updates always download the full APK (APKs are compressed, so deltas save little).

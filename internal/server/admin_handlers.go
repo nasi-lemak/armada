@@ -232,13 +232,16 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !needDeviceRole(w, r, d, api.RoleOperator) {
+		return
+	}
 	var req patchDeviceRequest
 	if !readJSON(w, r, &req) {
 		return
 	}
-	// Licensing is the vendor's anti-redistribution control: client accounts
-	// can't lift a revocation (or impose one) on their own devices.
-	if req.LicenseRevoked != nil && *req.LicenseRevoked != d.LicenseRevoked && principalFrom(r.Context()).scoped() {
+	// Licensing is the vendor's anti-redistribution control: only fleet-wide
+	// operators can lift a revocation (or impose one).
+	if req.LicenseRevoked != nil && *req.LicenseRevoked != d.LicenseRevoked && api.RoleRank(principalFrom(r.Context()).fleetRole()) < api.RoleRank(api.RoleOperator) {
 		writeError(w, http.StatusForbidden, "only fleet-wide accounts can change app licensing")
 		return
 	}
@@ -265,7 +268,7 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !principalFrom(r.Context()).sees(d) {
+	if api.RoleRank(principalFrom(r.Context()).roleFor(d)) < api.RoleRank(api.RoleOperator) {
 		writeError(w, http.StatusForbidden, "this change would move the device out of the devices you can manage")
 		return
 	}
@@ -322,7 +325,7 @@ func (s *Server) handleListActions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateAction(w http.ResponseWriter, r *http.Request) {
 	d, ok := s.loadDevice(w, r)
-	if !ok {
+	if !ok || !needDeviceRole(w, r, d, api.RoleOperator) {
 		return
 	}
 	var req api.CreateActionRequest
@@ -465,13 +468,24 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	if req.Labels == nil {
 		req.Labels = map[string]string{}
 	}
-	// Client accounts can only enroll devices into their own scope. With
-	// several (e.g. two customers), the labels must pick one.
-	if p := principalFrom(r.Context()); p.scoped() {
-		sc := p.scopes[0]
-		if len(p.scopes) > 1 {
+	// Without a fleet-wide operator grant, people can only enroll devices
+	// where they are operators. With several such grants (e.g. two
+	// customers), the labels must pick one.
+	if p := principalFrom(r.Context()); api.RoleRank(p.fleetRole()) < api.RoleRank(api.RoleOperator) {
+		var cands []api.Selector
+		for _, g := range p.grants {
+			if !scopeEmpty(g.Scope) && api.RoleRank(g.Role) >= api.RoleRank(api.RoleOperator) {
+				cands = append(cands, g.Scope)
+			}
+		}
+		if len(cands) == 0 {
+			writeError(w, http.StatusForbidden, "enrolling devices needs the operator role on some devices")
+			return
+		}
+		sc := cands[0]
+		if len(cands) > 1 {
 			found := false
-			for _, cand := range p.scopes {
+			for _, cand := range cands {
 				ok := true
 				for k, v := range cand.Labels {
 					ok = ok && req.Labels[k] == v
@@ -483,7 +497,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 			}
 			if !found {
 				var opts []string
-				for _, cand := range p.scopes {
+				for _, cand := range cands {
 					opts = append(opts, selText(cand))
 				}
 				writeError(w, http.StatusBadRequest, "say which devices this token is for: add the labels of one of "+strings.Join(opts, "; "))

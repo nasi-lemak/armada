@@ -104,6 +104,9 @@ Users and access:
                        [--disable|--enable] [--reset-password]
                        [--reset-2fa]          turn off their authenticator (lost phone)
                        [--unlink-sso]         forget their single sign-on identity
+                       [--grant ROLE[:K=V,K=V]]...
+                                              per-client roles, e.g. --grant operator:customer=acme
+                                              --grant viewer (no labels: whole fleet)
   users delete <id|email>
   groups [list]                              directory group mappings
   groups map --group G --role R [--scope K=V]...

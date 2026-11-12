@@ -105,22 +105,23 @@ func (c *cli) users(verb string, args []string) error {
 			if u.SSO || u.NoPassword {
 				signIn = append(signIn, "SSO")
 			}
-			scope := scopeString(u.Scope)
-			switch {
-			case u.NoGroupAccess:
-				scope, state = "-", "no access"
-			case u.GroupManaged && len(u.Scopes) == 0:
-				scope = "whole fleet (groups)"
-			case u.GroupManaged:
+			access := u.Role + " on " + scopeString(u.Scope)
+			if len(u.Grants) > 0 {
 				var parts []string
-				for _, sc := range u.Scopes {
-					parts = append(parts, scopeString(sc))
+				for _, g := range u.Grants {
+					parts = append(parts, g.Role+" on "+scopeString(g.Scope))
 				}
-				scope = strings.Join(parts, " | ") + " (groups)"
+				access = strings.Join(parts, "; ")
 			}
-			rows = append(rows, []string{u.ID, u.Email, u.Name, u.Role, scope, strings.Join(signIn, "+"), state, last})
+			if u.GroupManaged {
+				access += " (groups)"
+			}
+			if u.NoGroupAccess {
+				access, state = "-", "no access"
+			}
+			rows = append(rows, []string{u.ID, u.Email, u.Name, access, strings.Join(signIn, "+"), state, last})
 		}
-		c.table("ID\tEMAIL\tNAME\tROLE\tSCOPE\tSIGN-IN\tSTATE\tLAST SIGN-IN", rows)
+		c.table("ID\tEMAIL\tNAME\tACCESS\tSIGN-IN\tSTATE\tLAST SIGN-IN", rows)
 		return nil
 	case "create", "add":
 		fs := flag.NewFlagSet("users create", flag.ContinueOnError)
@@ -161,6 +162,8 @@ func (c *cli) users(verb string, args []string) error {
 		var role, name string
 		var scope multiFlag
 		var whole, disable, enable, reset, reset2FA, unlinkSSO bool
+		var grants multiFlag
+		fs.Var(&grants, "grant", "")
 		fs.BoolVar(&reset2FA, "reset-2fa", false, "")
 		fs.BoolVar(&unlinkSSO, "unlink-sso", false, "")
 		fs.StringVar(&role, "role", "", "")
@@ -205,6 +208,13 @@ func (c *cli) users(verb string, args []string) error {
 			}
 			body["password"] = pw
 		}
+		if len(grants) > 0 {
+			gs, err := parseGrants(grants)
+			if err != nil {
+				return err
+			}
+			body["grants"] = gs
+		}
 		if reset2FA {
 			body["reset_two_factor"] = true
 		}
@@ -220,7 +230,15 @@ func (c *cli) users(verb string, args []string) error {
 		if c.json {
 			return c.printJSON(u)
 		}
-		fmt.Fprintf(c.out, "updated %s (%s, %s)\n", u.Email, u.Role, scopeString(u.Scope))
+		access := u.Role + ", " + scopeString(u.Scope)
+		if len(u.Grants) > 0 {
+			var parts []string
+			for _, g := range u.Grants {
+				parts = append(parts, g.Role+" on "+scopeString(g.Scope))
+			}
+			access = strings.Join(parts, "; ")
+		}
+		fmt.Fprintf(c.out, "updated %s (%s)\n", u.Email, access)
 		return nil
 	case "delete", "rm":
 		if err := need(args, 1, "user id or email"); err != nil {
@@ -501,4 +519,22 @@ func (c *cli) groups(verb string, args []string) error {
 		return fmt.Errorf("no mapping for %q", args[0])
 	}
 	return fmt.Errorf("unknown groups command %q", verb)
+}
+
+// parseGrants reads --grant ROLE[:K=V,K=V] values.
+func parseGrants(vals []string) ([]api.Grant, error) {
+	var out []api.Grant
+	for _, v := range vals {
+		role, labels, _ := strings.Cut(v, ":")
+		g := api.Grant{Role: strings.TrimSpace(role)}
+		if labels != "" {
+			ls, err := labelsOf(strings.Split(labels, ","))
+			if err != nil {
+				return nil, err
+			}
+			g.Scope.Labels = ls
+		}
+		out = append(out, g)
+	}
+	return out, nil
 }

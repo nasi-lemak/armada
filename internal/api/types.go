@@ -858,13 +858,22 @@ type User struct {
 	GroupsFromSSO bool     `json:"groups_from_sso,omitempty"`
 	// GroupManaged means role and device access come from group mappings.
 	GroupManaged bool `json:"group_managed,omitempty"`
-	// Scopes are the device scopes groups give (a device in any of them is
-	// visible). Empty with GroupManaged means the whole fleet.
-	Scopes []Selector `json:"scopes,omitempty"`
+	// Grants give per-client access: a role on the devices matching each
+	// grant's scope (an empty scope is the whole fleet). Set by group
+	// mappings for group-managed users, or by an admin. When empty, Role
+	// and Scope are the user's single grant.
+	Grants []Grant `json:"grants,omitempty"`
 	// NoGroupAccess means the user is in no mapped group and can't sign in.
 	NoGroupAccess bool       `json:"no_group_access,omitempty"`
 	ExternalID    string     `json:"external_id,omitempty"`
 	UpdatedAt     *time.Time `json:"updated_at,omitempty"`
+}
+
+// Grant is a role on some devices: those matching Scope, or the whole
+// fleet when Scope is empty. On a device, the highest matching grant wins.
+type Grant struct {
+	Role  string   `json:"role"`
+	Scope Selector `json:"scope"`
 }
 
 // GroupMapping gives members of a directory group a role and, optionally,
@@ -931,11 +940,13 @@ type PasskeyFinish struct {
 
 // CreateUserRequest creates a user (admin only).
 type CreateUserRequest struct {
-	Email    string   `json:"email"`
-	Name     string   `json:"name"`
-	Role     string   `json:"role"`
-	Scope    Selector `json:"scope"`
-	Password string   `json:"password"`
+	Email string   `json:"email"`
+	Name  string   `json:"name"`
+	Role  string   `json:"role"`
+	Scope Selector `json:"scope"`
+	// Grants, if set, give per-client roles instead of Role and Scope.
+	Grants   []Grant `json:"grants,omitempty"`
+	Password string  `json:"password"`
 }
 
 // LoginRequest signs in with email and password.
@@ -999,6 +1010,10 @@ type Me struct {
 	// Scopes lists every device scope the user has (any one matching is
 	// enough). Scope is the first, for older clients.
 	Scopes []Selector `json:"scopes,omitempty"`
+	// Grants is the full picture: a role per set of devices. Role is the
+	// highest of them; FleetRole the role on the whole fleet ("" if none).
+	Grants    []Grant `json:"grants"`
+	FleetRole string  `json:"fleet_role"`
 	// SignInMethod is "password", "sso", "token" or "admin-token".
 	SignInMethod string `json:"sign_in_method"`
 	// TwoFactorSetupRequired means the server requires two-factor sign-in

@@ -126,7 +126,7 @@ func (s *Server) handleAgentWait(w http.ResponseWriter, r *http.Request, dev *ap
 // handleWakeDevice asks a device to check in now.
 func (s *Server) handleWakeDevice(w http.ResponseWriter, r *http.Request) {
 	d, ok := s.loadDevice(w, r)
-	if !ok {
+	if !ok || !needDeviceRole(w, r, d, api.RoleOperator) {
 		return
 	}
 	if d.ParentID != "" {

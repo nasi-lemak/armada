@@ -21,10 +21,9 @@ import (
 type principal struct {
 	user *api.User // nil for the server's admin token
 	name string    // recorded as the actor of events
-	role string
-	// scopes limit the principal to devices matching any of them; empty
-	// means the whole fleet.
-	scopes []api.Selector
+	role string    // the highest role in any grant
+	// grants are roles on sets of devices (empty scope: the whole fleet).
+	grants []api.Grant
 	// sessionHash is set when signed in with a dashboard session.
 	sessionHash string
 	// method is how they signed in: password, passkey, sso, token or admin-token.
@@ -36,21 +35,64 @@ type principal struct {
 	setupRequired bool
 }
 
-// A nil principal (no auth context) is treated as unscoped; every route that
-// reaches these runs behind guard, which always sets one.
-func (p *principal) scoped() bool { return p != nil && len(p.scopes) > 0 }
-
-// sees reports whether a device is within any of the principal's scopes.
-func (p *principal) sees(d *api.Device) bool {
-	if !p.scoped() {
-		return true
+// fleetRole is the principal's role on the whole fleet ("" if they only
+// have grants on some devices). A nil principal (no auth context) counts as
+// fleet-wide admin; every route that reaches these runs behind guard,
+// which always sets one.
+func (p *principal) fleetRole() string {
+	if p == nil {
+		return api.RoleAdmin
 	}
-	for _, sc := range p.scopes {
-		if rollout.Matches(sc, d) {
-			return true
+	r := ""
+	for _, g := range p.grants {
+		if scopeEmpty(g.Scope) && api.RoleRank(g.Role) > api.RoleRank(r) {
+			r = g.Role
 		}
 	}
-	return false
+	return r
+}
+
+// scoped means the principal has no fleet-wide grant: fleet-wide data and
+// settings are hidden from them.
+func (p *principal) scoped() bool { return p.fleetRole() == "" }
+
+// roleFor is the principal's role on a device: the highest grant covering
+// it, or "" if none does.
+func (p *principal) roleFor(d *api.Device) string {
+	if p == nil {
+		return api.RoleAdmin
+	}
+	r := ""
+	for _, g := range p.grants {
+		if (scopeEmpty(g.Scope) || rollout.Matches(g.Scope, d)) && api.RoleRank(g.Role) > api.RoleRank(r) {
+			r = g.Role
+		}
+	}
+	return r
+}
+
+// sees reports whether any grant covers a device.
+func (p *principal) sees(d *api.Device) bool { return p.roleFor(d) != "" }
+
+// scopes lists the device scopes of a principal without fleet-wide access.
+func (p *principal) scopes() []api.Selector {
+	if !p.scoped() {
+		return nil
+	}
+	var out []api.Selector
+	for _, g := range p.grants {
+		out = append(out, g.Scope)
+	}
+	return out
+}
+
+// needDeviceRole checks the principal's role on one device.
+func needDeviceRole(w http.ResponseWriter, r *http.Request, d *api.Device, role string) bool {
+	if got := principalFrom(r.Context()).roleFor(d); api.RoleRank(got) < api.RoleRank(role) {
+		writeError(w, http.StatusForbidden, "your role on this device ("+got+") cannot do this; it needs "+role)
+		return false
+	}
+	return true
 }
 
 type principalKey struct{}
@@ -69,7 +111,7 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 	}
 	for _, t := range s.cfg.AdminTokens {
 		if subtle.ConstantTimeCompare([]byte(tok), []byte(t)) == 1 {
-			return &principal{name: "admin token", role: api.RoleAdmin, method: "admin-token"}, nil
+			return &principal{name: "admin token", role: api.RoleAdmin, method: "admin-token", grants: []api.Grant{{Role: api.RoleAdmin}}}, nil
 		}
 	}
 	var u *api.User
@@ -96,7 +138,8 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 	if u.NoGroupAccess {
 		return nil, errors.New("your directory groups don't include access to Armada")
 	}
-	p.user, p.name, p.role, p.scopes = u, u.Email, u.Role, userScopes(u)
+	p.user, p.name, p.grants = u, u.Email, userGrants(u)
+	p.role = highestRole(p.grants)
 	p.setupRequired = s.cfg.Require2FA && p.method == "password" && !hasSecondFactor(u)
 	return p, nil
 }
@@ -121,12 +164,16 @@ func (s *Server) guard(minRole string, scopedOK bool, next http.HandlerFunc) htt
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "set up two-factor sign-in first (My account)", "two_factor_setup_required": true})
 			return
 		}
-		if api.RoleRank(p.role) < api.RoleRank(minRole) {
-			writeError(w, http.StatusForbidden, "your role ("+p.role+") cannot do this; it needs "+minRole)
-			return
+		have := p.role
+		if !scopedOK {
+			// Fleet-wide data and settings need a fleet-wide grant.
+			if have = p.fleetRole(); have == "" {
+				writeError(w, http.StatusForbidden, "not available to accounts limited to some devices")
+				return
+			}
 		}
-		if p.scoped() && !scopedOK {
-			writeError(w, http.StatusForbidden, "not available to accounts limited to some devices")
+		if api.RoleRank(have) < api.RoleRank(minRole) {
+			writeError(w, http.StatusForbidden, "your role ("+have+") cannot do this; it needs "+minRole)
 			return
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
@@ -262,10 +309,10 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	p := principalFrom(r.Context())
-	me := api.Me{User: p.user, Name: p.name, Role: p.role, Scopes: p.scopes, Scoped: p.scoped(),
-		SignInMethod: p.method, TwoFactorSetupRequired: p.setupRequired}
-	if len(p.scopes) > 0 {
-		me.Scope = p.scopes[0]
+	me := api.Me{User: p.user, Name: p.name, Role: p.role, Scopes: p.scopes(), Scoped: p.scoped(),
+		Grants: p.grants, FleetRole: p.fleetRole(), SignInMethod: p.method, TwoFactorSetupRequired: p.setupRequired}
+	if sc := p.scopes(); len(sc) > 0 {
+		me.Scope = sc[0]
 	}
 	writeJSON(w, http.StatusOK, me)
 }
@@ -310,6 +357,22 @@ func checkUserFields(role string, scope api.Selector) error {
 	return nil
 }
 
+// checkGrants validates per-client access and returns it normalised.
+func checkGrants(gs []api.Grant) ([]api.Grant, error) {
+	if len(gs) == 0 {
+		return nil, errors.New("give at least one grant")
+	}
+	if len(gs) > 100 {
+		return nil, errors.New("too many grants")
+	}
+	for _, g := range gs {
+		if err := checkUserFields(g.Role, g.Scope); err != nil {
+			return nil, err
+		}
+	}
+	return normalizeGrants(gs), nil
+}
+
 func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	us, err := s.store.ListUsers(r.Context())
 	if err != nil {
@@ -329,11 +392,19 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "a valid email is required")
 		return
 	}
-	if err := checkUserFields(req.Role, req.Scope); err != nil {
+	var grants []api.Grant
+	if len(req.Grants) > 0 {
+		var err error
+		if grants, err = checkGrants(req.Grants); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		req.Role, req.Scope = highestRole(grants), api.Selector{}
+	} else if err := checkUserFields(req.Role, req.Scope); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	u := &api.User{ID: newID("usr"), Email: req.Email, Name: truncate(strings.TrimSpace(req.Name), 128), Role: req.Role, Scope: req.Scope, CreatedAt: s.now()}
+	u := &api.User{ID: newID("usr"), Email: req.Email, Name: truncate(strings.TrimSpace(req.Name), 128), Role: req.Role, Scope: req.Scope, Grants: grants, CreatedAt: s.now()}
 	hash := ""
 	if req.Password == "" && s.sso != nil {
 		u.NoPassword = true // signs in with single sign-on only
@@ -375,6 +446,9 @@ type patchUserRequest struct {
 	Scope    *api.Selector `json:"scope"`
 	Disabled *bool         `json:"disabled"`
 	Password *string       `json:"password"`
+	// Grants replaces the user's access with per-client roles; an empty
+	// list goes back to a single Role and Scope.
+	Grants *[]api.Grant `json:"grants"`
 	// ResetTwoFactor turns off the user's authenticator (lost phone).
 	ResetTwoFactor bool `json:"reset_two_factor"`
 	// UnlinkSSO forgets the user's single sign-on identity.
@@ -397,25 +471,41 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 	}
 	me := principalFrom(ctx)
 	self := me.user != nil && me.user.ID == u.ID
-	if self && ((req.Role != nil && *req.Role != u.Role) || (req.Disabled != nil && *req.Disabled)) {
-		writeError(w, http.StatusBadRequest, "you cannot change your own role or disable yourself")
+	if self && ((req.Role != nil && *req.Role != u.Role) || req.Scope != nil || req.Grants != nil || (req.Disabled != nil && *req.Disabled)) {
+		writeError(w, http.StatusBadRequest, "you cannot change your own access or disable yourself")
 		return
 	}
 	if req.Name != nil {
 		u.Name = truncate(strings.TrimSpace(*req.Name), 128)
 	}
-	if u.GroupManaged && ((req.Role != nil && *req.Role != u.Role) || req.Scope != nil) {
+	if u.GroupManaged && ((req.Role != nil && *req.Role != u.Role) || req.Scope != nil || req.Grants != nil) {
 		writeError(w, http.StatusBadRequest, "this user's role and devices come from their directory groups; change their groups or the group mappings instead")
+		return
+	}
+	if len(u.Grants) > 0 && req.Grants == nil && ((req.Role != nil && *req.Role != u.Role) || req.Scope != nil) {
+		writeError(w, http.StatusBadRequest, "this user has per-client access; edit their grants instead")
 		return
 	}
 	if req.Role != nil {
 		u.Role = *req.Role
 	}
-	if !u.GroupManaged && (req.Role != nil || req.Scope != nil) {
+	if !u.GroupManaged && (req.Role != nil || req.Scope != nil || req.Grants != nil) {
 		u.NoGroupAccess = false // access now set by hand
 	}
 	if req.Scope != nil {
 		u.Scope = *req.Scope
+	}
+	if req.Grants != nil {
+		if len(*req.Grants) == 0 {
+			u.Grants = nil // back to a single role and scope
+		} else {
+			gs, err := checkGrants(*req.Grants)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			u.Grants, u.Role, u.Scope = gs, highestRole(gs), api.Selector{}
+		}
 	}
 	if req.Disabled != nil {
 		u.Disabled = *req.Disabled
@@ -466,7 +556,11 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Disabling takes effect immediately: every request re-checks the account.
-	s.logEvent(ctx, "user.updated", "", "", "user "+u.Email+" updated ("+u.Role+scopeNote(u.Scope)+map[bool]string{true: ", disabled", false: ""}[u.Disabled]+")")
+	access := u.Role + scopeNote(u.Scope)
+	if len(u.Grants) > 0 {
+		access = grantsText(u.Grants)
+	}
+	s.logEvent(ctx, "user.updated", "", "", "user "+u.Email+" updated ("+access+map[bool]string{true: ", disabled", false: ""}[u.Disabled]+")")
 	writeJSON(w, http.StatusOK, u)
 }
 

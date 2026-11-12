@@ -75,19 +75,28 @@ func TestGroupScopesForClientAccounts(t *testing.T) {
 		t.Fatalf("manual scope change: %d", c)
 	}
 
-	// In a second client's group: both clients' devices, lowest role.
+	// In a second client's group: both clients' devices, each with its own role.
 	call(t, ts, tok.Token, "PATCH", "/scim/v2/Groups/"+globexGrp.ID, patch(map[string]any{"op": "add", "path": "members", "value": []map[string]any{{"value": u.ID}}}), nil)
 	call(t, ts, lr.Token, "GET", "/api/v1/me", nil, &me)
 	if got := strings.Join(sees(), ","); got != "acme,globex" && got != "globex,acme" {
 		t.Fatalf("two clients: sees %s", got)
 	}
-	if me.Role != api.RoleViewer {
-		t.Fatalf("role across clients should be the lowest: %s", me.Role)
+	if len(me.Grants) != 2 || me.FleetRole != "" {
+		t.Fatalf("per-client grants: %+v", me)
 	}
-	// A token for one of several clients must say which.
-	if c := call(t, ts, lr.Token, "POST", "/api/v1/tokens", api.CreateTokenRequest{}, nil); c != 403 {
-		// viewers can't create tokens at all; checked separately below
-		t.Fatalf("viewer token: %d", c)
+	if c := call(t, ts, lr.Token, "POST", "/api/v1/devices/"+devs["acme"]+"/actions", api.CreateActionRequest{Type: "reboot"}, nil); c != 201 {
+		t.Fatalf("operator on acme: %d", c)
+	}
+	if c := call(t, ts, lr.Token, "POST", "/api/v1/devices/"+devs["globex"]+"/actions", api.CreateActionRequest{Type: "reboot"}, nil); c != 403 {
+		t.Fatalf("viewer on globex rebooted it: %d", c)
+	}
+	if c := call(t, ts, lr.Token, "PATCH", "/api/v1/devices/"+devs["globex"], map[string]any{"name": "x"}, nil); c != 403 {
+		t.Fatalf("viewer on globex renamed it: %d", c)
+	}
+	// Enrollment tokens go where they are an operator (only acme here).
+	var et0 api.EnrollmentToken
+	if c := call(t, ts, lr.Token, "POST", "/api/v1/tokens", api.CreateTokenRequest{}, &et0); c != 201 || et0.Labels["customer"] != "acme" {
+		t.Fatalf("token: %d %+v", c, et0)
 	}
 
 	// Fleet-wide group wins: internal staff see everything.
