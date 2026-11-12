@@ -342,7 +342,11 @@ func (s *Server) handleSCIMCreateUser(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	s.logEvent(ctx, "user.created", "", "", fmt.Sprintf("user %s provisioned from the directory (%s)", u.Email, u.Role))
+	s.logEvent(ctx, "user.created", "", "", fmt.Sprintf("user %s provisioned from the directory", u.Email))
+	if err := s.refreshGroupAccess(ctx, []string{u.ID}); err != nil {
+		s.internalError(w, err)
+		return
+	}
 	scimJSON(w, http.StatusCreated, s.userResource(r, u, nil))
 }
 
@@ -545,13 +549,11 @@ func (s *Server) scimSaveUser(w http.ResponseWriter, r *http.Request, old, next 
 	case !old.Provisioned:
 		s.logEvent(ctx, "user.updated", "", "", next.Email+" is now managed by the directory")
 	}
-	if !old.Provisioned {
-		if err := s.syncRoles(ctx, []string{next.ID}); err != nil {
-			s.internalError(w, err)
-			return
-		}
-		next, _ = s.store.GetUser(ctx, next.ID)
+	if err := s.refreshGroupAccess(ctx, []string{next.ID}); err != nil {
+		s.internalError(w, err)
+		return
 	}
+	next, _ = s.store.GetUser(ctx, next.ID)
 	groups, err := s.store.ListSCIMGroups(ctx)
 	if err != nil {
 		s.internalError(w, err)
@@ -850,7 +852,7 @@ func (s *Server) scimSaveGroup(w http.ResponseWriter, r *http.Request, old, g *a
 	if old != nil {
 		affected = append(affected, old.Members...)
 	}
-	if err := s.syncRoles(ctx, uniq(affected)); err != nil {
+	if err := s.refreshGroupAccess(ctx, uniq(affected)); err != nil {
 		s.internalError(w, err)
 		return
 	}
@@ -868,70 +870,11 @@ func (s *Server) handleSCIMDeleteGroup(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	if err := s.syncRoles(ctx, g.Members); err != nil {
+	if err := s.refreshGroupAccess(ctx, g.Members); err != nil {
 		s.internalError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// groupRole maps a group name to a role (case-insensitive).
-func (s *Server) groupRole(name string) string {
-	for g, r := range s.cfg.OIDC.GroupRoles {
-		if strings.EqualFold(g, name) {
-			return r
-		}
-	}
-	return ""
-}
-
-// syncRoles sets provisioned users' roles from their groups: the highest
-// mapped role, or the default role when they are in no mapped group (so
-// leaving a group in the directory removes the access it gave).
-func (s *Server) syncRoles(ctx context.Context, userIDs []string) error {
-	if len(s.cfg.OIDC.GroupRoles) == 0 || len(userIDs) == 0 {
-		return nil
-	}
-	groups, err := s.store.ListSCIMGroups(ctx)
-	if err != nil {
-		return err
-	}
-	for _, id := range userIDs {
-		u, err := s.store.GetUser(ctx, id)
-		if errors.Is(err, store.ErrNotFound) {
-			continue
-		} else if err != nil {
-			return err
-		}
-		if !u.Provisioned {
-			continue
-		}
-		role, from := s.cfg.SCIMDefaultRole, ""
-		for _, g := range groups {
-			for _, m := range g.Members {
-				if r := s.groupRole(g.DisplayName); m == id && api.RoleRank(r) > api.RoleRank(role) {
-					role, from = r, g.DisplayName
-				}
-			}
-		}
-		if role == u.Role {
-			continue
-		}
-		if role == api.RoleAdmin && (u.Scope.Channel != "" || len(u.Scope.Labels) > 0) {
-			s.logEvent(ctx, "user.updated", "", "", fmt.Sprintf("%s is in admin group %s but limited to some devices; role left as %s", u.Email, from, u.Role))
-			continue
-		}
-		reason := "in no mapped group"
-		if from != "" {
-			reason = "member of " + from
-		}
-		s.logEvent(ctx, "user.updated", "", "", fmt.Sprintf("%s's role changed from %s to %s (%s)", u.Email, u.Role, role, reason))
-		u.Role = role
-		if err := s.store.UpdateUser(ctx, u); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // ---- discovery ----

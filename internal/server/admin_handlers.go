@@ -465,15 +465,38 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	if req.Labels == nil {
 		req.Labels = map[string]string{}
 	}
-	// Client accounts can only enroll devices into their own scope.
+	// Client accounts can only enroll devices into their own scope. With
+	// several (e.g. two customers), the labels must pick one.
 	if p := principalFrom(r.Context()); p.scoped() {
-		for k, v := range p.scope.Labels {
+		sc := p.scopes[0]
+		if len(p.scopes) > 1 {
+			found := false
+			for _, cand := range p.scopes {
+				ok := true
+				for k, v := range cand.Labels {
+					ok = ok && req.Labels[k] == v
+				}
+				if ok && len(cand.Labels) > 0 {
+					sc, found = cand, true
+					break
+				}
+			}
+			if !found {
+				var opts []string
+				for _, cand := range p.scopes {
+					opts = append(opts, selText(cand))
+				}
+				writeError(w, http.StatusBadRequest, "say which devices this token is for: add the labels of one of "+strings.Join(opts, "; "))
+				return
+			}
+		}
+		for k, v := range sc.Labels {
 			if v != "*" {
 				req.Labels[k] = v
 			}
 		}
-		if p.scope.Channel != "" {
-			req.Channel = p.scope.Channel
+		if sc.Channel != "" {
+			req.Channel = sc.Channel
 		}
 	}
 	if err := validLabels(req.Labels); err != nil {

@@ -19,10 +19,12 @@ import (
 
 // principal is whoever is calling the admin API.
 type principal struct {
-	user  *api.User // nil for the server's admin token
-	name  string    // recorded as the actor of events
-	role  string
-	scope api.Selector
+	user *api.User // nil for the server's admin token
+	name string    // recorded as the actor of events
+	role string
+	// scopes limit the principal to devices matching any of them; empty
+	// means the whole fleet.
+	scopes []api.Selector
 	// sessionHash is set when signed in with a dashboard session.
 	sessionHash string
 	// method is how they signed in: password, passkey, sso, token or admin-token.
@@ -36,12 +38,20 @@ type principal struct {
 
 // A nil principal (no auth context) is treated as unscoped; every route that
 // reaches these runs behind guard, which always sets one.
-func (p *principal) scoped() bool {
-	return p != nil && (p.scope.Channel != "" || len(p.scope.Labels) > 0)
-}
+func (p *principal) scoped() bool { return p != nil && len(p.scopes) > 0 }
 
-// sees reports whether a device is within the principal's scope.
-func (p *principal) sees(d *api.Device) bool { return !p.scoped() || rollout.Matches(p.scope, d) }
+// sees reports whether a device is within any of the principal's scopes.
+func (p *principal) sees(d *api.Device) bool {
+	if !p.scoped() {
+		return true
+	}
+	for _, sc := range p.scopes {
+		if rollout.Matches(sc, d) {
+			return true
+		}
+	}
+	return false
+}
 
 type principalKey struct{}
 
@@ -83,7 +93,10 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 	if u.Disabled {
 		return nil, errors.New("this account is disabled")
 	}
-	p.user, p.name, p.role, p.scope = u, u.Email, u.Role, u.Scope
+	if u.NoGroupAccess {
+		return nil, errors.New("your directory groups don't include access to Armada")
+	}
+	p.user, p.name, p.role, p.scopes = u, u.Email, u.Role, userScopes(u)
 	p.setupRequired = s.cfg.Require2FA && p.method == "password" && !hasSecondFactor(u)
 	return p, nil
 }
@@ -249,8 +262,12 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	p := principalFrom(r.Context())
-	writeJSON(w, http.StatusOK, api.Me{User: p.user, Name: p.name, Role: p.role, Scope: p.scope, Scoped: p.scoped(),
-		SignInMethod: p.method, TwoFactorSetupRequired: p.setupRequired})
+	me := api.Me{User: p.user, Name: p.name, Role: p.role, Scopes: p.scopes, Scoped: p.scoped(),
+		SignInMethod: p.method, TwoFactorSetupRequired: p.setupRequired}
+	if len(p.scopes) > 0 {
+		me.Scope = p.scopes[0]
+	}
+	writeJSON(w, http.StatusOK, me)
 }
 
 // ---- users (admin) ----
@@ -387,12 +404,15 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 	if req.Name != nil {
 		u.Name = truncate(strings.TrimSpace(*req.Name), 128)
 	}
-	if req.Role != nil && *req.Role != u.Role && u.Provisioned && len(s.cfg.OIDC.GroupRoles) > 0 {
-		writeError(w, http.StatusBadRequest, "this user's role comes from their directory groups; change their groups instead")
+	if u.GroupManaged && ((req.Role != nil && *req.Role != u.Role) || req.Scope != nil) {
+		writeError(w, http.StatusBadRequest, "this user's role and devices come from their directory groups; change their groups or the group mappings instead")
 		return
 	}
 	if req.Role != nil {
 		u.Role = *req.Role
+	}
+	if !u.GroupManaged && (req.Role != nil || req.Scope != nil) {
+		u.NoGroupAccess = false // access now set by hand
 	}
 	if req.Scope != nil {
 		u.Scope = *req.Scope

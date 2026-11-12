@@ -180,6 +180,10 @@ func hasSecondFactor(u *api.User) bool { return u.TwoFactor || u.Passkeys > 0 }
 // the session's sign-in method; factor describes the second factor used.
 func (s *Server) completeLogin(w http.ResponseWriter, r *http.Request, u *api.User, method, factor, challenge string) {
 	ctx := r.Context()
+	if u.NoGroupAccess {
+		writeError(w, http.StatusForbidden, "your directory groups don't include access to Armada")
+		return
+	}
 	if challenge != "" {
 		s.mfa.done(challenge)
 	}

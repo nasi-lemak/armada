@@ -851,9 +851,33 @@ type User struct {
 	Passkeys int `json:"passkeys"`
 	// Provisioned users are managed by your directory over SCIM: it sets
 	// their name, active state and (with group mapping) their role.
-	Provisioned bool       `json:"provisioned,omitempty"`
-	ExternalID  string     `json:"external_id,omitempty"`
-	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
+	Provisioned bool `json:"provisioned,omitempty"`
+	// Groups are the user's directory groups (from SCIM, or the SSO groups
+	// claim at sign-in).
+	Groups        []string `json:"groups,omitempty"`
+	GroupsFromSSO bool     `json:"groups_from_sso,omitempty"`
+	// GroupManaged means role and device access come from group mappings.
+	GroupManaged bool `json:"group_managed,omitempty"`
+	// Scopes are the device scopes groups give (a device in any of them is
+	// visible). Empty with GroupManaged means the whole fleet.
+	Scopes []Selector `json:"scopes,omitempty"`
+	// NoGroupAccess means the user is in no mapped group and can't sign in.
+	NoGroupAccess bool       `json:"no_group_access,omitempty"`
+	ExternalID    string     `json:"external_id,omitempty"`
+	UpdatedAt     *time.Time `json:"updated_at,omitempty"`
+}
+
+// GroupMapping gives members of a directory group a role and, optionally,
+// limits them to some devices (client accounts).
+type GroupMapping struct {
+	ID    string `json:"id"`
+	Group string `json:"group"` // matched case-insensitively
+	Role  string `json:"role"`
+	// Scope limits members to matching devices; empty means the whole fleet.
+	Scope     Selector  `json:"scope"`
+	CreatedAt time.Time `json:"created_at"`
+	// FromFlag marks mappings set with -oidc-group-roles (read-only here).
+	FromFlag bool `json:"from_flag,omitempty"`
 }
 
 // SCIMToken authenticates an identity provider's SCIM client.
@@ -972,6 +996,9 @@ type Me struct {
 	Role   string   `json:"role"`
 	Scope  Selector `json:"scope"`
 	Scoped bool     `json:"scoped"`
+	// Scopes lists every device scope the user has (any one matching is
+	// enough). Scope is the first, for older clients.
+	Scopes []Selector `json:"scopes,omitempty"`
 	// SignInMethod is "password", "sso", "token" or "admin-token".
 	SignInMethod string `json:"sign_in_method"`
 	// TwoFactorSetupRequired means the server requires two-factor sign-in

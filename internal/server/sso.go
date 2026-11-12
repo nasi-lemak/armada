@@ -295,14 +295,18 @@ func (s *Server) ssoUser(ctx context.Context, issuer, subject string, claims map
 			return nil, email + " is not in a domain allowed to sign in here.", nil
 		}
 	}
-	role := ""
-	if len(cfg.GroupRoles) > 0 {
-		for _, g := range claimStrings(claims[cfg.GroupsClaim]) {
-			if r, ok := cfg.GroupRoles[g]; ok && api.RoleRank(r) > api.RoleRank(role) {
-				role = r
-			}
-		}
-		if role == "" {
+	mappings, err := s.groupMappings(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	// With group mappings, access comes from the groups claim; work it out
+	// up front so people in no mapped group are refused before anything
+	// (such as an account) is created.
+	groups := claimStrings(claims[cfg.GroupsClaim])
+	if len(mappings) > 0 {
+		probe := &api.User{GroupsFromSSO: true, Groups: groups}
+		applyGroupAccess(probe, mappings, s.cfg.SCIMDefaultRole)
+		if probe.NoGroupAccess {
 			return nil, "Your account isn't in a group allowed to use Armada.", nil
 		}
 	}
@@ -324,13 +328,13 @@ func (s *Server) ssoUser(ctx context.Context, issuer, subject string, claims map
 				return nil, "This Armada account is linked to a different sign-in identity. An admin can unlink it.", nil
 			}
 		case errors.Is(err, store.ErrNotFound):
-			if cfg.CreateRole == "" && role == "" {
+			if cfg.CreateRole == "" && len(mappings) == 0 {
 				return nil, "There is no Armada account for " + email + ". Ask an admin to add you.", nil
 			}
 			name, _ := claims["name"].(string)
 			u = &api.User{ID: newID("usr"), Email: email, Name: truncate(name, 128), Role: cfg.CreateRole, NoPassword: true, CreatedAt: s.now()}
-			if role != "" {
-				u.Role = role
+			if u.Role == "" {
+				u.Role = api.RoleViewer // replaced from groups below
 			}
 			if err := s.store.CreateUser(ctx, u, ""); err != nil {
 				return nil, "", err
@@ -348,12 +352,17 @@ func (s *Server) ssoUser(ctx context.Context, issuer, subject string, claims map
 	if u.Disabled {
 		return nil, "Your Armada account is disabled.", nil
 	}
-	if role != "" && role != u.Role {
-		if role == api.RoleAdmin && (u.Scope.Channel != "" || len(u.Scope.Labels) > 0) {
-			return nil, "Your groups make you an admin, but your account is limited to some devices. Ask an admin to fix this.", nil
-		}
-		s.logEvent(ctx, "user.updated", "", "", fmt.Sprintf("%s's role set to %s from their groups", u.Email, role))
-		u.Role = role
+	// Directory-provisioned users get their groups from SCIM; others from
+	// the claim at each sign-in.
+	if len(mappings) > 0 && !u.Provisioned {
+		u.Groups, u.GroupsFromSSO = groups, true
+	}
+	if why := applyGroupAccess(u, mappings, s.cfg.SCIMDefaultRole); why != "" {
+		s.logEvent(ctx, "user.updated", "", "", u.Email+": "+why)
+	}
+	if u.NoGroupAccess {
+		_ = s.store.UpdateUser(ctx, u)
+		return nil, "Your account isn't in a group allowed to use Armada.", nil
 	}
 	return u, "", nil
 }

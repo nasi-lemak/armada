@@ -82,7 +82,7 @@ func TestSCIMProvisioning(t *testing.T) {
 	}
 	var users []api.User
 	call(t, ts, admin, "GET", "/api/v1/users", nil, &users)
-	if len(users) != 1 || users[0].Role != api.RoleViewer || !users[0].NoPassword || !users[0].Provisioned {
+	if len(users) != 1 || !users[0].NoGroupAccess || !users[0].NoPassword || !users[0].Provisioned {
 		t.Fatalf("provisioned user: %+v", users)
 	}
 
@@ -118,8 +118,9 @@ func TestSCIMProvisioning(t *testing.T) {
 		t.Fatalf("after leaving admins: %s", r)
 	}
 	call(t, ts, scim, "DELETE", "/scim/v2/Groups/"+ops.ID, nil, nil)
-	if r := role(); r != api.RoleViewer {
-		t.Fatalf("after group deleted: %s", r)
+	call(t, ts, admin, "GET", "/api/v1/users", nil, &users)
+	if !users[0].NoGroupAccess {
+		t.Fatalf("in no mapped group but still has access: %+v", users[0])
 	}
 	var grp struct {
 		Members []struct{ Value string } `json:"members"`
@@ -162,7 +163,7 @@ func TestSCIMProvisioning(t *testing.T) {
 	call(t, ts, scim, "PATCH", "/scim/v2/Users/"+manual.ID, patch(map[string]any{"op": "replace", "path": "externalId", "value": "e-9"}), nil)
 	call(t, ts, admin, "GET", "/api/v1/users", nil, &users)
 	for _, u := range users {
-		if u.ID == manual.ID && (u.Role != api.RoleViewer || !u.Provisioned || u.NoPassword) {
+		if u.ID == manual.ID && (!u.NoGroupAccess || !u.Provisioned || u.NoPassword) {
 			t.Fatalf("matched account: %+v", u)
 		}
 	}

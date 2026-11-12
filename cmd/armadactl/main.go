@@ -105,6 +105,11 @@ Users and access:
                        [--reset-2fa]          turn off their authenticator (lost phone)
                        [--unlink-sso]         forget their single sign-on identity
   users delete <id|email>
+  groups [list]                              directory group mappings
+  groups map --group G --role R [--scope K=V]...
+                                             members get role R, limited to matching devices
+                                             (no --scope: the whole fleet)
+  groups unmap <id|group>
   scim tokens [list]                         SCIM tokens for directory sync
   scim tokens create --name N                prints the SCIM URL and token once
   scim tokens revoke <id>
@@ -196,6 +201,8 @@ func (c *cli) run(args []string) error {
 		return c.whoami()
 	case "scim":
 		return c.scim(verb, rest)
+	case "groups", "group":
+		return c.groups(verb, rest)
 	case "users", "user":
 		return c.users(verb, rest)
 	case "me":

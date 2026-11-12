@@ -18,6 +18,11 @@ CREATE TABLE IF NOT EXISTS scim_tokens (
 	created_at   INTEGER NOT NULL,
 	last_used_at INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS group_mappings (
+	id         TEXT PRIMARY KEY,
+	group_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+	spec       TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS scim_groups (
 	id           TEXT PRIMARY KEY,
 	display_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -138,6 +143,49 @@ func (s *Store) ListSCIMGroups(ctx context.Context) ([]*api.SCIMGroup, error) {
 // DeleteSCIMGroup removes a group.
 func (s *Store) DeleteSCIMGroup(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM scim_groups WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	return expectOne(res)
+}
+
+// ---- group mappings ----
+
+// PutGroupMapping creates or replaces a mapping.
+func (s *Store) PutGroupMapping(ctx context.Context, m *api.GroupMapping) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO group_mappings (id, group_name, spec) VALUES (?,?,?)
+		ON CONFLICT(id) DO UPDATE SET group_name=excluded.group_name, spec=excluded.spec`, m.ID, m.Group, mustJSON(m))
+	if isUnique(err) {
+		return ErrConflict
+	}
+	return err
+}
+
+// ListGroupMappings returns all mappings by group name.
+func (s *Store) ListGroupMappings(ctx context.Context) ([]*api.GroupMapping, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT spec FROM group_mappings ORDER BY group_name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*api.GroupMapping
+	for rows.Next() {
+		var spec string
+		if err := rows.Scan(&spec); err != nil {
+			return nil, err
+		}
+		var m api.GroupMapping
+		if err := json.Unmarshal([]byte(spec), &m); err != nil {
+			return nil, err
+		}
+		out = append(out, &m)
+	}
+	return out, rows.Err()
+}
+
+// DeleteGroupMapping removes a mapping.
+func (s *Store) DeleteGroupMapping(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM group_mappings WHERE id=?`, id)
 	if err != nil {
 		return err
 	}

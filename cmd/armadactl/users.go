@@ -105,7 +105,20 @@ func (c *cli) users(verb string, args []string) error {
 			if u.SSO || u.NoPassword {
 				signIn = append(signIn, "SSO")
 			}
-			rows = append(rows, []string{u.ID, u.Email, u.Name, u.Role, scopeString(u.Scope), strings.Join(signIn, "+"), state, last})
+			scope := scopeString(u.Scope)
+			switch {
+			case u.NoGroupAccess:
+				scope, state = "-", "no access"
+			case u.GroupManaged && len(u.Scopes) == 0:
+				scope = "whole fleet (groups)"
+			case u.GroupManaged:
+				var parts []string
+				for _, sc := range u.Scopes {
+					parts = append(parts, scopeString(sc))
+				}
+				scope = strings.Join(parts, " | ") + " (groups)"
+			}
+			rows = append(rows, []string{u.ID, u.Email, u.Name, u.Role, scope, strings.Join(signIn, "+"), state, last})
 		}
 		c.table("ID\tEMAIL\tNAME\tROLE\tSCOPE\tSIGN-IN\tSTATE\tLAST SIGN-IN", rows)
 		return nil
@@ -417,4 +430,75 @@ func (c *cli) scim(verb string, args []string) error {
 		return c.simpleDelete("SCIM token", "/api/v1/scim/tokens/", args)
 	}
 	return fmt.Errorf("unknown scim tokens command %q", sub)
+}
+
+func (c *cli) groups(verb string, args []string) error {
+	switch verb {
+	case "", "list", "ls":
+		var ms []api.GroupMapping
+		if err := c.do("GET", "/api/v1/group-mappings", nil, &ms); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(ms)
+		}
+		var rows [][]string
+		for _, m := range ms {
+			src := "dashboard/CLI"
+			if m.FromFlag {
+				src = "-oidc-group-roles"
+			}
+			rows = append(rows, []string{m.ID, m.Group, m.Role, scopeString(m.Scope), src})
+		}
+		c.table("ID\tGROUP\tROLE\tDEVICES\tSET BY", rows)
+		return nil
+	case "map", "set", "add":
+		fs := flag.NewFlagSet("groups map", flag.ContinueOnError)
+		group := fs.String("group", "", "")
+		role := fs.String("role", "", "")
+		var scope multiFlag
+		fs.Var(&scope, "scope", "")
+		if _, err := parse(fs, args); err != nil {
+			return err
+		}
+		if *group == "" || *role == "" {
+			return errors.New("--group and --role are required")
+		}
+		labels, err := labelsOf(scope)
+		if err != nil {
+			return err
+		}
+		body := api.GroupMapping{Group: *group, Role: *role, Scope: api.Selector{Labels: labels}}
+		var ms []api.GroupMapping
+		if err := c.do("GET", "/api/v1/group-mappings", nil, &ms); err != nil {
+			return err
+		}
+		method, path := "POST", "/api/v1/group-mappings"
+		for _, m := range ms {
+			if strings.EqualFold(m.Group, *group) && !m.FromFlag {
+				method, path = "PUT", "/api/v1/group-mappings/"+url.PathEscape(m.ID)
+			}
+		}
+		var out api.GroupMapping
+		if err := c.do(method, path, body, &out); err != nil {
+			return err
+		}
+		fmt.Fprintf(c.out, "members of %s: %s, %s (members updated now)\n", out.Group, out.Role, scopeString(out.Scope))
+		return nil
+	case "unmap", "delete", "rm":
+		if err := need(args, 1, "mapping id or group"); err != nil {
+			return err
+		}
+		var ms []api.GroupMapping
+		if err := c.do("GET", "/api/v1/group-mappings", nil, &ms); err != nil {
+			return err
+		}
+		for _, m := range ms {
+			if m.ID == args[0] || strings.EqualFold(m.Group, args[0]) {
+				return c.simpleDelete("mapping", "/api/v1/group-mappings/", []string{m.ID})
+			}
+		}
+		return fmt.Errorf("no mapping for %q", args[0])
+	}
+	return fmt.Errorf("unknown groups command %q", verb)
 }

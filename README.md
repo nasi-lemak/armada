@@ -665,6 +665,9 @@ for example `customer=acme`. A scoped user:
 
 So a customer can watch and manage their own devices, while you decide what software they run.
 
+Set scopes by hand on the Users page, or let your directory do it with
+[group mappings](#group-mappings-and-client-accounts), which also lets one person cover several customers.
+
 **Tokens for scripts.** Each user can create personal API tokens (`ut_…`) on **My account** or with
 `armadactl me tokens create --name ci`. A token acts as its owner with the same role and scope, and
 stops working when it is revoked or the user is disabled or deleted. Pass it to the CLI with `--token`
@@ -769,10 +772,9 @@ break-glass.
   is refused.
 - **Anyone from your domains:** set `-oidc-create-role viewer` (or `operator`) with
   `-oidc-allowed-domains`. New people get an account at their first sign-in.
-- **By group:** set `-oidc-group-roles fleet-admins=admin,fleet-ops=operator,support=viewer`, with
-  `-oidc-groups-claim` if the claim isn't called `groups`. Each sign-in sets the user's role from their
-  groups, and people in none of them can't sign in. Removing someone from the group in your directory
-  is then enough. Client scopes (`customer=acme`) are still set in Armada.
+- **By group:** use [group mappings](#group-mappings-and-client-accounts). Each sign-in sets the user's
+  role and devices from the groups claim (`-oidc-groups-claim`, default `groups`), and people in no
+  mapped group can't sign in. Removing someone from the group in your directory is then enough.
 
 Always set `-oidc-allowed-domains` for providers where users can change their own email address (for
 example multi-tenant Entra apps). Users who signed in with SSO can't use a password unless an admin
@@ -797,16 +799,14 @@ and others support it.
      `userName`, `mail` → `emails[type eq "work"].value`).
 3. Use SSO for sign-in (see above). Provisioned users have no password.
 
-**Roles from groups.** Groups the directory pushes are matched by name against `-oidc-group-roles`
-(the same mapping SSO uses), for example `"Fleet Admins=admin,Fleet Ops=operator"`. A provisioned
-user's role is the highest one their groups give, or `-scim-default-role` (default `viewer`) when
-they're in none. Taking someone out of *Fleet Admins* in the directory demotes them here within a
-sync. Their role can't be changed by hand in Armada while group mapping is on. Client scopes
-(`customer=acme`) are still set in Armada.
+**Access from groups.** Groups the directory pushes are matched against the
+[group mappings](#group-mappings-and-client-accounts). Taking someone out of *Fleet Admins* in the
+directory demotes them here at once. While no mappings exist, provisioned users get
+`-scim-default-role` (default `viewer`) and admins set their access by hand.
 
 **Existing accounts.** If the directory sends a user whose email already has an Armada account, it
-takes that account over: from then on, the directory manages it. With group mapping on, the
-account's role then follows its groups. **Put existing admins in your admin group before turning on
+takes that account over: from then on, the directory manages it. With group mappings, the account's
+access then follows its groups. **Put existing admins in a group mapped to admin before turning on
 sync.** The admin token keeps working if anyone gets locked out.
 
 Details:
@@ -817,6 +817,47 @@ Details:
   deletes it here.
 - SCIM tokens can only call `/scim/v2`, not the rest of the API. Revoke them on the Users page. The
   activity log records every directory change as *SCIM (token name)*.
+
+### Group mappings and client accounts
+
+A group mapping gives the members of a directory group a role, and can limit them to some devices.
+That lets your directory run client accounts: one group per customer.
+
+| Group | Role | Devices |
+|---|---|---|
+| Fleet Admins | admin | whole fleet |
+| Fleet Ops | operator | whole fleet |
+| Acme IT | operator | `customer=acme` |
+| Globex IT | viewer | `customer=globex` |
+
+Add them under **Users → Group mappings**, or with the CLI:
+
+```bash
+armadactl groups map --group "Acme IT" --role operator --scope customer=acme
+armadactl groups map --group "Fleet Ops" --role operator
+armadactl groups
+```
+
+Groups come from SCIM (for provisioned users) or from the SSO groups claim at each sign-in. The rules:
+
+- **Fleet-wide groups win.** Someone in any mapped group without a device limit sees the whole fleet,
+  with the highest role among those groups.
+- **Several client groups add up devices, not privileges.** Someone in *Acme IT* and *Globex IT* (an
+  MSP, say) sees both customers' devices, with the **lowest** of the two roles (here viewer). Being
+  an operator for one client never makes them an operator for another. Give people who need more a
+  group of their own.
+- **No mapped group, no access.** Once any mapping exists, a directory user in none of the mapped
+  groups can't sign in, and their live sessions stop working.
+- **Changes apply at once.** Editing a mapping or someone's groups updates every affected account
+  immediately. Their role and devices can't be edited by hand in Armada.
+- **Removing every mapping fails closed.** People whose access came from groups get no access until an
+  admin sets their role and devices by hand, so a client account never falls back to the whole fleet.
+- Admin can't be limited to devices, so admin mappings are always fleet-wide.
+- When a client account in several groups creates an enrollment token, the token's labels must pick
+  one of their customers (for example `customer=globex`).
+
+`-oidc-group-roles` still works. It adds fleet-wide mappings that are shown on the page but can only
+be changed with the flag.
 
 **Security details.** The flow is the authorization-code flow with PKCE and a nonce. The callback must
 come back to the browser that started it (a cookie check). The session token never appears in a URL;
@@ -924,6 +965,7 @@ armadactl deployments create --release <id> [--channel C] [--label K=V] [--devic
 armadactl deployments list|get|pause|resume|advance|retry|complete|abort
 armadactl events [--device ID] [--deployment ID]
 armadactl config list|get|apply -f FILE|enable|disable|delete
+armadactl groups [list|map --group G --role R [--scope K=V]...|unmap G]
 armadactl scim tokens [list|create --name N|revoke ID]
 armadactl whoami
 armadactl users list|create|set|delete      (create --sso-only; set --reset-2fa, --unlink-sso)
@@ -959,7 +1001,7 @@ Add `--json` to any command for machine-readable output.
 | `-oidc-issuer`, `-oidc-client-id` | `ARMADA_OIDC_ISSUER`, `ARMADA_OIDC_CLIENT_ID` | SSO off |
 | | `ARMADA_OIDC_CLIENT_SECRET` | (environment only) |
 | `-oidc-name`, `-oidc-allowed-domains`, `-oidc-create-role`, `-oidc-group-roles`, `-oidc-groups-claim`, `-oidc-scopes`, `-oidc-redirect-url` | `ARMADA_OIDC_…` | see [Single sign-on](#single-sign-on) |
-| `-scim-default-role` | `ARMADA_SCIM_DEFAULT_ROLE` | `viewer` (see [SCIM provisioning](#scim-provisioning)) |
+| `-scim-default-role` | `ARMADA_SCIM_DEFAULT_ROLE` | `viewer`, used only while no group mappings exist (see [SCIM provisioning](#scim-provisioning)) |
 | `-push-hold` | `ARMADA_PUSH_HOLD` | `50s` (agent long-poll; keep below your proxy's idle timeout; `0` disables) |
 
 The data directory holds `armada.db` (SQLite), `artifacts/`, `signing.key`, `license.key`, `secrets.key` and
@@ -1027,6 +1069,7 @@ endpoints use the per-device key issued at enrollment.
 | `GET/POST /api/v1/me/tokens`, `DELETE /api/v1/me/tokens/{id}` | Personal API tokens |
 | `GET/POST /api/v1/users`, `PATCH/DELETE /api/v1/users/{id}` | Users (admin) |
 | `GET/POST /api/v1/scim/tokens`, `DELETE …/{id}` | SCIM tokens (admin) |
+| `GET/POST /api/v1/group-mappings`, `PUT/DELETE …/{id}` | Group mappings: group → role and devices (admin) |
 | `/scim/v2/Users`, `/scim/v2/Groups`, `/scim/v2/ServiceProviderConfig`, `…/ResourceTypes`, `…/Schemas` | SCIM 2.0 for your identity provider (SCIM token) |
 
 ## Security model
@@ -1090,8 +1133,8 @@ deploy/, examples/  service units, compose file, sample agent config and hooks
   heartbeat. Running several replicas on Postgres is designed but not built; see
   [docs/scaling.md](docs/scaling.md).
 - Passkey users have no recovery codes unless they also set up an authenticator app. Losing every
-  passkey means asking an admin for a reset. SAML needs a broker such as Keycloak. SCIM doesn't map
-  directory groups to client scopes yet; set scopes in Armada.
+  passkey means asking an admin for a reset. SAML needs a broker such as Keycloak. A person's role is
+  the same across all the clients they can see; per-client roles need separate accounts.
 - Push wakes one device at a time (actions, logs, check-in). New rollouts still start at each
   device's next heartbeat, which spreads the load. Logs are a snapshot, not a live tail.
 - Android app updates always download the full APK (APKs are compressed, so deltas save little).
