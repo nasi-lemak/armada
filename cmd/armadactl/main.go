@@ -86,6 +86,18 @@ Monitoring and alerts:
                [--client K=V]...             a client's rule: only their devices, only their channels
   rules delete <id>
   alerts [--firing]
+  alerts ack <id> [--note "replacing the disk"]   stop repeat notifications (getting worse still notifies)
+  alerts unack <id>
+
+Maintenance (alerts held and updates paused for the covered devices):
+  maintenance list [--all]
+  maintenance start --device ID|--label K=V|--channel C --for 2h [--note N] [--name N]
+                    [--alerts-only|--updates-only] [--client K=V]...
+  maintenance schedule ... --start "2026-12-01 01:00" --end "2026-12-01 05:00" [--tz Europe/Berlin]
+  maintenance schedule ... --windows 02:00-04:00 [--days sun] [--tz Asia/Singapore] [--end ...]
+                                             recurring: active only inside the windows
+  maintenance end <id>                       end now (or cancel a scheduled one)
+  maintenance delete <id>
   history <device-id> [--range 24h|7d|30d|90d] [--check NAME] [--csv]
   backup [-o FILE]                           download a full server backup (database, keys, artifacts)
   history checks                             check names with history, and how many devices have each
@@ -193,8 +205,13 @@ func (c *cli) run(args []string) error {
 		return c.channels(verb, rest)
 	case "rules", "rule":
 		return c.rules(verb, rest)
-	case "alerts":
+	case "alerts", "alert":
+		if verb == "ack" || verb == "unack" {
+			return c.ackAlert(verb, rest)
+		}
 		return c.alerts(append([]string{verb}, rest...))
+	case "maintenance", "maint":
+		return c.maintenance(verb, rest)
 	case "history":
 		return c.history(verb, rest)
 	case "backup":
@@ -1333,9 +1350,40 @@ func (c *cli) alerts(args []string) error {
 	}
 	var rows [][]string
 	for _, a := range as {
-		rows = append(rows, []string{a.Status, a.Severity, a.RuleName, firstLine(a.Summary), ago(a.StartedAt)})
+		note := ""
+		switch {
+		case a.AckedAt != nil:
+			note = "acked by " + a.AckedBy
+			if a.AckNote != "" {
+				note += ": " + a.AckNote
+			}
+		case a.InMaintenance:
+			note = "in maintenance"
+		}
+		rows = append(rows, []string{a.ID, a.Status, a.Severity, a.RuleName, firstLine(a.Summary), ago(a.StartedAt), note})
 	}
-	c.table("STATUS\tSEVERITY\tRULE\tSUMMARY\tSINCE", rows)
+	c.table("ID\tSTATUS\tSEVERITY\tRULE\tSUMMARY\tSINCE\tNOTE", rows)
+	return nil
+}
+
+func (c *cli) ackAlert(verb string, args []string) error {
+	fs := flag.NewFlagSet("alerts "+verb, flag.ContinueOnError)
+	note := fs.String("note", "", "")
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if err := need(pos, 1, "alert id"); err != nil {
+		return err
+	}
+	var a api.Alert
+	if err := c.do("POST", "/api/v1/alerts/"+pos[0]+"/"+verb, api.AckRequest{Note: *note}, &a); err != nil {
+		return err
+	}
+	if c.json {
+		return c.printJSON(a)
+	}
+	fmt.Fprintf(c.out, "%sed: %s\n", verb, a.RuleName+" — "+firstLine(a.Summary))
 	return nil
 }
 

@@ -49,8 +49,10 @@ It has three parts, all in Go with no external services:
   environment variables.
 - **Signed artifacts.** Every release is ed25519-signed by the server. Agents verify the
   signature and SHA-256 before installing anything. You can pin the key in the agent config.
-- **Maintenance windows.** Devices can be limited to installing at certain local times
-  (`02:00-05:00`).
+- **Install windows.** Devices can be limited to installing at certain local times
+  (`02:00-05:00`, the agent's `maintenance_window`).
+- **Maintenance mode.** Put devices into planned maintenance, one-off or recurring: their alerts are
+  held and rollouts skip them. Firing alerts can be **acknowledged**, which stops repeat notifications.
 - **Remote actions, in seconds.** Reboot, restart the agent, run a command, or ask for a check-in.
   Each agent holds a long-poll connection, so actions reach it within a second or two, even behind
   NAT, without opening ports. `exec` is off by default and each device opts in.
@@ -602,6 +604,76 @@ armadactl rules create --name "Storage failing" --condition health --min-severit
 Set `-public-url` on the server so notifications link to the device page. Secrets aren't returned by
 the API.
 
+### Acknowledging alerts
+
+Acknowledge a firing alert to say someone is on it, from the **Monitoring** page or with
+`armadactl alerts ack <id> --note "replacing the disk"`.
+
+- **Repeat notifications stop** until the alert resolves.
+- **Getting worse still notifies.** If the severity escalates (warning to critical), the alert
+  notifies as usual and the acknowledgement is cleared.
+- `armadactl alerts unack <id>` brings repeats back.
+- **Who can acknowledge:** anyone with the operator role on the alert's device. A client operator can
+  acknowledge their own devices' alerts. Rollout alerts (`update_failed`, `deployment_paused`) need a
+  fleet-wide operator.
+- The activity log records who acknowledged an alert and their note.
+
+### Maintenance
+
+Maintenance marks devices as expected to be down or noisy, for example while you replace a screen,
+move a store, or reboot a site every Sunday night. While a maintenance covers a device:
+
+- **Alerts are held.** No new alerts fire for it. Alerts already firing neither repeat nor resolve, so
+  nobody gets a "resolved" in the middle of the work.
+- **When it ends, alerting resumes.** A problem still present then (the device is still offline, the
+  disk still full) fires right away, and alerts that cleared during the work resolve.
+- **Updates are paused.** Rollouts don't offer it new updates, and the held updates go out when the
+  maintenance ends. An install already under way finishes.
+- You can turn either effect off (`suppress_alerts: false` or `pause_updates: false`, or
+  `--updates-only` and `--alerts-only` in the CLI).
+- The device shows a **maintenance** badge, with the end time, in the device list and on its page.
+  Alerts held this way are marked on the Monitoring page.
+
+A maintenance targets devices by ID, labels or channel. It is either:
+
+- **One-off:** a start (default now) and an end, at most 30 days apart. On a device's page,
+  **Start maintenance** covers just that device for a chosen time.
+- **Recurring:** daily windows on chosen days in a time zone, for example `02:00-04:00` on Sundays in
+  `Asia/Singapore`. It applies only inside the windows, optionally until an end date.
+
+```bash
+armadactl maintenance start --device <id> --for 2h --note "replacing the screen"
+```
+
+```bash
+armadactl maintenance schedule --label site=orchard --start "2026-12-01 01:00" --end "2026-12-01 05:00" --tz Asia/Singapore
+```
+
+```bash
+armadactl maintenance schedule --label customer=acme --windows 02:00-04:00 --days sun --tz Asia/Singapore
+```
+
+```bash
+armadactl maintenance list
+```
+
+```bash
+armadactl maintenance end <id>
+```
+
+**Who can plan maintenance:**
+- **Fleet-wide operators and admins:** any devices.
+- **Client operators:** their own client's devices only. A client's maintenance only ever covers that
+  client's devices, whatever its labels say.
+- **Visibility:** clients see their own maintenance, but not vendor maintenance in the list. Their
+  devices still show the badge.
+- **Activity log:** creating, ending and deleting maintenance are recorded.
+- **Retention:** ended maintenance stays listed for a day (`?all=1` or `--all` for longer), and is
+  removed after 30 days.
+
+This is different from the agent's `maintenance_window`, which only limits when a device installs
+updates.
+
 ### Alerts for client accounts
 
 Client operators set up their own alerts on the **Monitoring** page, or with
@@ -1022,6 +1094,8 @@ armadactl deployments create --release <id> [--channel C] [--label K=V] [--devic
                              [--min-samples 3] [--manual] [--allow-downgrade]
 armadactl deployments list|get|approve|pause|resume|advance|retry|complete|abort
 armadactl events [--device ID] [--deployment ID]
+armadactl alerts [--firing] | alerts ack <id> [--note N] | alerts unack <id>
+armadactl maintenance list|start|schedule|end|delete   (start --device ID --for 2h; schedule --windows 02:00-04:00 --days sun)
 armadactl config list|get|apply -f FILE|enable|disable|delete
 armadactl groups [list|map --group G --role R [--scope K=V]...|unmap G]
 armadactl scim tokens [list|create --name N|revoke ID]
@@ -1129,6 +1203,8 @@ endpoints use the per-device key issued at enrollment.
 | `GET/POST /api/v1/channels`, `PUT/DELETE /api/v1/channels/{id}`, `POST …/{id}/test` | Notification channels (`client_scope` for a client's) |
 | `GET/POST /api/v1/alert-rules`, `PUT/DELETE /api/v1/alert-rules/{id}` | Alert rules (`client_scope` for a client's) |
 | `GET /api/v1/alerts[?status=firing]` | Firing and recent alerts |
+| `POST /api/v1/alerts/{id}/ack` (`{"note": …}`), `POST …/{id}/unack` | Acknowledge a firing alert, or undo it |
+| `GET/POST /api/v1/maintenance`, `POST …/{id}/end`, `DELETE …/{id}` | Maintenance (`?all=1` includes long-ended ones) |
 | `GET /api/v1/devices/{id}/history?range=24h\|7d\|30d\|90d` | A device's check and metric history (raw or hourly) |
 | `GET /api/v1/history/fleet?range=…` | Devices online, health problems and firing alerts over time |
 | `GET /api/v1/history/checks`, `GET /api/v1/history/compare?check=…&label=…` | One check across devices (worst eight) |

@@ -144,3 +144,57 @@ func WindowOpen(s api.Strategy, t time.Time) bool {
 	}
 	return false
 }
+
+// ValidateSchedule checks windows, days and time zone, normalizing day names.
+func ValidateSchedule(s *api.Strategy) error { return validateSchedule(s) }
+
+// WindowEnd returns when the window open at t closes. Back-to-back windows
+// (e.g. whole days in a row) count as one, up to a week ahead. The result
+// is only meaningful when WindowOpen(s, t) is true.
+func WindowEnd(s api.Strategy, t time.Time) time.Time {
+	end := windowClose(s, t)
+	for i := 0; i < 8 && !end.IsZero() && WindowOpen(s, end); i++ {
+		next := windowClose(s, end)
+		if !next.After(end) {
+			break
+		}
+		end = next
+	}
+	return end
+}
+
+func windowClose(s api.Strategy, t time.Time) time.Time {
+	loc := time.UTC
+	if s.TimeZone != "" {
+		if l, err := time.LoadLocation(s.TimeZone); err == nil {
+			loc = l
+		}
+	}
+	lt := t.In(loc)
+	ws, _ := ParseWindows(s.Windows)
+	if len(ws) == 0 {
+		ws = []Window{{0, 24 * 60}}
+	}
+	at := func(dayOffset, minute int) time.Time {
+		return time.Date(lt.Year(), lt.Month(), lt.Day()+dayOffset, 0, minute, 0, 0, loc)
+	}
+	m := lt.Hour()*60 + lt.Minute()
+	var best time.Time
+	for _, w := range ws {
+		var end time.Time
+		switch {
+		case w.Start <= w.End:
+			if m >= w.Start && m < w.End {
+				end = at(0, w.End)
+			}
+		case m >= w.Start:
+			end = at(1, w.End)
+		case m < w.End:
+			end = at(0, w.End)
+		}
+		if end.After(best) {
+			best = end
+		}
+	}
+	return best
+}

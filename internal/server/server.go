@@ -434,6 +434,14 @@ func (s *Server) Handler() http.Handler {
 	operator(fleetOnly, "DELETE /api/v1/devices/{id}", s.handleDeleteDevice)
 	viewer(scopedOK, "GET /api/v1/events", s.handleListEvents)
 	viewer(scopedOK, "GET /api/v1/alerts", s.handleListAlerts)
+	operator(scopedOK, "POST /api/v1/alerts/{id}/ack", s.handleAckAlert)
+	operator(scopedOK, "POST /api/v1/alerts/{id}/unack", s.handleUnackAlert)
+	// Maintenance: fleet operators manage all; client operators their
+	// client's (checked per object in the handlers).
+	viewer(scopedOK, "GET /api/v1/maintenance", s.handleListMaintenance)
+	operator(scopedOK, "POST /api/v1/maintenance", s.handleCreateMaintenance)
+	operator(scopedOK, "POST /api/v1/maintenance/{id}/end", s.handleEndMaintenance)
+	operator(scopedOK, "DELETE /api/v1/maintenance/{id}", s.handleDeleteMaintenance)
 	viewer(scopedOK, "GET /api/v1/history/checks", s.handleHistoryChecks)
 	viewer(scopedOK, "GET /api/v1/history/compare", s.handleHistoryCompare)
 	viewer(fleetOnly, "GET /api/v1/history/fleet", s.handleFleetHistory)

@@ -21,7 +21,7 @@ async function api(method, path, body, token = adminToken) {
 
 async function seed() {
   // Two customers' devices, enrolled and checked in through the agent API.
-  const ids = {};
+  const ids = {}, keys = {};
   for (const customer of ['acme', 'globex']) {
     const tok = await api('POST', '/api/v1/tokens', { labels: { customer } });
     const res = await fetch(base + '/api/v1/agent/enroll', { method: 'POST', body: JSON.stringify({
@@ -30,9 +30,23 @@ async function seed() {
     await fetch(base + '/api/v1/agent/heartbeat', { method: 'POST', headers: { Authorization: 'Bearer ' + er.device_key },
       body: JSON.stringify({ info: { os: 'linux', arch: 'arm64' }, packages: { myapp: '1.0.0' }, health: [], config: [] }) });
     ids[customer] = er.device_id;
+    keys[customer] = er.device_key;
   }
   await api('POST', '/api/v1/users', { email: 'it@acme.example', role: 'operator', scope: { labels: { customer: 'acme' } }, password: 'smoke-test-password' });
-  return ids;
+
+  // globex is in maintenance; acme has a firing alert to acknowledge.
+  await api('POST', '/api/v1/maintenance', { name: 'Smoke maintenance', selector: { device_ids: [ids.globex] },
+    ends_at: new Date(Date.now() + 3600e3).toISOString(), note: 'replacing the screen' });
+  const ch = await api('POST', '/api/v1/channels', { name: 'smoke', type: 'webhook', webhook: { url: 'https://hooks.example.invalid/x' } });
+  await api('POST', '/api/v1/alert-rules', { name: 'Disk', enabled: true, condition: 'health', min_severity: 'warning', channels: [ch.id] });
+  await fetch(base + '/api/v1/agent/heartbeat', { method: 'POST', headers: { Authorization: 'Bearer ' + keys.acme },
+    body: JSON.stringify({ info: { os: 'linux', arch: 'arm64' }, packages: { myapp: '1.0.0' },
+      health: [{ name: 'disk /', kind: 'storage', status: 'critical', message: '99% full' }] }) });
+  for (let i = 0; i < 40; i++) { // the engine evaluates alerts every 10 seconds
+    if ((await api('GET', '/api/v1/alerts?status=firing')).length) return ids;
+    await new Promise(r => setTimeout(r, 500));
+  }
+  throw new Error('no alert fired');
 }
 
 async function visit(page, who, hash, expectHeading) {
@@ -70,8 +84,16 @@ async function visit(page, who, hash, expectHeading) {
       if (!users.some(u => u.includes('it@acme.example'))) fail('admin: users page does not list the client account');
     }
     if (hash === '#/devices') {
-      const n = await admin.$$eval('#view table tbody tr', r => r.length).catch(() => 0);
-      if (n !== 2) fail(`admin sees ${n} devices, expected 2`);
+      const rows = await admin.$$eval('#view table tbody tr', r => r.map(x => x.textContent)).catch(() => []);
+      if (rows.length !== 2) fail(`admin sees ${rows.length} devices, expected 2`);
+      if (!rows.some(r => r.includes('globex') && r.includes('maintenance'))) fail('device list does not mark the device in maintenance');
+    }
+    if (hash === '#/monitoring') {
+      const text = await admin.textContent('#view');
+      if (!text.includes('Smoke maintenance')) fail('monitoring page does not list the maintenance');
+      admin.once('dialog', d => d.accept('looking into it'));
+      await admin.click('#view button:has-text("Acknowledge")').catch(e => fail('no Acknowledge button: ' + e.message));
+      await admin.waitForSelector('#view :text("acked by")', { timeout: 5000 }).catch(() => fail('acknowledgement not shown'));
     }
   }
 
@@ -88,6 +110,12 @@ async function visit(page, who, hash, expectHeading) {
   await visit(client, 'client', '#/devices', 'Devices');
   const devs = await client.$$eval('#view table tbody tr', r => r.map(x => x.textContent));
   if (devs.length !== 1 || !devs[0].includes('acme-kiosk')) fail(`client sees devices: ${JSON.stringify(devs)}`);
+  // Client puts its own device into maintenance from the device page.
+  await visit(client, 'client', '#/devices/' + ids.acme, 'acme-kiosk');
+  await client.click('#view button:has-text("Start maintenance")');
+  await client.waitForSelector('#view button:has-text("End maintenance")', { timeout: 5000 }).catch(() => fail('client could not start maintenance'));
+  await visit(client, 'client', '#/monitoring', 'Monitoring');
+  if ((await client.textContent('#view')).includes('Smoke maintenance')) fail('client sees vendor maintenance');
   await visit(client, 'client', '#/deployments');
   if (!(await client.evaluate(() => location.hash)).match(/^#\/?$/)) fail('client reached a fleet page');
 

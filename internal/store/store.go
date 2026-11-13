@@ -1117,6 +1117,41 @@ func (s *Store) deleteDoc(ctx context.Context, table, id string) error {
 	return expectOne(res)
 }
 
+// PutMaintenance creates or replaces a maintenance window.
+func (s *Store) PutMaintenance(ctx context.Context, m *api.Maintenance) error {
+	m.Active, m.State = false, "" // computed on read
+	return s.putDoc(ctx, "maintenance", m.ID, m.CreatedAt, m)
+}
+
+// GetMaintenance loads a maintenance window.
+func (s *Store) GetMaintenance(ctx context.Context, id string) (*api.Maintenance, error) {
+	var m api.Maintenance
+	return &m, s.getDoc(ctx, "maintenance", id, &m)
+}
+
+// ListMaintenance returns all maintenance windows, oldest first.
+func (s *Store) ListMaintenance(ctx context.Context) ([]*api.Maintenance, error) {
+	return listDocs[api.Maintenance](ctx, s, "maintenance")
+}
+
+// DeleteMaintenance removes a maintenance window.
+func (s *Store) DeleteMaintenance(ctx context.Context, id string) error {
+	return s.deleteDoc(ctx, "maintenance", id)
+}
+
+// GetAlert loads one alert.
+func (s *Store) GetAlert(ctx context.Context, id string) (*api.Alert, error) {
+	var spec string
+	err := s.db.QueryRowContext(ctx, `SELECT spec FROM alerts WHERE id=?`, id).Scan(&spec)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	var a api.Alert
+	return &a, json.Unmarshal([]byte(spec), &a)
+}
+
 // PutChannel creates or replaces a notification channel.
 func (s *Store) PutChannel(ctx context.Context, c *api.NotificationChannel) error {
 	return s.putDoc(ctx, "channels", c.ID, c.CreatedAt, c)

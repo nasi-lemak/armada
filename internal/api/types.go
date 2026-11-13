@@ -64,6 +64,8 @@ type Device struct {
 	Checks []CheckResult `json:"checks,omitempty"`
 	// ParentID is set for peripherals (e.g. BLE devices) reached through a gateway device.
 	ParentID string `json:"parent_id,omitempty"`
+	// Maintenance is set (on read) while a maintenance window covers the device.
+	Maintenance *MaintenanceInfo `json:"maintenance,omitempty"`
 }
 
 // Health statuses, from best to worst.
@@ -754,6 +756,71 @@ type Alert struct {
 	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
 	Count          int        `json:"count"` // occurrences folded into this alert
 	UpdatedAt      time.Time  `json:"updated_at"`
+	// Acknowledged: someone is handling it. Repeat notifications stop until
+	// it resolves or gets worse (a severity escalation clears the ack).
+	AckedBy string     `json:"acked_by,omitempty"`
+	AckedAt *time.Time `json:"acked_at,omitempty"`
+	AckNote string     `json:"ack_note,omitempty"`
+	// InMaintenance is set (on read) when the alert's device is in a
+	// maintenance window: the alert neither repeats nor resolves meanwhile.
+	InMaintenance bool `json:"in_maintenance,omitempty"`
+}
+
+// AckRequest acknowledges a firing alert.
+type AckRequest struct {
+	Note string `json:"note,omitempty"`
+}
+
+// Maintenance is a planned period during which devices are expected to be
+// down or noisy: alerts for them are held and updates are not offered.
+type Maintenance struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Note string `json:"note,omitempty"`
+	// Selector picks the devices (device IDs, labels, channel); it must not be empty.
+	Selector Selector `json:"selector"`
+	// StartsAt/EndsAt bound the maintenance. Both are required for a
+	// one-off window; a recurring one may leave EndsAt empty (no end).
+	StartsAt time.Time  `json:"starts_at"`
+	EndsAt   *time.Time `json:"ends_at,omitempty"`
+	// Windows, Days and TimeZone make it recurring, e.g. "02:00-04:00" on
+	// ["sun"] in "Europe/Berlin": it is active only inside those windows
+	// (and between StartsAt and EndsAt).
+	Windows  string   `json:"windows,omitempty"`
+	Days     []string `json:"days,omitempty"`
+	TimeZone string   `json:"time_zone,omitempty"`
+	// SuppressAlerts holds alerts for covered devices (default true).
+	SuppressAlerts *bool `json:"suppress_alerts,omitempty"`
+	// PauseUpdates stops rollouts offering updates to covered devices (default true).
+	PauseUpdates *bool `json:"pause_updates,omitempty"`
+	// ClientScope is set when a client account created it (or it was made
+	// for a client): it only ever covers that client's devices.
+	ClientScope Selector  `json:"client_scope"`
+	CreatedBy   string    `json:"created_by,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	// Active and State are computed on read: state is scheduled | active |
+	// waiting (recurring, between windows) | ended.
+	Active bool   `json:"active"`
+	State  string `json:"state,omitempty"`
+}
+
+// Holds reports whether the maintenance holds alerts.
+func (m *Maintenance) Holds() bool { return m.SuppressAlerts == nil || *m.SuppressAlerts }
+
+// Pauses reports whether the maintenance pauses update offers.
+func (m *Maintenance) Pauses() bool { return m.PauseUpdates == nil || *m.PauseUpdates }
+
+// Recurring reports whether the maintenance repeats in windows.
+func (m *Maintenance) Recurring() bool { return m.Windows != "" || len(m.Days) > 0 }
+
+// MaintenanceInfo annotates a device covered by an active maintenance.
+type MaintenanceInfo struct {
+	ID     string     `json:"id"`
+	Name   string     `json:"name"`
+	Until  *time.Time `json:"until,omitempty"` // end of the current window, if known
+	Note   string     `json:"note,omitempty"`
+	Alerts bool       `json:"alerts_held"`
+	Update bool       `json:"updates_paused"`
 }
 
 // AlertNotification is what channels receive (and what webhook templates render).

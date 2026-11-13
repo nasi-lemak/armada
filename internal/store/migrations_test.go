@@ -192,6 +192,7 @@ func TestMigrationsAreFrozen(t *testing.T) {
 	want := []string{
 		"1 baseline 6d0348289fe5",
 		"2 index events by time and sessions by expiry 5f0ea4a45395",
+		"3 maintenance windows b1359bbc004d",
 	}
 	var got []string
 	for i, m := range migrations {

@@ -63,6 +63,25 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 		}
 	}
 
+	mn, err := s.activeMaintenance(ctx, now)
+	if err != nil {
+		return err
+	}
+	if !mn.empty() && devices == nil {
+		if devices, err = s.store.ListDevices(ctx); err != nil {
+			return err
+		}
+	}
+	// held: devices in maintenance that holds alerts.
+	held := map[string]bool{}
+	if !mn.empty() {
+		for _, d := range devices {
+			if mn.holdsAlerts(d) {
+				held[d.ID] = true
+			}
+		}
+	}
+
 	want := map[string]candidate{}
 	for _, r := range rules {
 		if !r.Enabled {
@@ -75,7 +94,7 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 				limit = 10 * time.Minute
 			}
 			for _, d := range devices {
-				if !ruleCovers(r, d) || d.LastSeenAt.IsZero() {
+				if !ruleCovers(r, d) || d.LastSeenAt.IsZero() || held[d.ID] {
 					continue
 				}
 				if gone := now.Sub(d.LastSeenAt); gone >= limit {
@@ -89,7 +108,7 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 				minRank = api.HealthRank(api.HealthWarning)
 			}
 			for _, d := range devices {
-				if !ruleCovers(r, d) {
+				if !ruleCovers(r, d) || held[d.ID] {
 					continue
 				}
 				var failing []string
@@ -151,7 +170,13 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 		}
 		escalated := api.HealthRank(c.severity) > api.HealthRank(a.Severity)
 		a.Severity, a.Summary, a.UpdatedAt = c.severity, c.summary, now
-		repeat := c.rule.RepeatMinutes > 0 && now.Sub(a.LastNotifiedAt) >= time.Duration(c.rule.RepeatMinutes)*time.Minute
+		// Acknowledged alerts don't repeat; getting worse notifies and
+		// clears the acknowledgement.
+		repeat := a.AckedAt == nil && c.rule.RepeatMinutes > 0 && now.Sub(a.LastNotifiedAt) >= time.Duration(c.rule.RepeatMinutes)*time.Minute
+		if escalated && a.AckedAt != nil {
+			s.logEvent(ctx, "alert.unacknowledged", a.DeviceID, a.DeploymentID, "acknowledgement cleared: "+a.RuleName+" got worse")
+			a.AckedBy, a.AckedAt, a.AckNote = "", nil, ""
+		}
 		if escalated || repeat {
 			if err := s.fire(ctx, c.rule, a, c.device, now); err != nil {
 				return err
@@ -166,6 +191,9 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 		if _, still := want[a.Key]; still {
 			continue
 		}
+		if held[a.DeviceID] && a.DeploymentID == "" {
+			continue // in maintenance: neither repeats nor resolves until it ends
+		}
 		if a.Condition == api.ConditionUpdateFailed && now.Sub(a.UpdatedAt) < eventAlertWindow {
 			continue // event-based: stays open for the folding window
 		}
@@ -179,6 +207,9 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 			s.logEvent(ctx, "alert.resolved", a.DeviceID, a.DeploymentID, "resolved: "+a.RuleName+" — "+a.Summary)
 			s.dispatch(ctx, r, a, nil)
 		}
+	}
+	if err := s.pruneMaintenance(ctx, now); err != nil {
+		return err
 	}
 	return s.store.PruneAlerts(ctx, now.Add(-30*24*time.Hour))
 }
@@ -199,6 +230,14 @@ func (s *Server) alertOnEvent(ctx context.Context, typ, deviceID, deploymentID, 
 		dev, _ = s.store.GetDevice(ctx, deviceID)
 	}
 	now := s.now()
+	if dev != nil {
+		mn, err := s.activeMaintenance(ctx, now)
+		if err != nil {
+			s.log.Error("maintenance", "err", err)
+		} else if mn.holdsAlerts(dev) {
+			return
+		}
+	}
 	for _, r := range rules {
 		if !r.Enabled || r.Condition != api.ConditionUpdateFailed || !scopeEmpty(r.ClientScope) || (dev != nil && !rollout.Matches(r.Selector, dev)) {
 			continue
@@ -226,7 +265,7 @@ func (s *Server) alertOnEvent(ctx context.Context, typ, deviceID, deploymentID, 
 		existing.Count++
 		existing.Summary = fmt.Sprintf("%d failed updates in this rollout; latest: %s", existing.Count, msg)
 		existing.UpdatedAt = now
-		if r.RepeatMinutes > 0 && now.Sub(existing.LastNotifiedAt) >= time.Duration(r.RepeatMinutes)*time.Minute {
+		if existing.AckedAt == nil && r.RepeatMinutes > 0 && now.Sub(existing.LastNotifiedAt) >= time.Duration(r.RepeatMinutes)*time.Minute {
 			if err := s.fire(ctx, r, existing, dev, now); err != nil {
 				s.log.Error("fire alert", "err", err)
 			}
@@ -720,7 +759,22 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, nonNil(s.visibleAlerts(r.Context(), principalFrom(r.Context()), alerts)))
+	alerts = s.visibleAlerts(r.Context(), principalFrom(r.Context()), alerts)
+	if mn, err := s.activeMaintenance(r.Context(), s.now()); err == nil && !mn.empty() {
+		devs := map[string]*api.Device{}
+		for _, a := range alerts {
+			if a.Status != api.AlertFiring || a.DeviceID == "" {
+				continue
+			}
+			d, ok := devs[a.DeviceID]
+			if !ok {
+				d, _ = s.store.GetDevice(r.Context(), a.DeviceID)
+				devs[a.DeviceID] = d
+			}
+			a.InMaintenance = d != nil && mn.holdsAlerts(d)
+		}
+	}
+	writeJSON(w, http.StatusOK, nonNil(alerts))
 }
 
 // canEditChannel checks the caller may change the channel in the path.

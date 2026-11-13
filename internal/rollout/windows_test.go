@@ -47,3 +47,29 @@ func TestWindowOpen(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowEnd(t *testing.T) {
+	at := func(s string) time.Time {
+		v, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	for _, c := range []struct {
+		s    api.Strategy
+		now  string
+		want string
+	}{
+		{api.Strategy{Windows: "02:00-04:00"}, "2026-11-15T03:00:00Z", "2026-11-15T04:00:00Z"},
+		{api.Strategy{Windows: "22:00-05:00"}, "2026-11-15T23:00:00Z", "2026-11-16T05:00:00Z"},
+		{api.Strategy{Windows: "22:00-05:00"}, "2026-11-16T01:00:00Z", "2026-11-16T05:00:00Z"},
+		// Whole days in a row merge: Saturday and Sunday end Monday 00:00.
+		{api.Strategy{Days: []string{"sat", "sun"}}, "2026-11-14T10:00:00Z", "2026-11-16T00:00:00Z"},
+		{api.Strategy{Windows: "02:00-04:00", TimeZone: "Asia/Singapore"}, "2026-11-14T19:00:00Z", "2026-11-14T20:00:00Z"},
+	} {
+		if got := WindowEnd(c.s, at(c.now)); !got.Equal(at(c.want)) {
+			t.Errorf("%+v at %s: got %s, want %s", c.s, c.now, got.UTC().Format(time.RFC3339), c.want)
+		}
+	}
+}

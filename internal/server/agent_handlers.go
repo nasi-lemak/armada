@@ -191,6 +191,17 @@ func (s *Server) decideUpdate(ctx context.Context, dev *api.Device, busy bool) (
 		cands = append(cands, &rollout.Candidate{Deployment: d, Release: rel, Progress: prog, Closed: !rollout.WindowOpen(d.Strategy, now)})
 	}
 	dec := rollout.Decide(dev, cands, busy)
+	if dec.Offer != nil && dec.Offer.Progress == nil {
+		// A maintenance window holds new offers (an install already under
+		// way, with progress recorded, is left to finish).
+		mn, err := s.activeMaintenance(ctx, now)
+		if err != nil {
+			return nil, err
+		}
+		if i := mn.info(dev); i != nil && i.Update {
+			dec.Offer = nil
+		}
+	}
 	for _, c := range dec.Confirmed {
 		c.Progress.Status = api.UpdateSucceeded
 		c.Progress.Message = "device reports version " + c.Release.Version

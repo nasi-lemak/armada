@@ -129,6 +129,7 @@ func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, d)
 	}
+	s.annotateDevices(r.Context(), out...)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -148,6 +149,7 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.decorate(d)
+	s.annotateDevices(ctx, d)
 	det := deviceDetail{Device: d}
 	var err error
 	if det.Updates, err = s.store.ListDeviceUpdates(ctx, "", d.ID); err != nil {

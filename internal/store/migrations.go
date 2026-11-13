@@ -40,6 +40,13 @@ var migrations = []migration{
 CREATE INDEX IF NOT EXISTS events_time ON events(time);
 CREATE INDEX IF NOT EXISTS sessions_expires ON sessions(expires_at);
 `},
+	{Version: 3, Name: "maintenance windows", SQL: `
+CREATE TABLE IF NOT EXISTS maintenance (
+	id TEXT PRIMARY KEY,
+	spec TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+`},
 	// Append new migrations here.
 }
 

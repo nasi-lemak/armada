@@ -172,7 +172,17 @@ const STATUS_TONE = {
   running: 'info', paused: 'warn', aborted: 'bad', completed: 'ok',
   succeeded: 'ok', failed: 'bad', rolled_back: 'warn', pending: '', downloading: 'info', installing: 'info',
   queued: '', sent: 'info', rejected: 'warn', 'no access': 'bad', awaiting_approval: 'warn', live: 'ok', scheduled: 'info', applied: 'ok', removing: 'info', revoked: 'bad', active: 'ok', attested: 'ok', 'attested (unlocked)': 'warn',
+  maintenance: 'info', acked: 'info', waiting: '', ended: '',
 };
+// untilText describes when a maintenance ends ("until 14:00", "until Nov 20").
+function untilText(ts) { return ts ? 'until ' + fmtTime(ts).replace(/:\d\d$/, '') : 'open-ended'; }
+function maintBadge(mi) {
+  if (!mi) return null;
+  const what = [mi.alerts_held && 'alerts held', mi.updates_paused && 'updates paused'].filter(Boolean).join(', ');
+  const b = badge('maintenance');
+  b.title = `${mi.name} ${untilText(mi.until)} (${what})${mi.note ? ' — ' + mi.note : ''}`;
+  return b;
+}
 function healthRank(s) { return { ok: 0, unknown: 1, warning: 2, critical: 3 }[s] ?? 1; }
 
 function badge(status) {
@@ -382,7 +392,8 @@ async function viewDevices(root) {
         h('td', {}, h('div', {}, h('strong', {}, d.name)), h('div', { class: 'muted mono' }, d.id),
           d.parent_id ? h('div', { class: 'muted' }, 'via ', names[d.parent_id] || d.parent_id) : null,
           d.agent_status ? h('div', { class: 'muted' }, d.agent_status) : null),
-        h('td', {}, badge(d.status), d.license_revoked ? h('div', {}, badge('revoked')) : null),
+        h('td', {}, badge(d.status), d.license_revoked ? h('div', {}, badge('revoked')) : null,
+          d.maintenance ? h('div', {}, maintBadge(d.maintenance)) : null),
         h('td', {}, badge(d.health || 'ok')),
         h('td', {}, d.channel),
         h('td', { class: 'nowrap' }, d.parent_id ? `BLE · ${d.info.model}` : `${d.info.os || '?'}/${d.info.arch || '?'}`),
@@ -460,6 +471,19 @@ async function viewDevice(root, id) {
         queue('wipe', ['confirm=' + id]);
       } }, 'Wipe device')),
     h('p', { class: 'muted' }, 'Wipe is for lost or stolen devices: it erases everything.'));
+  // Maintenance on this device: alerts held and updates paused for a while.
+  const maintNow = h('div', {});
+  const maintFor = h('select', { 'aria-label': 'Maintenance duration' },
+    [['1', '1 hour'], ['2', '2 hours'], ['4', '4 hours'], ['8', '8 hours'], ['24', '1 day'], ['72', '3 days']].map(([v, l]) => h('option', { value: v }, l)));
+  const maintNote = h('input', { placeholder: 'what\'s being done (optional)', 'aria-label': 'Maintenance note' });
+  const maintForm = h('form', { class: 'stack', onsubmit: async e => {
+    e.preventDefault();
+    const ends = new Date(Date.now() + parseInt(maintFor.value, 10) * 3600e3).toISOString();
+    if (await guard(() => api('POST', '/api/v1/maintenance', { selector: { device_ids: [id] }, ends_at: ends, note: maintNote.value.trim() }),
+      'Maintenance started: alerts held and updates paused')) { maintNote.value = ''; refresh(); }
+  } }, h('div', { class: 'inline' }, maintFor, maintNote, h('button', { class: 'btn', type: 'submit' }, 'Start maintenance')));
+  const maintBox = h('div', {}, h('h2', {}, 'Maintenance'), maintNow, maintForm,
+    h('p', { class: 'muted' }, 'While in maintenance, alerts for this device are held and rollouts skip it. Alerts that are still true afterwards fire then.'));
   const queue = (type, args) => guard(() => api('POST', `/api/v1/devices/${id}/actions`, { type, args }), `${type} queued; runs at next check-in`).then(r => r && refresh());
   append(actions, h('h2', {}, 'Actions'),
     h('div', { class: 'btn-row' },
@@ -472,6 +496,8 @@ async function viewDevice(root, id) {
       h('button', { class: 'btn', onclick: () => confirm('Reboot this device?') && queue('reboot') }, 'Reboot'),
       h('button', { class: 'btn', onclick: () => queue('restart-agent') }, 'Restart agent')),
     execBox, androidBox,
+    h('hr', { class: 'sep' }),
+    maintBox,
     h('hr', { class: 'sep' }),
     licenseBox,
     h('button', { class: 'btn danger fleet-only', onclick: async () => {
@@ -503,6 +529,13 @@ async function viewDevice(root, id) {
         ? h('button', { class: 'btn', onclick: () => setRevoked(false) }, 'Reinstate licenses')
         : d.attestation ? h('button', { class: 'btn danger', onclick: () => setRevoked(true) }, 'Revoke licenses') : null,
       h('hr', { class: 'sep' })) : null);
+    maintForm.classList.toggle('hidden', !!d.maintenance);
+    replace(maintNow, d.maintenance ? h('div', { class: 'mb' },
+      h('p', {}, maintBadge(d.maintenance), ' ', h('strong', {}, d.maintenance.name), ' ', untilText(d.maintenance.until),
+        d.maintenance.note ? h('div', { class: 'muted' }, d.maintenance.note) : null),
+      h('button', { class: 'btn', onclick: async () => {
+        if (await guard(() => api('POST', `/api/v1/maintenance/${d.maintenance.id}/end`), 'Maintenance ended')) refresh();
+      } }, 'End maintenance')) : null);
     replace(labelBox, labelChips(d.labels, async k => {
       if (await guard(() => api('PATCH', '/api/v1/devices/' + id, { remove_labels: [k] }))) refresh();
     }));
@@ -510,7 +543,8 @@ async function viewDevice(root, id) {
     replace(head, h('div', { class: 'crumb' }, h('a', { href: '#/devices' }, 'Devices'), ' / ', d.id),
       pageHead(d.name, h('span', {}, badge(d.status),
         d.connected ? [' ', h('span', { title: 'Holding a live connection: actions reach it within seconds' }, badge('live'))] : null,
-        d.license_revoked ? [' ', badge('revoked')] : null, ' last seen ', ago(d.last_seen_at),
+        d.license_revoked ? [' ', badge('revoked')] : null,
+        d.maintenance ? [' ', maintBadge(d.maintenance), ' ', untilText(d.maintenance.until), ' ·'] : null, ' last seen ', ago(d.last_seen_at),
         d.agent_status ? ' · ' + d.agent_status : '')));
     const usage = (free, total, usedBytes) => {
       if (!total) return h('span', { class: 'muted' }, '—');
@@ -1755,8 +1789,60 @@ async function viewMonitoring(root) {
   const section = (title, sub, cls) => h('div', { class: 'page-head mt ' + (cls || '') }, h('div', {}, h('h2', {}, title), h('div', { class: 'muted' }, sub)));
   monitorsBox.classList.add('fleet-only');
 
+  // --- maintenance form ---
+  // Fleet operators plan any maintenance; client operators their client's.
+  const fleetOp = !!me && (ROLE_RANK[me.fleet_role] || 0) >= ROLE_RANK.operator;
+  const canPlan = fleetOp || clientScopes.length > 0;
+  const canEditMaint = sc => fleetOp || (scopeText(sc) !== '' && clientScopes.some(c => scopeText(c) === scopeText(sc)));
+  const maintBox = h('div', { class: 'card flush' });
+  const xFor = fleetOp
+    ? h('input', { placeholder: 'empty = vendor, or customer=acme', 'aria-label': 'Maintenance for client' })
+    : h('select', { 'aria-label': 'Maintenance for client' }, clientScopes.map((sc, i) => h('option', { value: String(i) }, scopeText(sc))));
+  const xForLabel = h('label', { class: fleetOp || clientScopes.length > 1 ? '' : 'hidden' }, 'For client', xFor);
+  const xName = h('input', { placeholder: 'Firmware upgrade at the Orchard store', 'aria-label': 'Maintenance name' });
+  const xLabels = h('input', { required: true, placeholder: 'site=orchard (use customer=* for all of a client\'s devices)', 'aria-label': 'Maintenance devices' });
+  const xKind = h('select', { 'aria-label': 'Maintenance kind' }, [['once', 'One-off'], ['recurring', 'Recurring']].map(([v, l]) => h('option', { value: v }, l)));
+  const xStart = h('input', { type: 'datetime-local', 'aria-label': 'Starts' });
+  const xEnd = h('input', { type: 'datetime-local', 'aria-label': 'Ends' });
+  const xWindows = h('input', { placeholder: '02:00-04:00', 'aria-label': 'Daily windows' });
+  const xDays = h('input', { placeholder: 'sun (empty = every day)', 'aria-label': 'Days' });
+  const xTZ = h('input', { value: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', 'aria-label': 'Time zone' });
+  const xAlerts = h('input', { type: 'checkbox', checked: true });
+  const xUpdates = h('input', { type: 'checkbox', checked: true });
+  const xNote = h('input', { placeholder: 'optional', 'aria-label': 'Maintenance note' });
+  const syncKind = () => {
+    for (const el of [xWindows, xDays, xTZ]) el.closest('label').classList.toggle('hidden', xKind.value !== 'recurring');
+    xEnd.closest('label').firstChild.textContent = xKind.value === 'recurring' ? 'Repeat until (optional)' : 'Ends';
+  };
+  xKind.addEventListener('change', syncKind);
+  const maintForm = h('div', { class: 'card mb' + (canPlan ? '' : ' hidden') }, h('form', { class: 'stack', onsubmit: async e => {
+    e.preventDefault();
+    let labels, clientScope;
+    try {
+      labels = parseLabels(xLabels.value);
+      clientScope = fleetOp ? { labels: parseLabels(xFor.value) } : clientScopes[parseInt(xFor.value || '0', 10)];
+    } catch (err) { return toast(err.message, true); }
+    const body = { name: xName.value.trim(), note: xNote.value.trim(), selector: { labels }, client_scope: clientScope,
+      suppress_alerts: xAlerts.checked, pause_updates: xUpdates.checked };
+    if (xStart.value) body.starts_at = new Date(xStart.value).toISOString();
+    if (xEnd.value) body.ends_at = new Date(xEnd.value).toISOString();
+    if (xKind.value === 'recurring') {
+      body.windows = xWindows.value.trim(); body.time_zone = xTZ.value.trim();
+      body.days = xDays.value.split(/[\s,]+/).filter(Boolean);
+    }
+    if (await guard(() => api('POST', '/api/v1/maintenance', body), 'Maintenance planned')) { xName.value = ''; xNote.value = ''; refresh(); }
+  } },
+  h('div', { class: 'form-grid' }, xForLabel, h('label', {}, 'Name', xName), h('label', {}, 'Devices (labels)', xLabels), h('label', {}, 'Kind', xKind),
+    h('label', {}, 'Starts (empty = now)', xStart), h('label', {}, 'Ends', xEnd),
+    h('label', {}, 'Daily windows', xWindows), h('label', {}, 'Days', xDays), h('label', {}, 'Time zone', xTZ),
+    h('label', { class: 'wide' }, 'Note', xNote)),
+  h('label', { class: 'check' }, xAlerts, 'Hold alerts'), h('label', { class: 'check' }, xUpdates, 'Pause updates'),
+  h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Plan maintenance'))));
+
   append(root, pageHead('Monitoring', 'Health checks on devices, and who gets told when something goes wrong'),
     alertsBox,
+    section('Maintenance', 'Planned work: alerts for the covered devices are held and rollouts skip them. For one device, use its page.'),
+    maintForm, maintBox,
     section('Health monitors', 'Program checks run by every matching device. Hardware checks (storage, temperature, power, battery) run automatically.', 'fleet-only'),
     h('div', { class: 'card mb need-operator fleet-only' }, h('form', { class: 'stack', onsubmit: async e => {
       e.preventDefault();
@@ -1812,7 +1898,7 @@ async function viewMonitoring(root) {
     webhookFields, slackFields, emailFields,
     h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Add channel')))),
     channelsBox);
-  syncType(); syncCond();
+  syncType(); syncCond(); syncKind();
   // A rule can only notify channels of the same client (or vendor channels
   // for vendor rules): offer just those.
   let allChannels = [];
@@ -1826,23 +1912,66 @@ async function viewMonitoring(root) {
   rFor.input.addEventListener(isAdmin ? 'input' : 'change', syncRuleChannels);
 
   async function refresh() {
-    const [alerts, monitors, rules, chs] = await Promise.all([
+    const [alerts, monitors, rules, chs, maint] = await Promise.all([
       api('GET', '/api/v1/alerts'),
       fleetWide() ? api('GET', '/api/v1/monitors') : [],
       api('GET', '/api/v1/alert-rules'),
-      api('GET', '/api/v1/channels')]);
+      api('GET', '/api/v1/channels'),
+      api('GET', '/api/v1/maintenance')]);
     channels = chs;
     const chName = Object.fromEntries(chs.map(c => [c.id, c.name]));
     const firing = alerts.filter(a => a.status === 'firing');
-    replace(alertsBox, h('h2', {}, `Alerts${firing.length ? ` — ${firing.length} firing` : ''}`), table(['Status', 'Severity', 'Rule', 'What', 'Since'],
+    const del = (path, msg) => async () => { if (confirm(msg) && await guard(() => api('DELETE', path)) !== undefined) refresh(); };
+    // Operators can acknowledge: fleet operators any alert, client operators
+    // their devices' (the server checks).
+    const canAck = a => a.status === 'firing' && (fleetOp || (!!a.device_id && !a.deployment_id && clientScopes.length > 0));
+    const ack = a => async () => {
+      const note = prompt(`Acknowledge "${a.rule_name}"? Repeat notifications stop until it resolves or gets worse.\n\nNote (optional):`, '');
+      if (note === null) return;
+      if (await guard(() => api('POST', `/api/v1/alerts/${a.id}/ack`, { note: note.trim() }), 'Acknowledged')) refresh();
+    };
+    const unack = a => async () => { if (await guard(() => api('POST', `/api/v1/alerts/${a.id}/unack`))) refresh(); };
+    const unacked = firing.filter(a => !a.acked_at).length;
+    replace(alertsBox, h('h2', {}, `Alerts${firing.length ? ` — ${firing.length} firing` : ''}${unacked && unacked < firing.length ? `, ${unacked} not acknowledged` : ''}`),
+      table(['Status', 'Severity', 'Rule', 'What', 'Since', ''],
       alerts.slice(0, 50).map(a => h('tr', {},
-        h('td', {}, badge(a.status)), h('td', {}, badge(a.severity)), h('td', {}, a.rule_name),
+        h('td', {}, badge(a.status),
+          a.status === 'firing' && a.acked_at ? h('div', { title: 'Acknowledged ' + ago(a.acked_at) }, badge('acked')) : null,
+          a.status === 'firing' && a.in_maintenance ? h('div', { title: 'Held: the device is in maintenance' }, badge('maintenance')) : null),
+        h('td', {}, badge(a.severity)), h('td', {}, a.rule_name),
         h('td', {}, a.summary, a.count > 1 ? h('span', { class: 'muted' }, ` (×${a.count})`) : null,
           a.device_id ? h('div', {}, h('a', { href: '#/devices/' + a.device_id }, a.device_name || a.device_id)) : null,
           a.deployment_id && !a.device_id ? h('div', {}, h('a', { href: '#/deployments/' + a.deployment_id }, 'rollout')) : null),
-        h('td', { class: 'nowrap' }, ago(a.started_at), a.resolved_at ? h('div', { class: 'muted' }, 'resolved ' + ago(a.resolved_at)) : null))),
+        h('td', { class: 'nowrap' }, ago(a.started_at), a.resolved_at ? h('div', { class: 'muted' }, 'resolved ' + ago(a.resolved_at)) : null),
+        h('td', {}, a.acked_at ? h('div', { class: 'muted' }, 'acked by ' + a.acked_by, a.ack_note ? ': ' + a.ack_note : '') : null,
+          !canAck(a) ? null : a.acked_at
+            ? h('button', { class: 'btn small', onclick: unack(a) }, 'Un-acknowledge')
+            : h('button', { class: 'btn small', onclick: ack(a) }, 'Acknowledge')))),
       'No alerts yet.'));
-    const del = (path, msg) => async () => { if (confirm(msg) && await guard(() => api('DELETE', path)) !== undefined) refresh(); };
+    const whenText = m => {
+      const fmt = ts => new Date(ts).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+      const span = m.ends_at ? `${fmt(m.starts_at)} – ${fmt(m.ends_at)}` : 'from ' + fmt(m.starts_at);
+      if (!m.windows && !(m.days || []).length) return span;
+      return h('div', {}, `${m.windows || 'all day'}${(m.days || []).length ? ' ' + m.days.join(', ') : ''} ${m.time_zone || 'UTC'}`, h('div', { class: 'muted' }, span));
+    };
+    const targets = m => [
+      (m.selector.device_ids || []).length ? h('span', { class: 'chip' }, m.selector.device_ids.length === 1 ? m.selector.device_ids[0] : m.selector.device_ids.length + ' devices') : null,
+      m.selector.channel ? h('span', { class: 'chip' }, 'channel ' + m.selector.channel) : null,
+      ...sortedEntries(m.selector.labels).map(([k, v]) => h('span', { class: 'chip' }, k + '=' + v))];
+    replace(maintBox, table(['Maintenance', 'State', 'Devices', 'When', 'Effect', ''],
+      maint.map(m => h('tr', {},
+        h('td', {}, h('strong', {}, m.name), m.note ? h('div', { class: 'muted' }, m.note) : null,
+          h('div', { class: 'muted' }, [scopeText(m.client_scope) ? 'for ' + scopeText(m.client_scope) : null, m.created_by ? 'by ' + m.created_by : null].filter(Boolean).join(' · '))),
+        h('td', {}, badge(m.state)),
+        h('td', {}, h('div', { class: 'chips' }, targets(m))),
+        h('td', { class: 'nowrap' }, whenText(m)),
+        h('td', {}, [m.suppress_alerts !== false && 'alerts held', m.pause_updates !== false && 'updates paused'].filter(Boolean).join(', ')),
+        h('td', {}, !canEditMaint(m.client_scope) ? null : h('div', { class: 'btn-row' },
+          m.state !== 'ended' ? h('button', { class: 'btn small', onclick: async () => {
+            if (await guard(() => api('POST', `/api/v1/maintenance/${m.id}/end`), m.state === 'scheduled' ? 'Cancelled' : 'Ended')) refresh();
+          } }, m.state === 'scheduled' ? 'Cancel' : 'End now') : null,
+          h('button', { class: 'btn small danger', onclick: del('/api/v1/maintenance/' + m.id, `Delete maintenance ${m.name}?`) }, 'Delete'))))),
+      'No maintenance planned.'));
     replace(monitorsBox, table(['Monitor', 'Check', 'Devices', ''],
       monitors.map(m => h('tr', {},
         h('td', {}, h('strong', {}, m.name), ' ', badge(m.enabled ? 'enabled' : 'disabled')),
