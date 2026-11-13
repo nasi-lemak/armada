@@ -106,6 +106,17 @@ without --yes they only preview what would happen):
   bulk list                                  recent bulk operations
   bulk get <id>                              per-device progress
 
+Certificates on devices (the agent's managed_certs; keys never leave the devices):
+  certs list [--expiring 30] [--waiting] [--label K=V]...
+  certs renew --device ID|--label K=V|--all [--target mosquitto] [--key-type rsa-2048]
+              [--cn '{{.Name}}.acme.example'] [--dns NAME]... [--ip IP]...
+                                             new key and CSR on each device (default: same names as now)
+  certs csrs [--label K=V] [-o csrs.zip]     the CSRs waiting to be signed, with a manifest
+  certs email --to ADDR [--to ADDR]... --all|--label K=V [--note N]
+  certs upload FILE...                       signed certificates (any order, chains welcome): matched,
+                                             checked and installed, with rollback if the service fails
+  certs cancel <device-id> <service>
+
 Customer reports:
   report [--label K=V]... [--period last-month|this-month|last-week|this-week|last-7d|last-30d]
          [--from 2026-10-01 --to 2026-10-31] [--tz Asia/Singapore] [--format csv|html -o FILE]
@@ -242,6 +253,8 @@ func (c *cli) run(args []string) error {
 		return c.bulk(verb, rest)
 	case "report", "reports":
 		return c.report(verb, rest)
+	case "certs", "cert", "certificates":
+		return c.certs(verb, rest)
 	case "history":
 		return c.history(verb, rest)
 	case "backup":

@@ -191,6 +191,7 @@ const STATUS_TONE = {
   queued: '', sent: 'info', rejected: 'warn', 'no access': 'bad', awaiting_approval: 'warn', live: 'ok', scheduled: 'info', applied: 'ok', removing: 'info', revoked: 'bad', active: 'ok', attested: 'ok', 'attested (unlocked)': 'warn',
   maintenance: 'info', acked: 'info', waiting: '', ended: '',
   spare: '', repair: 'warn', retired: '', skipped: '', applied: 'ok',
+  requested: 'info', csr_ready: 'warn', installing: 'info', installed: 'ok', cancelled: '',
 };
 const LIFECYCLE_TEXT = { active: 'in service', spare: 'spare', repair: 'in repair', retired: 'retired' };
 function lifecycleBadge(d) {
@@ -283,6 +284,7 @@ const routes = [
   [/^#\/config$/, 'config', viewConfig, 'fleet'],
   [/^#\/activity$/, 'activity', viewActivity],
   [/^#\/reports$/, 'reports', viewReports],
+  [/^#\/certificates$/, 'certificates', viewCertificates],
   [/^#\/users$/, 'users', viewUsers, 'admin'],
   [/^#\/account$/, 'account', viewAccount],
 ];
@@ -585,10 +587,11 @@ async function viewDevice(root, id) {
   const periphCard = h('div', { class: 'card flush hidden' });
   const logs = logsCard(id, () => dev);
   const configCard = h('div', { class: 'card flush hidden fleet-only' });
+  const certCard = h('div', { class: 'card flush hidden' });
   const hist = historySection(id);
   append(root, head,
     h('div', { class: 'grid side' },
-      h('div', { class: 'stack' }, info, healthCard, periphCard, configCard, logs.el, updates, actionLog),
+      h('div', { class: 'stack' }, info, healthCard, periphCard, configCard, certCard, logs.el, updates, actionLog),
       h('div', { class: 'stack' }, meta, actions, lifeCard, events)),
     hist.el);
   let dev;
@@ -735,6 +738,13 @@ async function viewDevice(root, id) {
   async function refresh() {
     const det = await api('GET', '/api/v1/devices/' + id);
     dev = det.device;
+    certCard.classList.toggle('hidden', !(det.certificates || []).length);
+    replace(certCard, h('h2', {}, 'Certificates ', h('a', { href: '#/certificates', class: 'muted' }, '(manage)')),
+      table(['Service', 'Certificate', 'Expires', 'Renewal'], (det.certificates || []).map(c => h('tr', {},
+        h('td', { class: 'mono' }, c.target),
+        h('td', {}, c.installed ? [c.installed.common_name, h('div', { class: 'muted' }, c.installed.issuer)] : h('span', { class: 'bad' }, c.error || 'no certificate')),
+        h('td', { class: 'nowrap' }, expiryBadge(c)),
+        h('td', {}, c.renewal ? renewalBadge(c.renewal) : '—')))));
     hist.load();
     const d = dev, m = d.metrics;
     if (document.activeElement !== nameIn) nameIn.value = d.name;
@@ -1323,6 +1333,163 @@ async function viewEnroll(root) {
   }
   await guard(refresh);
   return refresh;
+}
+
+// ---------- certificates ----------
+
+const RENEWAL_TEXT = { requested: 'making CSR', csr_ready: 'waiting for signed certificate', installing: 'installing', installed: 'installed', failed: 'failed', cancelled: 'cancelled' };
+function expiryBadge(c) {
+  if (c.days_left === undefined || c.days_left === null) return h('span', { class: 'badge bad' }, h('span', { class: 'dot bad' }), 'unreadable');
+  const d = c.days_left;
+  const tone = d <= 7 ? 'bad' : d <= 30 ? 'warn' : 'ok';
+  return h('span', { class: 'badge ' + tone }, h('span', { class: 'dot ' + tone }), d < 0 ? `expired ${-d}d ago` : `${d} days`);
+}
+function renewalBadge(r) {
+  if (!r) return null;
+  const b = badge(r.status);
+  b.lastChild.textContent = RENEWAL_TEXT[r.status] || r.status;
+  return b;
+}
+function saveText(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type: type || 'application/x-pem-file' }));
+  const a = h('a', { href: url, download: name.replace(/[^\w.-]+/g, '-') });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+async function viewCertificates(root) {
+  const search = h('input', { type: 'search', placeholder: 'Search device, service, name, issuer…', 'aria-label': 'Search certificates' });
+  const filter = h('select', { 'aria-label': 'Certificate filter' }, [['', 'All certificates'], ['30', 'Expiring within 30 days'],
+    ['csr_ready', 'Waiting for a signed certificate'], ['active', 'Renewal in progress'], ['failed', 'Renewal failed']].map(([v, l]) => h('option', { value: v }, l)));
+  const list = h('div', { class: 'card flush' });
+  const count = h('span', {});
+  const selected = new Set();
+  let certsList = [];
+
+  // Bulk: request CSRs, download or email the waiting ones.
+  const keyType = h('select', { 'aria-label': 'Key type' }, [['', 'Key: same as now'], ['ecdsa-p256', 'ECDSA P-256'], ['ecdsa-p384', 'ECDSA P-384'],
+    ['rsa-2048', 'RSA 2048'], ['rsa-3072', 'RSA 3072'], ['rsa-4096', 'RSA 4096']].map(([v, l]) => h('option', { value: v }, l)));
+  const cnIn = h('input', { placeholder: 'CN: same as now (or e.g. {{.Name}}.acme.example)', 'aria-label': 'Common name', size: 34 });
+  const dnsIn = h('input', { placeholder: 'DNS names: same as now', 'aria-label': 'DNS names', size: 26 });
+  const label = h('strong', {});
+  const chosen = () => certsList.filter(c => selected.has(c.id));
+  const byTarget = cs => cs.reduce((m, c) => ((m[c.target] = m[c.target] || []).push(c.device_id), m), {});
+  const requestCSRs = async () => {
+    const cs = chosen();
+    const busy = cs.filter(c => c.renewal && ['requested', 'csr_ready', 'installing'].includes(c.renewal.status));
+    if (!confirm(`Make a new key and CSR on ${cs.length - busy.length} device(s)? The keys stay on the devices.` + (busy.length ? `\n\n${busy.length} already have a renewal in progress and are skipped.` : ''))) return;
+    let started = 0; const skipped = [];
+    for (const [target, ids] of Object.entries(byTarget(cs))) {
+      const body = { selector: { device_ids: ids }, targets: [target], key_type: keyType.value,
+        subject: { common_name: cnIn.value.trim() }, dns_names: dnsIn.value.split(/[\s,]+/).filter(Boolean) };
+      const r = await guard(() => api('POST', '/api/v1/certificates/renew', body));
+      if (!r) return;
+      started += r.started.length; skipped.push(...r.skipped);
+    }
+    toast(`CSRs requested on ${started} device(s)` + (skipped.length ? `; ${skipped.length} skipped: ${skipped[0].reason}` : ''), !started);
+    selected.clear(); refresh();
+  };
+  const waitingQuery = () => {
+    const cs = chosen().filter(c => c.renewal && c.renewal.status === 'csr_ready');
+    return { cs, q: cs.map(c => 'device_id=' + encodeURIComponent(c.device_id)).join('&') };
+  };
+  const downloadCSRs = async () => {
+    const { cs, q } = selected.size ? waitingQuery() : { cs: certsList.filter(c => c.renewal && c.renewal.status === 'csr_ready'), q: '' };
+    if (!cs.length) return toast('None of these are waiting for a signed certificate (request CSRs first).', true);
+    await guard(async () => {
+      const res = await fetch('/api/v1/certificates/csrs' + (q ? '?' + q : ''), { headers: { Authorization: 'Bearer ' + token } });
+      if (!res.ok) throw new APIError(res.status, (await res.json().catch(() => ({}))).error || 'download failed');
+      const url = URL.createObjectURL(await res.blob());
+      const a = h('a', { href: url, download: `csrs-${new Date().toISOString().slice(0, 10)}.zip` });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    });
+  };
+  const emailCSRs = async () => {
+    const { cs } = selected.size ? waitingQuery() : { cs: certsList.filter(c => c.renewal && c.renewal.status === 'csr_ready') };
+    if (!cs.length) return toast('None of these are waiting for a signed certificate (request CSRs first).', true);
+    const to = prompt(`Email ${cs.length} CSR(s) to whoever signs them (comma-separated addresses):`);
+    if (!to) return;
+    const note = prompt('A note to include (optional), e.g. your ticket number:', '') || '';
+    const ids = [...new Set(cs.map(c => c.device_id))];
+    if (await guard(() => api('POST', '/api/v1/certificates/email', { selector: { device_ids: ids }, recipients: to.split(/[\s,;]+/).filter(Boolean), note }), 'CSRs emailed')) refresh();
+  };
+  const bar = h('div', { class: 'bulk-bar need-operator hidden' }, label, keyType, cnIn, dnsIn,
+    h('button', { class: 'btn primary', onclick: requestCSRs }, 'Request CSRs'),
+    h('button', { class: 'btn', onclick: () => { selected.clear(); render(); } }, 'Clear selection'));
+
+  // Upload signed certificates: paste or files, any number, any order.
+  const pemIn = h('textarea', { placeholder: '-----BEGIN CERTIFICATE-----\n… paste certificates here (with their chain if you have it), or choose files', 'aria-label': 'Signed certificates', rows: 4 });
+  const filesIn = h('input', { type: 'file', multiple: true, accept: '.pem,.crt,.cer,.txt', 'aria-label': 'Certificate files' });
+  const uploadOut = h('div', {});
+  const upload = async e => {
+    e.preventDefault();
+    let text = pemIn.value;
+    for (const f of filesIn.files) text += '\n' + await f.text();
+    if (!text.trim()) return toast('Paste certificates or choose files first.', true);
+    const r = await guard(() => api('POST', '/api/v1/certificates/upload', { pem: text }));
+    if (!r) return;
+    pemIn.value = ''; filesIn.value = '';
+    replace(uploadOut, h('div', { class: 'callout stack mt' },
+      h('div', {}, h('strong', {}, `${r.installing.length} certificate(s) sent to devices to install`), r.installing.length ? ': ' + r.installing.map(c => `${c.device_name} · ${c.target}`).join(', ') : ''),
+      r.rejected.length ? h('div', {}, h('strong', {}, `${r.rejected.length} not used:`), h('ul', {}, r.rejected.map(x => h('li', {}, `${x.subject}${x.serial ? ' (serial ' + x.serial + ')' : ''}: ${x.reason}`)))) : null));
+    refresh();
+  };
+  append(root, pageHead('Certificates', count),
+    h('div', { class: 'card mb need-operator' }, h('h2', {}, 'Upload signed certificates'),
+      h('p', { class: 'muted' }, 'Each certificate is matched to the device whose CSR it was issued for, checked, and installed there; the service is reloaded and the old certificate restored if anything fails.'),
+      h('form', { class: 'stack', onsubmit: upload }, pemIn, h('div', { class: 'inline' }, filesIn, h('button', { class: 'btn primary', type: 'submit' }, 'Upload and install'))),
+      uploadOut),
+    h('div', { class: 'toolbar' }, search, filter,
+      h('button', { class: 'btn need-operator', onclick: downloadCSRs, title: 'The selected waiting CSRs, or all of them' }, 'Download CSRs'),
+      h('button', { class: 'btn need-operator', onclick: emailCSRs, title: 'Email the selected waiting CSRs, or all of them' }, 'Email CSRs…')),
+    bar, h('div', { class: 'spacer' }), list);
+
+  function render() {
+    const q = search.value.trim().toLowerCase(), f = filter.value;
+    const shown = certsList.filter(c => {
+      const r = c.renewal;
+      if (f === '30' && !(c.days_left === undefined || c.days_left === null || c.days_left <= 30)) return false;
+      if (f === 'csr_ready' && !(r && r.status === 'csr_ready')) return false;
+      if (f === 'active' && !(r && ['requested', 'csr_ready', 'installing'].includes(r.status))) return false;
+      if (f === 'failed' && !(r && r.status === 'failed')) return false;
+      const i = c.installed || {};
+      return !q || [c.device_name, c.target, i.common_name, i.issuer, ...(i.dns_names || [])].some(v => (v || '').toLowerCase().includes(q));
+    });
+    for (const id of [...selected]) if (!certsList.some(c => c.id === id)) selected.delete(id);
+    bar.classList.toggle('hidden', !selected.size);
+    replace(label, `${selected.size} selected`);
+    const soon = certsList.filter(c => c.days_left === undefined || c.days_left === null || c.days_left <= 30).length;
+    const waiting = certsList.filter(c => c.renewal && c.renewal.status === 'csr_ready').length;
+    replace(count, `${certsList.length} managed certificates · ${soon} expiring within 30 days · ${waiting} waiting for a signed certificate`);
+    const allBox = h('input', { type: 'checkbox', 'aria-label': 'Select all shown', checked: shown.length > 0 && shown.every(c => selected.has(c.id)),
+      onclick: e => { for (const c of shown) e.target.checked ? selected.add(c.id) : selected.delete(c.id); render(); } });
+    replace(list, table([h('span', { class: 'need-operator' }, allBox), 'Device', 'Service', 'Certificate', 'Expires', 'Renewal', ''],
+      shown.map(c => {
+        const i = c.installed, r = c.renewal;
+        return h('tr', { class: selected.has(c.id) ? 'selected' : '' },
+          h('td', { class: 'need-operator pick' }, h('input', { type: 'checkbox', 'aria-label': 'Select ' + c.device_name + ' ' + c.target, checked: selected.has(c.id),
+            onchange: e => { e.target.checked ? selected.add(c.id) : selected.delete(c.id); render(); } })),
+          h('td', {}, h('a', { href: '#/devices/' + c.device_id }, c.device_name)),
+          h('td', { class: 'mono' }, c.target),
+          h('td', {}, i ? [h('div', {}, i.common_name || i.subject), h('div', { class: 'muted' }, [...(i.dns_names || []), ...(i.ip_addresses || [])].join(', ')),
+            h('div', { class: 'muted' }, `${i.issuer} · ${i.key_type}`), i.key_matches ? null : h('div', { class: 'bad' }, 'the key file does not match this certificate')]
+            : h('span', { class: 'bad' }, c.error || 'no certificate')),
+          h('td', { class: 'nowrap' }, expiryBadge(c), i ? h('div', { class: 'muted' }, new Date(i.not_after).toLocaleDateString()) : null),
+          h('td', {}, r ? [renewalBadge(r), h('div', { class: 'muted' }, `${r.requested_by || ''} · ${ago(r.updated_at)}`),
+            r.message ? h('div', { class: 'bad', title: r.message }, r.message.length > 120 ? r.message.slice(0, 120) + '…' : r.message) : null] : h('span', { class: 'muted' }, '—')),
+          h('td', {}, h('div', { class: 'btn-row' },
+            r && r.status === 'csr_ready' ? h('button', { class: 'btn small', onclick: () => saveText(`${c.device_name}_${c.target}.csr`, r.csr) }, 'CSR') : null,
+            r && ['requested', 'csr_ready'].includes(r.status) ? h('button', { class: 'btn small need-operator', onclick: async () => {
+              if (confirm(`Cancel the ${c.target} renewal on ${c.device_name}?`) && await guard(() => api('POST', `/api/v1/certificates/${c.device_id}/${c.target}/cancel`), 'Cancelled')) refresh();
+            } }, 'Cancel') : null)));
+      }), 'No managed certificates yet. List them in the agent\'s managed_certs on each device (see the README).'));
+  }
+  search.addEventListener('input', render);
+  filter.addEventListener('change', render);
+  async function refresh() { certsList = await api('GET', '/api/v1/certificates'); render(); }
+  await guard(refresh);
+  return async () => { if (!root.contains(document.activeElement) || document.activeElement === document.body) await refresh(); };
 }
 
 // ---------- customer reports ----------
@@ -2108,11 +2275,12 @@ async function viewMonitoring(root) {
   };
   const rFor = forClient(), cFor = forClient();
   const rName = h('input', { required: true, placeholder: 'Storage failing', 'aria-label': 'Rule name' });
-  const rCond = h('select', { 'aria-label': 'Condition' }, [['health', 'Health check failing'], ['device_offline', 'Device offline'],
+  const rCond = h('select', { 'aria-label': 'Condition' }, [['health', 'Health check failing'], ['device_offline', 'Device offline'], ['cert_expiry', 'Certificate expiring'],
     ...(isAdmin ? [['update_failed', 'Update failed'], ['deployment_paused', 'Rollout paused']] : [])].map(([v, l]) => h('option', { value: v }, l)));
   const rSev = h('select', { 'aria-label': 'Minimum severity' }, ['critical', 'warning'].map(v => h('option', { value: v }, v)));
   const rKinds = h('input', { placeholder: 'any, or storage power temperature', 'aria-label': 'Check kinds' });
   const rOffline = h('input', { type: 'number', min: '1', value: '10', 'aria-label': 'Offline minutes' });
+  const rExpiry = h('input', { type: 'number', min: '1', max: '365', value: '30', 'aria-label': 'Days before expiry' });
   const rLabels = h('input', { placeholder: 'all devices, or site=sg', 'aria-label': 'Rule labels' });
   const rRepeat = h('input', { type: 'number', min: '0', value: '0', 'aria-label': 'Repeat minutes' });
   const rResolved = h('input', { type: 'checkbox', checked: true });
@@ -2121,6 +2289,7 @@ async function viewMonitoring(root) {
     rSev.closest('label').classList.toggle('hidden', rCond.value !== 'health');
     rKinds.closest('label').classList.toggle('hidden', rCond.value !== 'health');
     rOffline.closest('label').classList.toggle('hidden', rCond.value !== 'device_offline');
+    rExpiry.closest('label').classList.toggle('hidden', rCond.value !== 'cert_expiry');
   };
   rCond.addEventListener('change', syncCond);
 
@@ -2236,11 +2405,13 @@ async function viewMonitoring(root) {
       if (!chosen.length) return toast('Pick at least one channel (add one below first).', true);
       const body = { name: rName.value.trim(), enabled: true, condition: rCond.value, selector: { labels }, channels: chosen,
         min_severity: rSev.value, check_kinds: rKinds.value.split(/[\s,]+/).filter(Boolean), offline_minutes: parseInt(rOffline.value || '10', 10),
+        expiry_days: rCond.value === 'cert_expiry' ? parseInt(rExpiry.value || '30', 10) : 0,
         repeat_minutes: parseInt(rRepeat.value || '0', 10), notify_resolved: rResolved.checked, client_scope: clientScope };
       if (await guard(() => api('POST', '/api/v1/alert-rules', body), 'Rule added')) { rName.value = ''; refresh(); }
     } },
     h('div', { class: 'form-grid' }, rFor.label, h('label', {}, 'Name', rName), h('label', {}, 'When', rCond), h('label', {}, 'At least', rSev),
       h('label', {}, 'Only check kinds', rKinds), h('label', { class: 'hidden' }, 'Offline for (minutes)', rOffline),
+      h('label', { class: 'hidden' }, 'Days before expiry (critical within 7)', rExpiry),
       h('label', {}, 'Devices (labels)', rLabels), h('label', {}, 'Repeat every (minutes, 0 = never)', rRepeat)),
     h('label', { class: 'check' }, rResolved, 'Also notify when it resolves'),
     h('div', {}, h('div', { class: 'muted mb' }, 'Notify:'), rChannels),
@@ -2349,7 +2520,7 @@ async function viewMonitoring(root) {
           } }, m.enabled ? 'Disable' : 'Enable'),
           h('button', { class: 'btn small danger', onclick: del('/api/v1/monitors/' + m.id, `Delete monitor ${m.name}?`) }, 'Delete'))))),
       'No program monitors yet.'));
-    const condLabel = { health: 'health', device_offline: 'offline', update_failed: 'update failed', deployment_paused: 'rollout paused' };
+    const condLabel = { health: 'health', device_offline: 'offline', update_failed: 'update failed', deployment_paused: 'rollout paused', cert_expiry: 'certificate expiring' };
     const forCell = sc => scopeText(sc) ? labelChips(sc.labels) : h('span', { class: 'muted' }, 'vendor-wide');
     replace(rulesBox, table(['Rule', 'For', 'When', 'Devices', 'Notify', ''],
       rules.map(r => h('tr', {},
@@ -2357,7 +2528,8 @@ async function viewMonitoring(root) {
         h('td', {}, forCell(r.client_scope)),
         h('td', {}, condLabel[r.condition] || r.condition,
           r.condition === 'health' ? h('div', { class: 'muted' }, `${r.min_severity || 'critical'}+${(r.check_kinds || []).length ? ' · ' + r.check_kinds.join(', ') : ''}`) : null,
-          r.condition === 'device_offline' ? h('div', { class: 'muted' }, `${r.offline_minutes || 10} min`) : null),
+          r.condition === 'device_offline' ? h('div', { class: 'muted' }, `${r.offline_minutes || 10} min`) : null,
+          r.condition === 'cert_expiry' ? h('div', { class: 'muted' }, `${r.expiry_days || 30} days before`) : null),
         h('td', {}, labelChips(r.selector.labels)),
         h('td', {}, r.channels.map(id => chName[id] || id).join(', ')),
         h('td', {}, !canEditScope(r.client_scope) ? null : h('div', { class: 'btn-row' },

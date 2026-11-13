@@ -102,6 +102,9 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, dev *ap
 	}
 
 	s.recordHistory(ctx, dev, now)
+	if req.Certs != nil {
+		s.syncCerts(ctx, dev, req.Certs, now)
+	}
 
 	resp := api.HeartbeatResponse{HeartbeatIntervalSeconds: int(s.cfg.HeartbeatInterval.Seconds())}
 
@@ -374,6 +377,9 @@ func (s *Server) handleActionResult(w http.ResponseWriter, r *http.Request, dev 
 	a, _ := s.store.GetAction(r.Context(), id)
 	if a != nil {
 		s.event(r.Context(), "action."+res.Status, dev.ID, "", fmt.Sprintf("%s: action %s %s (exit %d)", dev.Name, a.Type, res.Status, res.ExitCode))
+		if a.Type == api.ActionCertCSR || a.Type == api.ActionCertInstall {
+			s.certActionResult(r.Context(), dev, a, res)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

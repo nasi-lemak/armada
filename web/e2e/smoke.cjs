@@ -35,6 +35,14 @@ async function seed() {
   }
   await api('POST', '/api/v1/users', { email: 'it@acme.example', role: 'operator', scope: { labels: { customer: 'acme' } }, password: 'smoke-test-password' });
 
+  // acme's broker reports a Mosquitto certificate expiring in 20 days.
+  const day = 24 * 3600e3;
+  await fetch(base + '/api/v1/agent/heartbeat', { method: 'POST', headers: { Authorization: 'Bearer ' + keys.acme },
+    body: JSON.stringify({ info: { os: 'linux', arch: 'arm64' }, packages: { myapp: '1.0.0' }, certs: [{ target: 'mosquitto', info: {
+      subject: 'CN=broker.acme.example,O=Acme', common_name: 'broker.acme.example', subject_fields: { common_name: 'broker.acme.example', organization: 'Acme' },
+      dns_names: ['broker.acme.example'], issuer: 'CN=Acme Issuing CA', serial: '1F', key_type: 'ecdsa-p256', fingerprint: 'ab12', key_matches: true,
+      not_before: new Date(Date.now() - 345 * day).toISOString(), not_after: new Date(Date.now() + 20 * day).toISOString() } }] }) });
+
   // globex is in maintenance; acme has a firing alert to acknowledge.
   await api('POST', '/api/v1/maintenance', { name: 'Smoke maintenance', selector: { device_ids: [ids.globex] },
     ends_at: new Date(Date.now() + 3600e3).toISOString(), note: 'replacing the screen' });
@@ -77,7 +85,7 @@ async function visit(page, who, hash, expectHeading) {
   await admin.waitForSelector('#app:not(.hidden)', { timeout: 10000 });
   const pages = [['#/', 'Fleet overview'], ['#/devices', 'Devices'], ['#/devices/' + ids.acme, 'acme-kiosk'],
     ['#/deployments', 'Deployments'], ['#/releases', 'Releases'], ['#/monitoring', 'Monitoring'], ['#/config', 'Configuration'],
-    ['#/apps', 'Apps'], ['#/enroll', 'Enrollment'], ['#/activity', 'Activity'], ['#/reports', 'Reports'], ['#/users', 'Users'], ['#/account', 'My account']];
+    ['#/apps', 'Apps'], ['#/enroll', 'Enrollment'], ['#/activity', 'Activity'], ['#/certificates', 'Certificates'], ['#/reports', 'Reports'], ['#/users', 'Users'], ['#/account', 'My account']];
   for (const [hash, heading] of pages) {
     await visit(admin, 'admin', hash, heading);
     if (hash === '#/users') {
@@ -89,6 +97,14 @@ async function visit(page, who, hash, expectHeading) {
       if (rows.length !== 3) fail(`admin sees ${rows.length} devices, expected 3`);
       if (!rows.some(r => r.includes('stock-kiosk') && r.includes('spare'))) fail('device list does not mark the spare');
       if (!rows.some(r => r.includes('globex') && r.includes('maintenance'))) fail('device list does not mark the device in maintenance');
+    }
+    if (hash === '#/certificates') {
+      const rows = await admin.$$eval('#view table tbody tr', r => r.map(x => x.textContent)).catch(() => []);
+      if (rows.length !== 1 || !rows[0].includes('mosquitto') || !rows[0].includes('broker.acme.example') || !/1[89] days/.test(rows[0])) fail(`certificates page: ${JSON.stringify(rows)}`);
+      admin.once('dialog', d => d.accept());
+      await admin.click('#view tbody input[type=checkbox]');
+      await admin.click('.bulk-bar button:has-text("Request CSRs")');
+      await admin.waitForSelector('#view :text("making CSR")', { timeout: 5000 }).catch(() => fail('requesting a CSR did not start a renewal'));
     }
     if (hash === '#/enroll') {
       const toks = await admin.$$eval('#view table tbody tr', r => r.map(x => x.textContent)).catch(() => []);
@@ -125,6 +141,9 @@ async function visit(page, who, hash, expectHeading) {
   await visit(client, 'client', '#/devices/' + ids.acme, 'acme-kiosk');
   await client.click('#view button:has-text("Start maintenance")');
   await client.waitForSelector('#view button:has-text("End maintenance")', { timeout: 5000 }).catch(() => fail('client could not start maintenance'));
+  await visit(client, 'client', '#/certificates', 'Certificates');
+  const clientCerts = await client.$$eval('#view table tbody tr', r => r.map(x => x.textContent)).catch(() => []);
+  if (clientCerts.length !== 1 || !clientCerts[0].includes('acme-kiosk')) fail(`client certificates: ${JSON.stringify(clientCerts)}`);
   await visit(client, 'client', '#/reports', 'Reports');
   await client.waitForTimeout(500);
   const clientReport = await client.textContent('#view');

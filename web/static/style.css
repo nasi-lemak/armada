@@ -53,7 +53,7 @@ h2 { font-size: 15px; margin: 0 0 12px; }
 
 /* ---- layout ---- */
 .topbar {
-  display: flex; align-items: center; gap: 24px;
+  display: flex; align-items: center; gap: 16px;
   padding: 0 24px; height: 56px;
   background: var(--panel); border-bottom: 1px solid var(--border);
   position: sticky; top: 0; z-index: 5;
@@ -63,9 +63,9 @@ h2 { font-size: 15px; margin: 0 0 12px; }
 .logo {
   width: 24px; height: 24px; border-radius: 6px; background: var(--accent) url(favicon.svg) center/cover;
 }
-#nav { display: flex; gap: 4px; flex: 1; overflow-x: auto; }
+#nav { display: flex; gap: 2px; flex: 1; overflow-x: auto; scrollbar-width: thin; }
 #nav a {
-  color: var(--muted); padding: 6px 12px; border-radius: 8px; white-space: nowrap; font-weight: 500;
+  color: var(--muted); padding: 6px 8px; border-radius: 8px; white-space: nowrap; font-weight: 500; font-size: 13.5px;
 }
 #nav a:hover { color: var(--text); background: var(--panel-2); text-decoration: none; }
 #nav a.active { color: var(--text); background: var(--panel-2); }
@@ -173,6 +173,7 @@ input, select, textarea {
 input:focus, select:focus, textarea:focus { outline: 2px solid color-mix(in srgb, var(--accent) 40%, transparent); border-color: var(--accent); }
 input[type=checkbox] { width: 16px; height: 16px; padding: 0; }
 textarea { min-height: 64px; resize: vertical; }
+.stack > textarea { width: 100%; }
 .btn {
   font: inherit; font-weight: 550; border-radius: 8px; padding: 7px 14px; cursor: pointer;
   border: 1px solid var(--border); background: var(--panel); color: var(--text); white-space: nowrap;

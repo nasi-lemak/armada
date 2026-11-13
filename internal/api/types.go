@@ -504,6 +504,14 @@ const (
 	ActionLogs = "logs"
 	// ActionLock locks an Android device's screen now.
 	ActionLock = "lock"
+	// ActionCertCSR generates a new key and CSR for a managed certificate.
+	// Args[0] is a CertCSRSpec (JSON); the CSR comes back as the output.
+	// The key stays on the device. Queued by certificate renewals only.
+	ActionCertCSR = "cert-csr"
+	// ActionCertInstall installs a signed certificate with the key from
+	// its CSR, reloads the service and verifies it, rolling back on
+	// failure. Args[0] is a CertInstallSpec (JSON).
+	ActionCertInstall = "cert-install"
 	// ActionWipe factory-resets an Android device. Args must be
 	// ["confirm=<device ID>"]. The device leaves the fleet until it is
 	// provisioned again.
@@ -660,6 +668,9 @@ type HeartbeatRequest struct {
 	// Config reports every configuration key the agent has applied or
 	// failed to apply. Nil means the agent doesn't support configuration.
 	Config []ConfigState `json:"config"`
+	// Certs reports the certificates the agent manages (its managed_certs).
+	// Nil means the agent doesn't manage certificates.
+	Certs []CertReport `json:"certs"`
 }
 
 // HeartbeatResponse tells the agent what to do next.
@@ -825,6 +836,9 @@ const (
 	ConditionHealth           = "health"
 	ConditionUpdateFailed     = "update_failed"
 	ConditionDeploymentPaused = "deployment_paused"
+	// ConditionCertExpiry fires when a managed certificate on a device is
+	// within ExpiryDays of expiring (critical within 7 days or expired).
+	ConditionCertExpiry = "cert_expiry"
 )
 
 // AlertRule decides when to notify whom.
@@ -832,7 +846,7 @@ type AlertRule struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Enabled bool   `json:"enabled"`
-	// Condition is device_offline | health | update_failed | deployment_paused.
+	// Condition is device_offline | health | cert_expiry | update_failed | deployment_paused.
 	Condition string `json:"condition"`
 	// Selector limits the rule to some devices (ignored for deployment_paused).
 	Selector Selector `json:"selector"`
@@ -840,6 +854,8 @@ type AlertRule struct {
 	OfflineMinutes int `json:"offline_minutes,omitempty"`
 	// MinSeverity is warning or critical (health, default critical).
 	MinSeverity string `json:"min_severity,omitempty"`
+	// ExpiryDays is how early a cert_expiry rule fires (default 30).
+	ExpiryDays int `json:"expiry_days,omitempty"`
 	// CheckKinds limits a health rule to some kinds of check, e.g. ["storage", "power"].
 	CheckKinds []string `json:"check_kinds,omitempty"`
 	// Channels are notification channel IDs.
@@ -1266,6 +1282,8 @@ type Report struct {
 	Updates     []ReportCount       `json:"updates"`
 	Changes     []Event             `json:"changes"`
 	Maintenance []ReportMaintWindow `json:"maintenance"`
+	// Certificates are the devices' managed certificates, soonest to expire first.
+	Certificates []ReportCert `json:"certificates"`
 	// Notes explain what the numbers do and don't include.
 	Notes []string `json:"notes"`
 }
@@ -1289,6 +1307,7 @@ type ReportSummary struct {
 	UpdatesFailed            int            `json:"updates_failed"`
 	Replacements             int            `json:"replacements"`
 	MaintenanceWindows       int            `json:"maintenance_windows"`
+	CertsExpiringSoon        int            `json:"certs_expiring_soon"` // within 30 days of the report
 	HealthNow                map[string]int `json:"health_now"`
 }
 
@@ -1357,4 +1376,168 @@ type ReportSchedule struct {
 	LastSentAt    *time.Time `json:"last_sent_at,omitempty"`
 	LastAttemptAt *time.Time `json:"last_attempt_at,omitempty"`
 	LastError     string     `json:"last_error,omitempty"`
+}
+
+// ---- certificates ----
+
+// CertInfo describes a certificate as installed on a device.
+type CertInfo struct {
+	Subject    string `json:"subject"`
+	CommonName string `json:"common_name,omitempty"`
+	// Fields are the subject's parts, so a renewal can ask for the same.
+	Fields      CertSubject `json:"subject_fields"`
+	DNSNames    []string    `json:"dns_names,omitempty"`
+	IPAddresses []string    `json:"ip_addresses,omitempty"`
+	Issuer      string      `json:"issuer"`
+	Serial      string      `json:"serial"`
+	NotBefore   time.Time   `json:"not_before"`
+	NotAfter    time.Time   `json:"not_after"`
+	KeyType     string      `json:"key_type"` // ecdsa-p256, rsa-2048, …
+	// Fingerprint is the SHA-256 of the certificate (hex).
+	Fingerprint string `json:"fingerprint"`
+	// KeyMatches is false if the key file doesn't belong to the certificate.
+	KeyMatches bool `json:"key_matches"`
+}
+
+// CertReport is what an agent reports about one managed certificate.
+type CertReport struct {
+	Target string    `json:"target"` // the managed_certs name, e.g. "mosquitto"
+	Info   *CertInfo `json:"info,omitempty"`
+	// Error explains a missing or unreadable certificate.
+	Error string `json:"error,omitempty"`
+}
+
+// CertSubject is the subject a CSR asks for. Any field left empty is
+// copied from the installed certificate.
+type CertSubject struct {
+	CommonName         string `json:"common_name,omitempty"`
+	Organization       string `json:"organization,omitempty"`
+	OrganizationalUnit string `json:"organizational_unit,omitempty"`
+	Country            string `json:"country,omitempty"`
+	Province           string `json:"province,omitempty"`
+	Locality           string `json:"locality,omitempty"`
+}
+
+// CertCSRSpec tells an agent what CSR to make (ActionCertCSR).
+type CertCSRSpec struct {
+	Target      string      `json:"target"`
+	RenewalID   string      `json:"renewal_id"`
+	Subject     CertSubject `json:"subject"`
+	DNSNames    []string    `json:"dns_names,omitempty"`
+	IPAddresses []string    `json:"ip_addresses,omitempty"`
+	KeyType     string      `json:"key_type"`
+}
+
+// CertInstallSpec tells an agent to install a signed certificate (ActionCertInstall).
+type CertInstallSpec struct {
+	Target      string `json:"target"`
+	RenewalID   string `json:"renewal_id"`
+	Certificate string `json:"certificate"`     // PEM
+	Chain       string `json:"chain,omitempty"` // PEM, intermediates
+}
+
+// Renewal statuses.
+const (
+	RenewalRequested  = "requested"  // waiting for the device to make the CSR
+	RenewalCSRReady   = "csr_ready"  // waiting for a signed certificate
+	RenewalInstalling = "installing" // certificate sent to the device
+	RenewalInstalled  = "installed"
+	RenewalFailed     = "failed"
+	RenewalCancelled  = "cancelled"
+)
+
+// CertRenewal is one renewal of a device's certificate.
+type CertRenewal struct {
+	ID      string      `json:"id"`
+	Status  string      `json:"status"`
+	Message string      `json:"message,omitempty"`
+	Spec    CertCSRSpec `json:"spec"`
+	CSR     string      `json:"csr,omitempty"` // PEM
+	// PublicKey is the SHA-256 of the CSR's public key (hex): signed
+	// certificates are matched to renewals by it.
+	PublicKey   string     `json:"public_key,omitempty"`
+	RequestedBy string     `json:"requested_by,omitempty"`
+	RequestedAt time.Time  `json:"requested_at"`
+	CSRAt       *time.Time `json:"csr_at,omitempty"`
+	UploadedBy  string     `json:"uploaded_by,omitempty"`
+	UploadedAt  *time.Time `json:"uploaded_at,omitempty"`
+	Certificate *CertInfo  `json:"certificate,omitempty"` // the signed certificate
+	InstalledAt *time.Time `json:"installed_at,omitempty"`
+	ActionID    string     `json:"action_id,omitempty"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// DeviceCert is a certificate managed on a device, with its latest renewal.
+type DeviceCert struct {
+	ID         string       `json:"id"` // device ID + "/" + target
+	DeviceID   string       `json:"device_id"`
+	DeviceName string       `json:"device_name"`
+	Target     string       `json:"target"`
+	Installed  *CertInfo    `json:"installed,omitempty"`
+	Error      string       `json:"error,omitempty"`
+	ReportedAt time.Time    `json:"reported_at"`
+	Renewal    *CertRenewal `json:"renewal,omitempty"`
+	// DaysLeft is computed on read (negative once expired).
+	DaysLeft *int `json:"days_left,omitempty"`
+}
+
+// RenewCertsRequest starts renewals: a CSR is made on each device.
+type RenewCertsRequest struct {
+	Selector Selector `json:"selector"`
+	All      bool     `json:"all,omitempty"`
+	// Targets limits which managed certificates (empty: all of them).
+	Targets []string `json:"targets,omitempty"`
+	// Overrides; empty fields copy the installed certificate. Values may
+	// use templates: {{.Name}}, {{.ID}}, {{.Hostname}}, {{.IP}},
+	// {{index .Labels "site"}}.
+	Subject     CertSubject `json:"subject"`
+	DNSNames    []string    `json:"dns_names,omitempty"`
+	IPAddresses []string    `json:"ip_addresses,omitempty"`
+	KeyType     string      `json:"key_type,omitempty"` // ecdsa-p256 | rsa-2048 | rsa-3072 | rsa-4096
+}
+
+// RenewCertsResponse lists what was started and what was skipped.
+type RenewCertsResponse struct {
+	Started []DeviceCert `json:"started"`
+	Skipped []BulkTarget `json:"skipped"`
+}
+
+// UploadCertsRequest hands over signed certificates (PEM; any number, in
+// any order, with or without their chains). Each is matched to a renewal
+// by its public key.
+type UploadCertsRequest struct {
+	PEM string `json:"pem"`
+}
+
+// UploadCertsResponse says what happened to each certificate.
+type UploadCertsResponse struct {
+	Installing []DeviceCert   `json:"installing"`
+	Rejected   []CertRejected `json:"rejected"`
+}
+
+// CertRejected is an uploaded certificate that wasn't used, and why.
+type CertRejected struct {
+	Subject string `json:"subject"`
+	Serial  string `json:"serial,omitempty"`
+	Reason  string `json:"reason"`
+}
+
+// EmailCSRsRequest emails waiting CSRs to someone who signs them.
+type EmailCSRsRequest struct {
+	Selector   Selector `json:"selector"`
+	All        bool     `json:"all,omitempty"`
+	Recipients []string `json:"recipients"`
+	Note       string   `json:"note,omitempty"`
+}
+
+// ReportCert is a managed certificate in a report.
+type ReportCert struct {
+	DeviceID   string    `json:"device_id"`
+	DeviceName string    `json:"device_name"`
+	Target     string    `json:"target"`
+	CommonName string    `json:"common_name"`
+	Issuer     string    `json:"issuer"`
+	NotAfter   time.Time `json:"not_after"`
+	DaysLeft   int       `json:"days_left"`
+	Renewal    string    `json:"renewal,omitempty"` // status of a renewal in progress
 }

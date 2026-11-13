@@ -37,7 +37,7 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 		return err
 	}
 	ruleByID := map[string]*api.AlertRule{}
-	needDevices, needDeployments := false, false
+	needDevices, needDeployments, needCerts := false, false, false
 	for _, r := range rules {
 		ruleByID[r.ID] = r
 		if !r.Enabled {
@@ -46,6 +46,8 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 		switch r.Condition {
 		case api.ConditionDeviceOffline, api.ConditionHealth:
 			needDevices = true
+		case api.ConditionCertExpiry:
+			needDevices, needCerts = true, true
 		case api.ConditionDeploymentPaused:
 			needDeployments = true
 		}
@@ -54,6 +56,16 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 	if needDevices {
 		if devices, err = s.store.ListDevices(ctx); err != nil {
 			return err
+		}
+	}
+	certsByDevice := map[string][]*api.DeviceCert{}
+	if needCerts {
+		all, err := s.store.ListDeviceCerts(ctx, "")
+		if err != nil {
+			return err
+		}
+		for _, c := range all {
+			certsByDevice[c.DeviceID] = append(certsByDevice[c.DeviceID], c)
 		}
 	}
 	var deps []*api.Deployment
@@ -126,6 +138,35 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 					sort.Strings(failing)
 					want[r.ID+"/"+d.ID] = candidate{rule: r, key: r.ID + "/" + d.ID, severity: worst, device: d,
 						summary: fmt.Sprintf("%s: %s", d.Name, strings.Join(failing, "; "))}
+				}
+			}
+		case api.ConditionCertExpiry:
+			within := r.ExpiryDays
+			if within == 0 {
+				within = 30
+			}
+			for _, d := range devices {
+				if !ruleCovers(r, d) || held[d.ID] || !d.Alerting() {
+					continue
+				}
+				for _, c := range certsByDevice[d.ID] {
+					left := daysLeft(c.Installed, now)
+					if left == nil || *left > within {
+						continue
+					}
+					sev, when := api.HealthWarning, fmt.Sprintf("expires in %d days (%s)", *left, c.Installed.NotAfter.Format("2 Jan 2006"))
+					if *left <= certCriticalDays {
+						sev = api.HealthCritical
+					}
+					if *left < 0 {
+						when = "expired on " + c.Installed.NotAfter.Format("2 Jan 2006")
+					}
+					summary := fmt.Sprintf("%s: the %s certificate (%s) %s", d.Name, c.Target, c.Installed.CommonName, when)
+					if c.Renewal != nil && renewalActive(c.Renewal) {
+						summary += "; renewal " + strings.ReplaceAll(c.Renewal.Status, "_", " ")
+					}
+					k := r.ID + "/" + d.ID + "/" + c.Target
+					want[k] = candidate{rule: r, key: k, severity: sev, device: d, summary: summary}
 				}
 			}
 		case api.ConditionDeploymentPaused:
@@ -706,8 +747,8 @@ func (s *Server) handleSaveAlertRule(w http.ResponseWriter, r *http.Request) {
 		}
 		rule.ID, rule.CreatedAt, rule.ClientScope, rule.CreatedBy = newID("rul"), now, sc, p.name
 	}
-	if !scopeEmpty(rule.ClientScope) && rule.Condition != api.ConditionDeviceOffline && rule.Condition != api.ConditionHealth {
-		writeError(w, http.StatusBadRequest, "client alert rules can watch device_offline or health; update failures and paused rollouts are vendor-wide")
+	if !scopeEmpty(rule.ClientScope) && rule.Condition != api.ConditionDeviceOffline && rule.Condition != api.ConditionHealth && rule.Condition != api.ConditionCertExpiry {
+		writeError(w, http.StatusBadRequest, "client alert rules can watch device_offline, health or cert_expiry; update failures and paused rollouts are vendor-wide")
 		return
 	}
 	rule.Name = strings.TrimSpace(rule.Name)
@@ -716,8 +757,11 @@ func (s *Server) handleSaveAlertRule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	case rule.Condition != api.ConditionDeviceOffline && rule.Condition != api.ConditionHealth &&
-		rule.Condition != api.ConditionUpdateFailed && rule.Condition != api.ConditionDeploymentPaused:
-		writeError(w, http.StatusBadRequest, "condition must be device_offline, health, update_failed or deployment_paused")
+		rule.Condition != api.ConditionUpdateFailed && rule.Condition != api.ConditionDeploymentPaused && rule.Condition != api.ConditionCertExpiry:
+		writeError(w, http.StatusBadRequest, "condition must be device_offline, health, cert_expiry, update_failed or deployment_paused")
+		return
+	case rule.ExpiryDays < 0 || rule.ExpiryDays > 365:
+		writeError(w, http.StatusBadRequest, "expiry_days must be between 1 and 365")
 		return
 	case rule.MinSeverity != "" && rule.MinSeverity != api.HealthWarning && rule.MinSeverity != api.HealthCritical:
 		writeError(w, http.StatusBadRequest, "min_severity must be warning or critical")

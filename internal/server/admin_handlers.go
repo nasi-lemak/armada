@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -161,6 +162,8 @@ type deviceDetail struct {
 	Actions     []*api.Action       `json:"actions"`
 	Events      []*api.Event        `json:"events"`
 	Config      []DeviceConfigView  `json:"config"`
+	// Certificates are the device's managed certificates (its managed_certs).
+	Certificates []*api.DeviceCert `json:"certificates"`
 }
 
 func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
@@ -207,7 +210,15 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if det.Certificates, err = s.store.ListDeviceCerts(ctx, d.ID); err != nil {
+		s.internalError(w, err)
+		return
+	}
+	for _, c := range det.Certificates {
+		c.DeviceName, c.DaysLeft = d.Name, daysLeft(c.Installed, s.now())
+	}
 	det.Updates, det.Actions, det.Events, det.Peripherals, det.Config = nonNil(det.Updates), nonNil(det.Actions), nonNil(det.Events), nonNil(det.Peripherals), nonNil(det.Config)
+	det.Certificates = nonNil(det.Certificates)
 	writeJSON(w, http.StatusOK, det)
 }
 
@@ -443,6 +454,17 @@ func describeAction(a *api.Action) string {
 		return "logs (" + truncate(strings.Join(a.Args, " "), 80) + ")"
 	case api.ActionWipe:
 		return "factory reset (wipe)"
+	case api.ActionCertCSR, api.ActionCertInstall:
+		var ref struct {
+			Target string `json:"target"`
+		}
+		if len(a.Args) == 1 {
+			json.Unmarshal([]byte(a.Args[0]), &ref)
+		}
+		if a.Type == api.ActionCertCSR {
+			return "new key and CSR for " + ref.Target
+		}
+		return "install " + ref.Target + " certificate"
 	}
 	return a.Type
 }

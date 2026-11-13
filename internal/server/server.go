@@ -439,6 +439,14 @@ func (s *Server) Handler() http.Handler {
 	operator(fleetOnly, "POST /api/v1/devices/{id}/replace", s.handleReplaceDevice)
 	// Bulk operations: every device is checked as if changed on its own.
 	operator(scopedOK, "POST /api/v1/bulk", s.handleBulk)
+	// Certificates: anyone sees their devices'; operators on a device
+	// renew it and install its certificate (checked per device).
+	viewer(scopedOK, "GET /api/v1/certificates", s.handleListCerts)
+	viewer(scopedOK, "GET /api/v1/certificates/csrs", s.handleDownloadCSRs)
+	operator(scopedOK, "POST /api/v1/certificates/renew", s.handleRenewCerts)
+	operator(scopedOK, "POST /api/v1/certificates/upload", s.handleUploadCerts)
+	operator(scopedOK, "POST /api/v1/certificates/email", s.handleEmailCSRs)
+	operator(scopedOK, "POST /api/v1/certificates/{device}/{target}/cancel", s.handleCancelRenewal)
 	viewer(scopedOK, "GET /api/v1/bulk", s.handleListBulk)
 	viewer(scopedOK, "GET /api/v1/bulk/{id}", s.handleGetBulk)
 	viewer(scopedOK, "GET /api/v1/events", s.handleListEvents)

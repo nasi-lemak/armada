@@ -58,6 +58,10 @@ It has three parts, all in Go with no external services:
 - **Bulk operations.** Reboot, run a command, relabel, change channel, start maintenance or change
   lifecycle on many devices at once. You preview first, each device is checked on its own, and
   progress is tracked per device.
+- **Certificates on devices.** Track the TLS certificates your applications use (Mosquitto, web
+  servers…) and renew them with your clients' CAs: a new key and CSR are made on each device (keys
+  never leave it), the CSRs go to the client (download, email, or their own login), and the signed
+  certificates are matched, checked and installed with automatic rollback.
 - **Customer reports.** Availability, alerts, updates, replacements and maintenance for a client
   over a week, a month or any dates. View them in the dashboard, download them as CSV or a printable
   page, or have them emailed every week or month.
@@ -839,6 +843,112 @@ armadactl bulk lifecycle spare --label customer=acme --note "contract ended" --y
 armadactl bulk get <id>
 ```
 
+## Certificates on devices
+
+Applications on your devices often have their own TLS certificates: a Mosquitto broker, a local web
+server, a client certificate for a customer's API. When those are issued by the customer's CA, every
+renewal means a CSR to them and a certificate back. Armada tracks these certificates and runs that
+exchange:
+
+1. **List the certificate in the agent's config** (`managed_certs`). The server can only touch
+   certificates listed there, at those paths:
+
+   ```json
+   "managed_certs": {
+     "mosquitto": {
+       "cert": "/etc/mosquitto/certs/server.crt",
+       "key": "/etc/mosquitto/certs/server.key",
+       "full_chain": true,
+       "owner": "mosquitto:mosquitto",
+       "reload_command": ["systemctl", "restart", "mosquitto"],
+       "verify_address": "127.0.0.1:8883"
+     }
+   }
+   ```
+
+   The agent reports each certificate at every check-in: names, issuer, serial, key type, expiry,
+   and whether the key file matches. The **Certificates** page lists them all, soonest to expire
+   first, and each device's page shows its own.
+
+2. **Request CSRs.** Tick the certificates and choose **Request CSRs** (or
+   `armadactl certs renew --label customer=acme`).
+   - **On the device:** each device makes a **new private key**, keeps it in the agent's state
+     directory, and sends back only the CSR.
+   - **What the CSR asks for:** by default the same subject, names, IP addresses and key type as the
+     installed certificate. You can override them, using templates such as `{{.Name}}.acme.example`,
+     `{{.Hostname}}`, `{{.IP}}` or `{{index .Labels "site"}}`. Useful for a first certificate, or for
+     moving to RSA 2048 when a CA requires it.
+
+3. **Get them signed.** Any of these:
+   - **Download CSRs:** a zip with one `.csr` per device and a `manifest.csv`
+     (`armadactl certs csrs`).
+   - **Email CSRs…:** sent to whoever runs the client's CA, through the server's SMTP relay, with a
+     note such as a ticket number.
+   - **Client account:** the client's own users sign in, see their devices' CSRs on the Certificates
+     page, and download or upload there themselves.
+
+4. **Upload the signed certificates.** Paste them, choose the files, or use
+   `armadactl certs upload signed/*.crt`. Any number, in any order, with or without their chains.
+   - **Matching:** each certificate is matched to the device whose CSR it answers by its public key,
+     so file names don't matter.
+   - **Checks before anything is installed:**
+     - the certificate is for that CSR's key;
+     - it isn't expired;
+     - it is for server authentication;
+     - every name and IP the CSR asked for is in it;
+     - if you included the issuing CA certificates, the chain verifies.
+     Anything that fails is listed with the reason and not installed.
+
+5. **Install, with rollback.**
+   - **Writing:** the device writes the certificate (with its intermediates if `full_chain`) and the
+     new key, keeping the existing file permissions or the `owner`.
+   - **Reload and verify:** it runs `reload_command`, and checks that `verify_address` now presents
+     the new certificate.
+   - **Rollback:** if either step fails, it **puts the previous certificate and key back**, reloads
+     again, and the renewal shows as failed with the reason.
+
+**Who can do what:**
+- **Seeing certificates:** everyone sees the certificates of the devices they can see.
+- **Renewing and installing:** operators on a device (including a client's own operators) can renew
+  and upload. Uploading only matches renewals on devices you operate, so one client can't install
+  onto another's.
+
+**Alerts and reports:**
+- **Alerts:** add an alert rule with the condition **Certificate expiring** (`cert_expiry`, default
+  30 days, critical within 7). Client alert rules can use it too.
+- **Customer reports** list each device's certificates and when they expire.
+
+**Audit and limits:**
+- **Activity log:** requests, CSRs, uploads (with serial and expiry), installs and failures.
+- **Cancelling:** a waiting renewal can be cancelled. Its unused key stays on the device until the
+  next CSR for that certificate replaces it.
+- **Platforms:** Linux and other agents. On Android, apps manage their own certificates.
+
+| `managed_certs` key | Meaning |
+|---|---|
+| `cert`, `key` | Certificate and private key files (PEM; keys are written as PKCS#8) |
+| `chain` | A separate file for intermediates, for services that want one |
+| `full_chain` | Write the intermediates after the certificate in `cert` (Mosquitto `certfile`, nginx) |
+| `owner` | `user[:group]` for the new files, for services that drop root |
+| `reload_command` | Run after writing; on failure the old files are restored |
+| `verify_address` | `host:port` that must present the new certificate after reloading |
+
+```bash
+armadactl certs list --expiring 30
+```
+
+```bash
+armadactl certs renew --label customer=acme --target mosquitto
+```
+
+```bash
+armadactl certs email --label customer=acme --to pki@acme.example --note "Ticket 4411"
+```
+
+```bash
+armadactl certs upload signed/*.crt
+```
+
 ## Customer reports
 
 The **Reports** page summarises a client's devices (or the whole fleet) over a period, ready to send
@@ -1251,6 +1361,7 @@ the browser exchanges a one-time ticket, valid for a minute, for it.
 | `disable_push` | `false` | Turn off the long-poll connection; actions then wait for the next heartbeat |
 | `disable_delta` | `false` | Always download updates in full instead of reusing chunks of the installed version |
 | `managed_config` | none | Directories configuration profiles may write files into, by name, each with an optional `reload_command` |
+| `managed_certs` | none | Certificates the server may renew by CSR, by name: files, owner, `reload_command`, `verify_address` (see [Certificates on devices](#certificates-on-devices)) |
 | `allow_remote_settings` | `true` | Whether `agent` profiles may override `maintenance_window` and `auto_update` |
 | `reboot_command` | `["systemctl","reboot"]` | |
 | `command_timeout` | `10m` | Applies to hooks and exec actions |
@@ -1316,6 +1427,7 @@ armadactl bulk reboot|restart-agent|wake|lock|exec|label|unlabel|set-channel|lif
 armadactl bulk list | bulk get <id>
 armadactl report [--label K=V]... [--period last-month] [--from D --to D] [--tz TZ] [--format csv|html -o FILE]
 armadactl report schedules list|create|send|delete
+armadactl certs list|renew|csrs|email|upload|cancel
 armadactl maintenance list|start|schedule|end|delete   (start --device ID --for 2h; schedule --windows 02:00-04:00 --days sun)
 armadactl config list|get|apply -f FILE|enable|disable|delete
 armadactl groups [list|map --group G --role R [--scope K=V]...|unmap G]
@@ -1429,6 +1541,11 @@ endpoints use the per-device key issued at enrollment.
 | `GET/POST /api/v1/channels`, `PUT/DELETE /api/v1/channels/{id}`, `POST …/{id}/test` | Notification channels (`client_scope` for a client's) |
 | `GET/POST /api/v1/alert-rules`, `PUT/DELETE /api/v1/alert-rules/{id}` | Alert rules (`client_scope` for a client's) |
 | `GET /api/v1/alerts[?status=firing]` | Firing and recent alerts |
+| `GET /api/v1/certificates` (`?expiring_within=30&renewal=csr_ready&label=`) | Managed certificates on devices, with renewals |
+| `POST /api/v1/certificates/renew` | New key and CSR on the devices (`selector`, `targets`, optional subject/names/key type) |
+| `GET /api/v1/certificates/csrs`, `POST /api/v1/certificates/email` | Waiting CSRs as a zip, or emailed |
+| `POST /api/v1/certificates/upload` (`{"pem": …}`) | Signed certificates: matched by key, checked, installed |
+| `POST /api/v1/certificates/{device}/{target}/cancel` | Cancel a waiting renewal |
 | `GET /api/v1/reports?label=k=v&period=last-month\|this-month\|last-week\|last-7d\|last-30d` (or `from=&to=`, `tz=`, `format=json\|csv\|html`) | Customer report |
 | `GET/POST /api/v1/report-schedules`, `DELETE …/{id}`, `POST …/{id}/send` | Scheduled report emails |
 | `POST /api/v1/alerts/{id}/ack` (`{"note": …}`), `POST …/{id}/unack` | Acknowledge a firing alert, or undo it |

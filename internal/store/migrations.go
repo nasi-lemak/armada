@@ -72,6 +72,15 @@ CREATE INDEX IF NOT EXISTS device_updates_updated ON device_updates(updated_at);
 	{Version: 7, Name: "enrollment tokens choose lifecycle", SQL: `
 ALTER TABLE enrollment_tokens ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active';
 `},
+	{Version: 8, Name: "device certificates", SQL: `
+CREATE TABLE IF NOT EXISTS device_certs (
+	id TEXT PRIMARY KEY,
+	device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+	spec TEXT NOT NULL,
+	updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS device_certs_device ON device_certs(device_id);
+`},
 	// Append new migrations here.
 }
 

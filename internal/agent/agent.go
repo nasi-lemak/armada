@@ -276,6 +276,7 @@ func (a *Agent) CheckIn(ctx context.Context) error {
 		Status:   status,
 		Health:   a.health.snapshot(),
 		Config:   a.configReport(),
+		Certs:    a.certReports(),
 	}
 	if a.gw != nil {
 		req.Peripherals = a.gw.reports()
@@ -902,6 +903,15 @@ func (a *Agent) runAction(ctx context.Context, act api.Action) {
 		status := api.ActionSucceeded
 		if code != 0 {
 			status = api.ActionFailed
+		}
+		result(status, code, out)
+	case api.ActionCertCSR, api.ActionCertInstall:
+		cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		status, out := a.runCertAction(cctx, act)
+		code := 0
+		if status != api.ActionSucceeded {
+			code = 1
 		}
 		result(status, code, out)
 	default:

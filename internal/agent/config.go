@@ -124,6 +124,9 @@ type Config struct {
 	// files into (config profiles of kind "files" target these names).
 	// Nothing outside these directories can be written.
 	ManagedConfig map[string]ManagedConfigTarget `json:"managed_config,omitempty"`
+	// ManagedCerts names certificates the server may renew (with a CSR made
+	// on the device and the signed certificate sent back).
+	ManagedCerts map[string]ManagedCert `json:"managed_certs,omitempty"`
 	// AllowRemoteSettings lets config profiles override maintenance_window
 	// and auto_update (default true).
 	AllowRemoteSettings *bool `json:"allow_remote_settings,omitempty"`
@@ -188,6 +191,14 @@ func (c *Config) Validate() error {
 	for name, mc := range c.ManagedConfig {
 		if !filepath.IsAbs(mc.Dir) || filepath.Clean(mc.Dir) == "/" {
 			return fmt.Errorf("managed_config %q: dir must be an absolute path other than /", name)
+		}
+	}
+	for name, mc := range c.ManagedCerts {
+		if !safeName(name) {
+			return fmt.Errorf("managed_certs %q: names use letters, digits, - and _", name)
+		}
+		if err := mc.validate(name); err != nil {
+			return err
 		}
 	}
 	if len(c.RebootCommand) == 0 {

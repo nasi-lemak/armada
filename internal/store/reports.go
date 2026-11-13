@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -132,4 +134,58 @@ func (s *Store) ListReportSchedules(ctx context.Context) ([]*api.ReportSchedule,
 // DeleteReportSchedule removes a report schedule.
 func (s *Store) DeleteReportSchedule(ctx context.Context, id string) error {
 	return s.deleteDoc(ctx, "report_schedules", id)
+}
+
+// PutDeviceCert creates or replaces a device's managed certificate record.
+func (s *Store) PutDeviceCert(ctx context.Context, c *api.DeviceCert) error {
+	c.DaysLeft = nil // computed on read
+	_, err := s.db.ExecContext(ctx, `INSERT INTO device_certs (id, device_id, spec, updated_at) VALUES (?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET spec=excluded.spec, updated_at=excluded.updated_at`, c.ID, c.DeviceID, mustJSON(c), ts(time.Now()))
+	return err
+}
+
+// GetDeviceCert loads one record by ID (device ID + "/" + target).
+func (s *Store) GetDeviceCert(ctx context.Context, id string) (*api.DeviceCert, error) {
+	var spec string
+	err := s.db.QueryRowContext(ctx, `SELECT spec FROM device_certs WHERE id=?`, id).Scan(&spec)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	var c api.DeviceCert
+	return &c, json.Unmarshal([]byte(spec), &c)
+}
+
+// ListDeviceCerts returns the managed certificates of one device, or of
+// every device when deviceID is empty.
+func (s *Store) ListDeviceCerts(ctx context.Context, deviceID string) ([]*api.DeviceCert, error) {
+	q, args := `SELECT spec FROM device_certs ORDER BY id`, []any{}
+	if deviceID != "" {
+		q, args = `SELECT spec FROM device_certs WHERE device_id=? ORDER BY id`, []any{deviceID}
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*api.DeviceCert
+	for rows.Next() {
+		var spec string
+		if err := rows.Scan(&spec); err != nil {
+			return nil, err
+		}
+		var c api.DeviceCert
+		if err := json.Unmarshal([]byte(spec), &c); err != nil {
+			return nil, err
+		}
+		out = append(out, &c)
+	}
+	return out, rows.Err()
+}
+
+// DeleteDeviceCert removes a record.
+func (s *Store) DeleteDeviceCert(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM device_certs WHERE id=?`, id)
+	return err
 }

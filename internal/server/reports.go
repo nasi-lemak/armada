@@ -143,7 +143,7 @@ func scopeText(sel api.Selector) string {
 func (s *Server) buildReport(ctx context.Context, p *principal, rr reportRequest) (*api.Report, error) {
 	now := s.now()
 	rep := &api.Report{Title: reportTitle(p, rr.scope), Brand: s.cfg.ReportBrand, Scope: rr.scope, From: rr.from, To: rr.to,
-		TimeZone: rr.loc.String(), GeneratedAt: now, Devices: []api.ReportDevice{}, Alerts: []api.ReportAlert{},
+		TimeZone: rr.loc.String(), GeneratedAt: now, Devices: []api.ReportDevice{}, Alerts: []api.ReportAlert{}, Certificates: []api.ReportCert{},
 		AlertRules: []api.ReportCount{}, Updates: []api.ReportCount{}, Changes: []api.Event{}, Maintenance: []api.ReportMaintWindow{}}
 	rep.Summary.AvailabilityGoal = availabilityTarget
 	rep.Summary.HealthNow = map[string]int{}
@@ -407,6 +407,28 @@ func (s *Server) buildReport(ctx context.Context, p *principal, rr reportRequest
 	}
 	rep.Summary.MaintenanceWindows = len(rep.Maintenance)
 
+	// Managed certificates on these devices, as they are now.
+	dcs, err := s.store.ListDeviceCerts(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range dcs {
+		d := devs[c.DeviceID]
+		if d == nil || d.Lifecycle == api.LifecycleRetired || c.Installed == nil {
+			continue
+		}
+		rc := api.ReportCert{DeviceID: d.ID, DeviceName: d.Name, Target: c.Target, CommonName: c.Installed.CommonName,
+			Issuer: c.Installed.Issuer, NotAfter: c.Installed.NotAfter, DaysLeft: *daysLeft(c.Installed, now)}
+		if renewalActive(c.Renewal) {
+			rc.Renewal = c.Renewal.Status
+		}
+		if rc.DaysLeft <= 30 {
+			rep.Summary.CertsExpiringSoon++
+		}
+		rep.Certificates = append(rep.Certificates, rc)
+	}
+	sort.Slice(rep.Certificates, func(i, j int) bool { return rep.Certificates[i].NotAfter.Before(rep.Certificates[j].NotAfter) })
+
 	// Least available first: that's what a reader looks for.
 	sort.SliceStable(rep.Devices, func(i, j int) bool {
 		a, b := rep.Devices[i].Availability, rep.Devices[j].Availability
@@ -650,6 +672,11 @@ footer { margin-top: 32px; color: #667085; font-size: 12px; }
 
 {{if .Changes}}<h2>Replacements and changes</h2>
 <table><tbody>{{range .Changes}}<tr><td>{{datetime .Time $.TimeZone}}</td><td>{{.Message}}</td></tr>
+{{end}}</tbody></table>{{end}}
+
+{{if .Certificates}}<h2>Certificates</h2>
+<table><thead><tr><th>Device</th><th>Service</th><th>Certificate</th><th>Expires</th><th class="num">Days left</th></tr></thead><tbody>
+{{range .Certificates}}<tr><td>{{.DeviceName}}</td><td>{{.Target}}</td><td>{{.CommonName}}<div class="muted">{{.Issuer}}</div></td><td>{{date .NotAfter $.TimeZone}}{{if .Renewal}}<div class="muted">renewal in progress</div>{{end}}</td><td class="num{{if lt .DaysLeft 31}} bad{{end}}">{{.DaysLeft}}</td></tr>
 {{end}}</tbody></table>{{end}}
 
 {{if .Maintenance}}<h2>Maintenance</h2>
@@ -923,22 +950,35 @@ func (s *Server) emailReport(ctx context.Context, rs *api.ReportSchedule, rep *a
 }
 
 func mimeReport(from string, to []string, subject string, html []byte, csvName string, csvData []byte) string {
+	return mimeMessage(from, to, subject, mimePart{"text/html; charset=utf-8", "", html}, mimePart{"text/csv; charset=utf-8", csvName, csvData})
+}
+
+// mimePart is one part of a multipart email; a file name makes it an attachment.
+type mimePart struct {
+	contentType, fileName string
+	data                  []byte
+}
+
+// mimeMessage builds a multipart/mixed email, every part base64-encoded.
+func mimeMessage(from string, to []string, subject string, parts ...mimePart) string {
 	boundary := "armada-" + newID("b")
 	var b strings.Builder
 	b.WriteString("From: " + from + "\r\nTo: " + strings.Join(to, ", ") + "\r\nSubject: " + mime.QEncoding.Encode("utf-8", subject) +
 		"\r\nMIME-Version: 1.0\r\nDate: " + time.Now().Format(time.RFC1123Z) +
 		"\r\nContent-Type: multipart/mixed; boundary=\"" + boundary + "\"\r\n\r\n")
-	part := func(header string, data []byte) {
-		b.WriteString("--" + boundary + "\r\n" + header + "\r\nContent-Transfer-Encoding: base64\r\n\r\n")
-		enc := base64.StdEncoding.EncodeToString(data)
+	for _, p := range parts {
+		b.WriteString("--" + boundary + "\r\nContent-Type: " + p.contentType + "\r\n")
+		if p.fileName != "" {
+			b.WriteString("Content-Disposition: attachment; filename=\"" + p.fileName + "\"\r\n")
+		}
+		b.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
+		enc := base64.StdEncoding.EncodeToString(p.data)
 		for len(enc) > 76 {
 			b.WriteString(enc[:76] + "\r\n")
 			enc = enc[76:]
 		}
 		b.WriteString(enc + "\r\n")
 	}
-	part("Content-Type: text/html; charset=utf-8", html)
-	part("Content-Type: text/csv; charset=utf-8\r\nContent-Disposition: attachment; filename=\""+csvName+"\"", csvData)
 	b.WriteString("--" + boundary + "--\r\n")
 	return b.String()
 }
