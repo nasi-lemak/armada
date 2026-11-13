@@ -1262,6 +1262,8 @@ async function viewEnroll(root) {
   const ttlIn = h('select', { 'aria-label': 'Expiry' },
     [['0', 'Never'], ['3600', '1 hour'], ['86400', '1 day'], ['604800', '7 days'], ['2592000', '30 days']].map(([v, l]) => h('option', { value: v }, l)));
   ttlIn.value = '604800';
+  const spareIn = h('input', { type: 'checkbox' });
+  const fleetOperator = (ROLE_RANK[me.fleet_role] || 0) >= ROLE_RANK.operator;
 
   append(root, pageHead('Enrollment', 'Tokens that let new devices join the fleet'),
     h('div', { class: 'card' }, h('h2', {}, 'Create enrollment token'),
@@ -1272,11 +1274,13 @@ async function viewEnroll(root) {
         const t = await guard(() => api('POST', '/api/v1/tokens', {
           description: descIn.value, channel: chanIn.value.trim(), labels,
           max_uses: parseInt(usesIn.value || '0', 10), ttl_seconds: parseInt(ttlIn.value, 10),
+          lifecycle: spareIn.checked ? 'spare' : 'active',
         }));
         if (!t) return;
         const origin = location.origin;
         replace(created, h('div', { class: 'callout stack' },
           h('div', {}, h('strong', {}, 'Copy this token now'), ' — it will not be shown again.'),
+          t.lifecycle === 'spare' ? h('div', {}, 'Devices enrolled with it join as ', h('strong', {}, 'spares'), ': they get updates but no alerts until you put them in service or use them as a replacement.') : null,
           h('div', { class: 'secret' }, t.token),
           h('div', {}, 'Run on a device (Linux, as root):'),
           h('div', { class: 'secret' }, `curl -fsSL ${origin}/install.sh | sudo ARMADA_SERVER_URL=${origin} ARMADA_ENROLLMENT_TOKEN=${t.token} sh`),
@@ -1288,6 +1292,7 @@ async function viewEnroll(root) {
       h('div', { class: 'form-grid' },
         h('label', {}, 'Description', descIn), h('label', {}, 'Channel', chanIn), h('label', {}, 'Labels for new devices', labelsIn),
         h('label', {}, 'Max uses (0 = unlimited)', usesIn), h('label', {}, 'Expires', ttlIn)),
+      fleetOperator ? h('label', { class: 'check' }, spareIn, 'Enroll as spares (stock for replacements: updates, no alerts)') : null,
       h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Create token'))),
       h('div', { class: 'mt' }, created)),
     h('div', { class: 'spacer' }), list);
@@ -1300,12 +1305,13 @@ async function viewEnroll(root) {
   async function refresh() {
     const toks = await api('GET', '/api/v1/tokens');
     const now = Date.now();
-    replace(list, table(['Token', 'State', 'Channel', 'Labels', 'Uses', 'Expires', ''],
+    replace(list, table(['Token', 'State', 'Enrolls as', 'Channel', 'Labels', 'Uses', 'Expires', ''],
       toks.map(t => {
         const state = t.revoked ? 'revoked' : t.expires_at && new Date(t.expires_at) < now ? 'expired' : t.max_uses && t.uses >= t.max_uses ? 'used up' : 'active';
         return h('tr', {},
           h('td', {}, h('div', {}, t.description || h('span', { class: 'muted' }, 'untitled')), h('div', { class: 'muted mono' }, t.id)),
           h('td', {}, h('span', { class: 'badge ' + (state === 'active' ? 'ok' : '') }, state)),
+          h('td', {}, t.lifecycle === 'spare' ? lifecycleBadge(t) : 'in service'),
           h('td', {}, t.channel),
           h('td', {}, labelChips(t.labels)),
           h('td', { class: 'num' }, t.uses + (t.max_uses ? ' / ' + t.max_uses : '')),

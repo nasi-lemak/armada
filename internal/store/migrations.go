@@ -69,6 +69,9 @@ CREATE TABLE IF NOT EXISTS report_schedules (
 CREATE INDEX IF NOT EXISTS alerts_started ON alerts(started_at);
 CREATE INDEX IF NOT EXISTS device_updates_updated ON device_updates(updated_at);
 `},
+	{Version: 7, Name: "enrollment tokens choose lifecycle", SQL: `
+ALTER TABLE enrollment_tokens ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active';
+`},
 	// Append new migrations here.
 }
 

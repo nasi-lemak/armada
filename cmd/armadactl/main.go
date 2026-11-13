@@ -54,7 +54,8 @@ Commands:
   devices action <id> reboot|restart-agent
   devices action <id> exec -- <command> [args...]
   tokens list
-  tokens create [--channel C] [--label K=V]... [--max-uses N] [--ttl 24h] [--description D]
+  tokens create [--channel C] [--label K=V]... [--max-uses N] [--ttl 24h] [--description D] [--spare]
+                                             --spare: devices join as spares (in stock: updates, no alerts)
   tokens revoke <id>
   releases list [--package P]
   releases upload --package P --version V [--channel C] [--os O] [--arch A]
@@ -757,9 +758,9 @@ func (c *cli) tokens(verb string, args []string) error {
 			if t.ExpiresAt != nil {
 				exp = t.ExpiresAt.Local().Format("2006-01-02 15:04")
 			}
-			rows = append(rows, []string{t.ID, state, t.Channel, fmtLabels(t.Labels), uses, exp, dash(t.Description)})
+			rows = append(rows, []string{t.ID, state, t.Lifecycle, t.Channel, fmtLabels(t.Labels), uses, exp, dash(t.Description)})
 		}
-		c.table("ID\tSTATE\tCHANNEL\tLABELS\tUSES\tEXPIRES\tDESCRIPTION", rows)
+		c.table("ID\tSTATE\tENROLLS AS\tCHANNEL\tLABELS\tUSES\tEXPIRES\tDESCRIPTION", rows)
 		return nil
 	case "create", "new":
 		fs := flag.NewFlagSet("tokens create", flag.ContinueOnError)
@@ -768,6 +769,7 @@ func (c *cli) tokens(verb string, args []string) error {
 		fs.StringVar(&req.Description, "description", "", "")
 		fs.IntVar(&req.MaxUses, "max-uses", 0, "")
 		ttl := fs.Duration("ttl", 0, "")
+		spare := fs.Bool("spare", false, "")
 		var labels multiFlag
 		fs.Var(&labels, "label", "")
 		if _, err := parse(fs, args); err != nil {
@@ -777,6 +779,9 @@ func (c *cli) tokens(verb string, args []string) error {
 		if req.Labels, err = labelsOf(labels); err != nil {
 			return err
 		}
+		if *spare {
+			req.Lifecycle = api.LifecycleSpare
+		}
 		req.TTLSeconds = int64(ttl.Seconds())
 		var t api.EnrollmentToken
 		if err := c.do("POST", "/api/v1/tokens", req, &t); err != nil {
@@ -785,7 +790,11 @@ func (c *cli) tokens(verb string, args []string) error {
 		if c.json {
 			return c.printJSON(t)
 		}
-		fmt.Fprintf(c.out, "Enrollment token %s created (channel %s). Save it now; it is not shown again:\n\n  %s\n\n", t.ID, t.Channel, t.Token)
+		as := ""
+		if t.Lifecycle == api.LifecycleSpare {
+			as = "; devices join as spares"
+		}
+		fmt.Fprintf(c.out, "Enrollment token %s created (channel %s%s). Save it now; it is not shown again:\n\n  %s\n\n", t.ID, t.Channel, as, t.Token)
 		fmt.Fprintf(c.out, "Enroll a device:\n  armada-agent --server %s --token %s\n", c.server, t.Token)
 		return nil
 	case "revoke", "delete", "rm":

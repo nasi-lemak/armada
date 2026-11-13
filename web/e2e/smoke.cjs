@@ -23,7 +23,8 @@ async function seed() {
   // Two customers' devices, enrolled and checked in through the agent API.
   const ids = {}, keys = {};
   for (const customer of ['acme', 'globex', 'stock']) {
-    const tok = await api('POST', '/api/v1/tokens', { labels: customer === 'stock' ? {} : { customer } });
+    // Stock devices enroll through a spare token.
+    const tok = await api('POST', '/api/v1/tokens', customer === 'stock' ? { lifecycle: 'spare', description: 'warehouse' } : { labels: { customer } });
     const res = await fetch(base + '/api/v1/agent/enroll', { method: 'POST', body: JSON.stringify({
       token: tok.token, name: customer + '-kiosk', info: { os: 'linux', arch: 'arm64', hostname: customer } }) });
     const er = await res.json();
@@ -32,7 +33,6 @@ async function seed() {
     ids[customer] = er.device_id;
     keys[customer] = er.device_key;
   }
-  await api('POST', `/api/v1/devices/${ids.stock}/lifecycle`, { state: 'spare' });
   await api('POST', '/api/v1/users', { email: 'it@acme.example', role: 'operator', scope: { labels: { customer: 'acme' } }, password: 'smoke-test-password' });
 
   // globex is in maintenance; acme has a firing alert to acknowledge.
@@ -89,6 +89,10 @@ async function visit(page, who, hash, expectHeading) {
       if (rows.length !== 3) fail(`admin sees ${rows.length} devices, expected 3`);
       if (!rows.some(r => r.includes('stock-kiosk') && r.includes('spare'))) fail('device list does not mark the spare');
       if (!rows.some(r => r.includes('globex') && r.includes('maintenance'))) fail('device list does not mark the device in maintenance');
+    }
+    if (hash === '#/enroll') {
+      const toks = await admin.$$eval('#view table tbody tr', r => r.map(x => x.textContent)).catch(() => []);
+      if (!toks.some(t => t.includes('warehouse') && t.includes('spare'))) fail('enrollment page does not show the spare token');
     }
     if (hash === '#/reports') {
       await admin.waitForTimeout(500);

@@ -411,7 +411,7 @@ func expectOne(res sql.Result) error {
 
 // ---- enrollment tokens ----
 
-const tokenCols = `id, description, channel, labels, max_uses, uses, expires_at, revoked, created_at`
+const tokenCols = `id, description, channel, labels, max_uses, uses, expires_at, revoked, created_at, lifecycle`
 
 func scanToken(sc scanner) (*api.EnrollmentToken, error) {
 	var t api.EnrollmentToken
@@ -419,7 +419,7 @@ func scanToken(sc scanner) (*api.EnrollmentToken, error) {
 	var expires sql.NullInt64
 	var revoked int
 	var created int64
-	if err := sc.Scan(&t.ID, &t.Description, &t.Channel, &labels, &t.MaxUses, &t.Uses, &expires, &revoked, &created); err != nil {
+	if err := sc.Scan(&t.ID, &t.Description, &t.Channel, &labels, &t.MaxUses, &t.Uses, &expires, &revoked, &created, &t.Lifecycle); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -441,8 +441,11 @@ func (s *Store) CreateToken(ctx context.Context, t *api.EnrollmentToken, tokenHa
 	if t.ExpiresAt != nil {
 		expires = ts(*t.ExpiresAt)
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO enrollment_tokens (`+tokenCols+`, token_hash) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-		t.ID, t.Description, t.Channel, mustJSON(t.Labels), t.MaxUses, t.Uses, expires, boolInt(t.Revoked), ts(t.CreatedAt), tokenHash)
+	if t.Lifecycle == "" {
+		t.Lifecycle = api.LifecycleActive
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO enrollment_tokens (`+tokenCols+`, token_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		t.ID, t.Description, t.Channel, mustJSON(t.Labels), t.MaxUses, t.Uses, expires, boolInt(t.Revoked), ts(t.CreatedAt), t.Lifecycle, tokenHash)
 	return err
 }
 
@@ -508,9 +511,21 @@ func (s *Store) Enroll(ctx context.Context, tokenHash string, d *api.Device, key
 	if d.Attestation != nil {
 		attestation = mustJSON(d.Attestation)
 	}
+	// The token decides whether the device goes into service or into stock.
+	d.Lifecycle, d.LifecycleInfo = api.LifecycleActive, nil
+	lifeInfo := ""
+	if t.Lifecycle == api.LifecycleSpare {
+		by := "enrollment token " + t.ID
+		if t.Description != "" {
+			by += " (" + t.Description + ")"
+		}
+		d.Lifecycle = api.LifecycleSpare
+		d.LifecycleInfo = &api.LifecycleInfo{Note: "enrolled as a spare", ChangedAt: now, ChangedBy: by}
+		lifeInfo = mustJSON(d.LifecycleInfo)
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash, hw_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		d.ID, d.Name, d.Channel, mustJSON(d.Labels), mustJSON(d.Info), mustJSON(d.Metrics), mustJSON(d.Packages),
-		d.AgentStatus, ts(d.EnrolledAt), ts(d.LastSeenAt), attestation, boolInt(d.LicenseRevoked), "[]", d.ParentID, api.LifecycleActive, "", keyHash, hwKey); err != nil {
+		d.AgentStatus, ts(d.EnrolledAt), ts(d.LastSeenAt), attestation, boolInt(d.LicenseRevoked), "[]", d.ParentID, d.Lifecycle, lifeInfo, keyHash, hwKey); err != nil {
 		return err
 	}
 	return tx.Commit()

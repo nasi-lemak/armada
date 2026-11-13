@@ -59,6 +59,9 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	if att != nil {
 		msg += fmt.Sprintf(", hardware key in %s, boot %s", att.SecurityLevel, att.BootState)
 	}
+	if dev.Lifecycle == api.LifecycleSpare {
+		msg += ", as a spare"
+	}
 	s.event(r.Context(), "device.enrolled", dev.ID, "", msg)
 	writeJSON(w, http.StatusOK, api.EnrollResponse{
 		DeviceID:                 dev.ID,

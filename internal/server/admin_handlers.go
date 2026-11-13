@@ -528,6 +528,20 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	if req.Labels == nil {
 		req.Labels = map[string]string{}
 	}
+	switch req.Lifecycle {
+	case "", api.LifecycleActive:
+		req.Lifecycle = api.LifecycleActive
+	case api.LifecycleSpare:
+		// Spares are the vendor's stock: only fleet-wide operators can put
+		// them into service, so only they enroll them.
+		if api.RoleRank(principalFrom(r.Context()).fleetRole()) < api.RoleRank(api.RoleOperator) {
+			writeError(w, http.StatusForbidden, "spare tokens need the operator role on the whole fleet")
+			return
+		}
+	default:
+		writeError(w, http.StatusBadRequest, "lifecycle must be active or spare")
+		return
+	}
 	// Without a fleet-wide operator grant, people can only enroll devices
 	// where they are operators. With several such grants (e.g. two
 	// customers), the labels must pick one.
@@ -589,6 +603,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		Labels:      req.Labels,
 		MaxUses:     req.MaxUses,
 		CreatedAt:   now,
+		Lifecycle:   req.Lifecycle,
 		Token:       newSecret("et"),
 	}
 	if req.TTLSeconds > 0 {

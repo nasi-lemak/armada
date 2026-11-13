@@ -713,10 +713,21 @@ Every device has a lifecycle state, shown as a badge in the device list and on i
 
 | State | Meaning | Updates | Alerts | Can check in |
 |---|---|---|---|---|
-| `active` | In service (every new device starts here) | yes | yes | yes |
+| `active` | In service (new devices start here, unless their token enrolls spares) | yes | yes | yes |
 | `spare` | In stock, ready to replace a device | yes, so it's current when needed | no | yes |
 | `repair` | Out of service: RMA, at the bench | no | no | yes |
 | `retired` | Decommissioned for good | no | no | **no** |
+
+**Enrolling stock as spares.** Create the enrollment token with **Enroll as spares** on the
+Enrollment page (or `armadactl tokens create --spare`). Devices that enroll with it start as spares.
+They get updates so they're current when needed, but they don't alert or count as offline while
+they sit in a box. Use such a token for the warehouse batch, and a normal one for devices going
+straight to a customer. Spare tokens need a fleet-wide operator, like other lifecycle changes. The
+device's lifecycle note records which token enrolled it.
+
+```bash
+armadactl tokens create --spare --description "warehouse batch 7" --max-uses 50
+```
 
 When a device leaves service (spare, repair, retired or removed), its open alerts close without a
 "resolved" notification. The device didn't recover, it just stopped being watched. Spares and devices
@@ -1293,7 +1304,7 @@ armadactl devices delete <id>
 armadactl devices lifecycle <id> active|spare|repair [--note N]
 armadactl devices retire <id> --yes [--note N]
 armadactl devices replace <id> --with <new-id> [--old-state repair|spare|retired] [--note N]
-armadactl tokens create|list|revoke
+armadactl tokens create|list|revoke             (create --spare: devices join as spares)
 armadactl releases upload|list|delete
 armadactl deployments create --release <id> [--channel C] [--label K=V] [--device ID]
                              [--stages 5,25,100] [--stage-duration 15m] [--max-failure-rate 0.2]
@@ -1402,7 +1413,7 @@ endpoints use the per-device key issued at enrollment.
 | `POST /api/v1/devices/{id}/lifecycle` (`{"state": "spare\|repair\|active\|retired", "note": …}`) | Change a device's lifecycle state (retiring is final) |
 | `POST /api/v1/devices/{id}/replace` (`{"replacement_id": …, "old_state": "repair"}`) | Replace a device (RMA): the replacement takes over name, channel and labels |
 | `GET/POST /api/v1/config-profiles`, `GET/PUT/DELETE /api/v1/config-profiles/{id}` | Configuration profiles (with compliance counts) |
-| `GET/POST /api/v1/tokens`, `DELETE /api/v1/tokens/{id}` | Enrollment tokens |
+| `GET/POST /api/v1/tokens`, `DELETE /api/v1/tokens/{id}` | Enrollment tokens (`"lifecycle": "spare"` enrolls devices as spares) |
 | `GET/POST /api/v1/releases`, `GET/DELETE /api/v1/releases/{id}`, `GET …/artifact` | Releases (upload is `multipart/form-data`) |
 | `GET/POST /api/v1/deployments`, `GET /api/v1/deployments/{id}` | Deployments |
 | `POST /api/v1/deployments/{id}/{approve,pause,resume,advance,retry,complete,abort}` | Control a rollout (`approve`: someone other than its creator) |

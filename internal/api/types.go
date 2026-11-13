@@ -241,6 +241,8 @@ type EnrollmentToken struct {
 	ExpiresAt   *time.Time        `json:"expires_at,omitempty"`
 	Revoked     bool              `json:"revoked"`
 	CreatedAt   time.Time         `json:"created_at"`
+	// Lifecycle is the state devices start in: active, or spare for stock.
+	Lifecycle string `json:"lifecycle"`
 	// Token is only populated in the response to a create call.
 	Token string `json:"token,omitempty"`
 }
@@ -252,6 +254,9 @@ type CreateTokenRequest struct {
 	Labels      map[string]string `json:"labels"`
 	MaxUses     int               `json:"max_uses"`
 	TTLSeconds  int64             `json:"ttl_seconds"` // 0 = never expires
+	// Lifecycle: "spare" enrolls devices as stock (updates, no alerts);
+	// empty or "active" puts them in service. Spare tokens need a fleet-wide operator.
+	Lifecycle string `json:"lifecycle,omitempty"`
 }
 
 // Release is a versioned, signed artifact for a package.

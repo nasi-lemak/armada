@@ -240,3 +240,76 @@ func TestReplaceDevice(t *testing.T) {
 		t.Fatalf("replace event: %+v", evs)
 	}
 }
+
+func TestSpareEnrollmentTokens(t *testing.T) {
+	e := setupAlerts(t) // kiosk-07 (active), an offline rule below
+	e.rule(t, api.AlertRule{Name: "Device offline", Condition: api.ConditionDeviceOffline, OfflineMinutes: 10})
+
+	for name, c := range map[string]struct {
+		req  api.CreateTokenRequest
+		want int
+	}{
+		"spare":     {api.CreateTokenRequest{Lifecycle: "spare", Description: "warehouse batch 7"}, 201},
+		"active":    {api.CreateTokenRequest{Lifecycle: "active"}, 201},
+		"repair":    {api.CreateTokenRequest{Lifecycle: "repair"}, 400},
+		"retired":   {api.CreateTokenRequest{Lifecycle: "retired"}, 400},
+		"nonsense":  {api.CreateTokenRequest{Lifecycle: "stock"}, 400},
+		"unchanged": {api.CreateTokenRequest{}, 201},
+	} {
+		if code := call(t, e.ts, admin, "POST", "/api/v1/tokens", c.req, nil); code != c.want {
+			t.Errorf("%s: %d, want %d", name, code, c.want)
+		}
+	}
+
+	var tok api.EnrollmentToken
+	call(t, e.ts, admin, "POST", "/api/v1/tokens", api.CreateTokenRequest{Lifecycle: "spare", Description: "warehouse"}, &tok)
+	if tok.Lifecycle != api.LifecycleSpare {
+		t.Fatalf("token: %+v", tok)
+	}
+	var er api.EnrollResponse
+	call(t, e.ts, "", "POST", "/api/v1/agent/enroll", api.EnrollRequest{Token: tok.Token, Name: "stock-1", Info: api.DeviceInfo{OS: "linux"}}, &er)
+	d := getDevice(t, e, er.DeviceID)
+	if d.Lifecycle != api.LifecycleSpare || d.LifecycleInfo == nil || !strings.Contains(d.LifecycleInfo.ChangedBy, tok.ID) || d.LifecycleInfo.Note != "enrolled as a spare" {
+		t.Fatalf("spare device: %s %+v", d.Lifecycle, d.LifecycleInfo)
+	}
+	var toks []api.EnrollmentToken
+	call(t, e.ts, admin, "GET", "/api/v1/tokens", nil, &toks)
+	for _, x := range toks {
+		if x.ID == tok.ID && (x.Lifecycle != api.LifecycleSpare || x.Uses != 1) {
+			t.Fatalf("listed token: %+v", x)
+		}
+		if wantSpare := strings.HasPrefix(x.Description, "warehouse"); (x.Lifecycle == api.LifecycleSpare) != wantSpare {
+			t.Fatalf("token lifecycle: %+v", x)
+		}
+	}
+	var evs []api.Event
+	call(t, e.ts, admin, "GET", "/api/v1/events?device_id="+er.DeviceID, nil, &evs)
+	if len(evs) == 0 || !strings.Contains(evs[len(evs)-1].Message, "as a spare") {
+		t.Fatalf("enroll event: %+v", evs)
+	}
+
+	// Sitting in a box: no offline alert; counted as a spare, not offline.
+	e.clock = e.clock.Add(30 * time.Minute)
+	e.tick(t)
+	if n := notification(t, next(t, e.hook)); n.DeviceID != e.devID {
+		t.Fatalf("alert for the spare: %+v", n)
+	}
+	none(t, e.hook)
+	var sum api.FleetSummary
+	call(t, e.ts, admin, "GET", "/api/v1/summary", nil, &sum)
+	if sum.Spare != 1 || sum.Offline != 1 {
+		t.Fatalf("summary: %+v", sum)
+	}
+
+	// Client operators can't make spare tokens.
+	call(t, e.ts, admin, "POST", "/api/v1/users", api.CreateUserRequest{Email: "it@acme.com", Role: api.RoleOperator,
+		Scope: api.Selector{Labels: map[string]string{"customer": "acme"}}, Password: "long-password-1"}, nil)
+	var lr api.LoginResponse
+	call(t, e.ts, "", "POST", "/api/v1/auth/login", api.LoginRequest{Email: "it@acme.com", Password: "long-password-1"}, &lr)
+	if code := call(t, e.ts, lr.Token, "POST", "/api/v1/tokens", api.CreateTokenRequest{Lifecycle: "spare"}, nil); code != 403 {
+		t.Fatalf("client spare token: %d", code)
+	}
+	if code := call(t, e.ts, lr.Token, "POST", "/api/v1/tokens", api.CreateTokenRequest{}, nil); code != 201 {
+		t.Fatalf("client token: %d", code)
+	}
+}
