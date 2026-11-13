@@ -157,7 +157,7 @@ func (s *Server) handleReplaceDevice(w http.ResponseWriter, r *http.Request) {
 		msg += " (" + req.Note + ")"
 	}
 	s.logEvent(ctx, "device.replaced", old.ID, "", msg)
-	s.logEvent(ctx, "device.replaced", repl.ID, "", fmt.Sprintf("now %s, replacing device %s", oldName, old.ID))
+	s.logEvent(ctx, "device.replacement", repl.ID, "", fmt.Sprintf("now %s, replacing device %s", oldName, old.ID))
 	// Its new labels may bring configuration and updates: check in now.
 	s.push.wake(repl.ID)
 	if old.Lifecycle == api.LifecycleRetired {

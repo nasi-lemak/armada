@@ -219,11 +219,6 @@ func sendEmail(ctx context.Context, c *api.EmailConfig, n api.AlertNotification)
 	if c == nil || c.Host == "" || c.From == "" || len(c.To) == 0 {
 		return errors.New("email channel needs host, from and to")
 	}
-	port := c.Port
-	if port == 0 {
-		port = 587
-	}
-	addr := net.JoinHostPort(c.Host, strconv.Itoa(port))
 	subject := strings.TrimSpace(strings.TrimLeft(notificationTitle(n), "🔴🟠✅🔔 "))
 	var body strings.Builder
 	fmt.Fprintf(&body, "%s\r\n\r\n", n.Summary)
@@ -242,7 +237,17 @@ func sendEmail(ctx context.Context, c *api.EmailConfig, n api.AlertNotification)
 	}
 	msg := "From: " + c.From + "\r\nTo: " + strings.Join(c.To, ", ") + "\r\nSubject: " + mime.QEncoding.Encode("utf-8", "[Armada] "+subject) +
 		"\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nDate: " + time.Now().Format(time.RFC1123Z) + "\r\n\r\n" + body.String()
+	return smtpDeliver(ctx, c, msg)
+}
 
+// smtpDeliver sends a complete message (headers and body) through the
+// configured server, with STARTTLS (or implicit TLS on 465) and optional auth.
+func smtpDeliver(ctx context.Context, c *api.EmailConfig, msg string) error {
+	port := c.Port
+	if port == 0 {
+		port = 587
+	}
+	addr := net.JoinHostPort(c.Host, strconv.Itoa(port))
 	d := net.Dialer{Timeout: 15 * time.Second}
 	var conn net.Conn
 	var err error

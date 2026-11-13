@@ -69,6 +69,8 @@ type Config struct {
 	// SMTPRelay sends email for channels that don't name their own server,
 	// including every client email channel. Empty Host means none.
 	SMTPRelay api.EmailConfig
+	// ReportBrand names the sender of customer reports (your company or product).
+	ReportBrand string
 	// TrustedProxies are reverse proxies whose X-Forwarded-For/-Proto/-Host
 	// headers are believed. Headers from anyone else are ignored.
 	TrustedProxies []*net.IPNet
@@ -139,6 +141,7 @@ func DefaultConfig() Config {
 		SessionTTL:             12 * time.Hour,
 		PasswordLogin:          true,
 		TOTPIssuer:             "Armada",
+		ReportBrand:            "Armada",
 		SCIMDefaultRole:        api.RoleViewer,
 		PushHold:               50 * time.Second,
 		DefaultStrategy: api.Strategy{
@@ -440,6 +443,13 @@ func (s *Server) Handler() http.Handler {
 	viewer(scopedOK, "GET /api/v1/bulk/{id}", s.handleGetBulk)
 	viewer(scopedOK, "GET /api/v1/events", s.handleListEvents)
 	viewer(scopedOK, "GET /api/v1/alerts", s.handleListAlerts)
+	// Reports: anyone, about the devices they can see. Schedules follow
+	// the client-alert rules (admins manage all; client operators theirs).
+	viewer(scopedOK, "GET /api/v1/reports", s.handleReport)
+	viewer(scopedOK, "GET /api/v1/report-schedules", s.handleListReportSchedules)
+	operator(scopedOK, "POST /api/v1/report-schedules", s.handleCreateReportSchedule)
+	operator(scopedOK, "DELETE /api/v1/report-schedules/{id}", s.handleDeleteReportSchedule)
+	operator(scopedOK, "POST /api/v1/report-schedules/{id}/send", s.handleSendReportNow)
 	operator(scopedOK, "POST /api/v1/alerts/{id}/ack", s.handleAckAlert)
 	operator(scopedOK, "POST /api/v1/alerts/{id}/unack", s.handleUnackAlert)
 	// Maintenance: fleet operators manage all; client operators their
@@ -627,6 +637,9 @@ func (s *Server) Tick(ctx context.Context) error {
 		}
 	}
 	if err := s.evaluateAlerts(ctx, now); err != nil {
+		return err
+	}
+	if err := s.reportTick(ctx, now); err != nil {
 		return err
 	}
 	if err := s.store.PruneSessions(ctx, now); err != nil {

@@ -219,10 +219,11 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 		r := ruleByID[a.RuleID]
 		a.Status, a.UpdatedAt = api.AlertResolved, now
 		a.ResolvedAt = &now
+		a.ClosedOutOfService = outOfService[a.DeviceID] && a.DeploymentID == ""
 		if err := s.store.PutAlert(ctx, a); err != nil {
 			return err
 		}
-		if outOfService[a.DeviceID] && a.DeploymentID == "" {
+		if a.ClosedOutOfService {
 			s.logEvent(ctx, "alert.closed", a.DeviceID, "", "closed (device out of service): "+a.RuleName+" — "+a.Summary)
 			continue
 		}
@@ -234,7 +235,7 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 	if err := s.pruneMaintenance(ctx, now); err != nil {
 		return err
 	}
-	return s.store.PruneAlerts(ctx, now.Add(-30*24*time.Hour))
+	return s.store.PruneAlerts(ctx, now.Add(-alertRetention))
 }
 
 // alertOnEvent handles event-based conditions. Failures within one rollout
@@ -385,10 +386,10 @@ func alertAccess(p *principal, sc api.Selector, channel bool) (see, edit bool) {
 // pickClientScope resolves which client a new rule or channel belongs to.
 // Admins may leave it empty (a vendor object). Others must name one where
 // they are operators, or have exactly one such scope.
-func pickClientScope(p *principal, sc api.Selector, channel bool) (api.Selector, error) {
+func pickClientScope(p *principal, sc api.Selector, channel bool, what string) (api.Selector, error) {
 	if !scopeEmpty(sc) || p.fleetRole() == api.RoleAdmin {
 		if _, edit := alertAccess(p, sc, channel); !edit {
-			return sc, errors.New("you can only manage alerts for clients where you are an operator")
+			return sc, fmt.Errorf("you can only manage %s for clients where you are an operator", what)
 		}
 		return sc, nil
 	}
@@ -400,7 +401,7 @@ func pickClientScope(p *principal, sc api.Selector, channel bool) (api.Selector,
 	}
 	switch len(cands) {
 	case 0:
-		return sc, errors.New("only admins manage fleet-wide alerts; client alerts need the operator role for a client")
+		return sc, fmt.Errorf("only admins manage fleet-wide %s; a client's need the operator role for that client", what)
 	case 1:
 		return cands[0], nil
 	}
@@ -593,7 +594,7 @@ func (s *Server) handleSaveChannel(w http.ResponseWriter, r *http.Request) {
 		c.ID, c.CreatedAt, c.ClientScope, status = old.ID, old.CreatedAt, old.ClientScope, http.StatusOK
 		keepSecrets(&c, old)
 	} else {
-		sc, err := pickClientScope(p, c.ClientScope, true)
+		sc, err := pickClientScope(p, c.ClientScope, true, "alerts")
 		if err != nil {
 			writeError(w, http.StatusForbidden, err.Error())
 			return
@@ -698,7 +699,7 @@ func (s *Server) handleSaveAlertRule(w http.ResponseWriter, r *http.Request) {
 		}
 		rule.ID, rule.CreatedAt, rule.ClientScope, rule.CreatedBy, status = old.ID, old.CreatedAt, old.ClientScope, old.CreatedBy, http.StatusOK
 	} else {
-		sc, err := pickClientScope(p, rule.ClientScope, false)
+		sc, err := pickClientScope(p, rule.ClientScope, false, "alerts")
 		if err != nil {
 			writeError(w, http.StatusForbidden, err.Error())
 			return

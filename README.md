@@ -58,6 +58,9 @@ It has three parts, all in Go with no external services:
 - **Bulk operations.** Reboot, run a command, relabel, change channel, start maintenance or change
   lifecycle on many devices at once. You preview first, each device is checked on its own, and
   progress is tracked per device.
+- **Customer reports.** Availability, alerts, updates, replacements and maintenance for a client
+  over a week, a month or any dates. View them in the dashboard, download them as CSV or a printable
+  page, or have them emailed every week or month.
 - **Remote actions, in seconds.** Reboot, restart the agent, run a command, or ask for a check-in.
   Each agent holds a long-poll connection, so actions reach it within a second or two, even behind
   NAT, without opening ports. `exec` is off by default and each device opts in.
@@ -824,6 +827,72 @@ armadactl bulk lifecycle spare --label customer=acme --note "contract ended" --y
 armadactl bulk get <id>
 ```
 
+## Customer reports
+
+The **Reports** page summarises a client's devices (or the whole fleet) over a period, ready to send
+to the customer:
+
+- **Summary:** devices in service, spare and in repair; average availability, and how many devices
+  are below the 99% target; alerts by severity and the mean time to resolve them; updates installed
+  and failed; replacements; maintenance windows.
+- **Per device:** availability, downtime, alerts, updates installed and failed, and health now.
+  Devices are sorted least available first.
+- **Alerts** that started in the period, with how long each lasted.
+- **Updates** by release, **replacements and lifecycle changes**, and **maintenance windows** that
+  covered the devices.
+
+**How the numbers are measured:**
+- **Availability** is the share of time a device was checking in. Each device's history has an
+  `online` sample for every 5-minute period it checked in, measured per hour. It counts any time the
+  device was off or unreachable, including planned maintenance (listed separately so you can explain
+  it).
+- **Average availability** is over devices in service. Spares and devices in repair are listed but
+  not averaged.
+- **Mean time to resolve** leaves out alerts that closed because their device left service.
+- **Alerts** in the report are device alerts (`health`, `device_offline`). Rollout alerts cover
+  several customers, so they show up as failed updates instead.
+- **Retention limits:** history is kept 90 days, alerts 100 days and the activity log 30 days by
+  default. If a period goes back further, the report notes what's missing.
+
+**Who sees what:** everyone can report on the devices they can see. A client account gets only its
+own devices, whatever labels it asks for. Fleet-wide accounts can report on any client
+(`label=customer=acme`) or the whole fleet.
+
+**Formats:** JSON (`GET /api/v1/reports`), **CSV** (one row per device), and a self-contained
+**printable HTML** page. To get a PDF, open the page and print it.
+
+```bash
+armadactl report --label customer=acme --period last-month
+```
+
+```bash
+armadactl report --label customer=acme --from 2026-10-01 --to 2026-12-31 --tz Asia/Singapore --format html -o acme-q4.html
+```
+
+### Scheduled reports
+
+Have a report emailed **weekly** (Monday to Sunday) or **monthly**, in the client's time zone. It
+goes out an hour after the period ends, as an HTML email with the device table attached as CSV. Each
+period is sent once; failures retry hourly, show on the Reports page and in the activity log.
+**Send now** emails the last complete period straight away.
+
+- Emails go through the server's SMTP relay (`-smtp-host` and so on).
+- `-report-brand "Your Company"` puts your name on reports and their subject lines.
+- Client operators schedule reports for their own client; admins for any client or the whole fleet.
+  At most 20 recipients each.
+
+```bash
+armadactl report schedules create --client customer=acme --period monthly --tz Asia/Singapore --to it@acme.example --to ops@acme.example
+```
+
+```bash
+armadactl report schedules list
+```
+
+```bash
+armadactl report schedules send <id>
+```
+
 ## Peripherals: BLE sensors and other devices
 
 Devices that can't run an agent can be managed through a **gateway**: any Linux agent near them, such as
@@ -1226,6 +1295,8 @@ armadactl events [--device ID] [--deployment ID]
 armadactl alerts [--firing] | alerts ack <id> [--note N] | alerts unack <id>
 armadactl bulk reboot|restart-agent|wake|lock|exec|label|unlabel|set-channel|lifecycle <devices> [--yes]
 armadactl bulk list | bulk get <id>
+armadactl report [--label K=V]... [--period last-month] [--from D --to D] [--tz TZ] [--format csv|html -o FILE]
+armadactl report schedules list|create|send|delete
 armadactl maintenance list|start|schedule|end|delete   (start --device ID --for 2h; schedule --windows 02:00-04:00 --days sun)
 armadactl config list|get|apply -f FILE|enable|disable|delete
 armadactl groups [list|map --group G --role R [--scope K=V]...|unmap G]
@@ -1263,6 +1334,7 @@ Add `--json` to any command for machine-readable output.
 | `-unapproved-max-percent` | | `10` (largest first stage allowed before approval) |
 | `-trusted-proxies` | `ARMADA_TRUSTED_PROXIES` | none (comma-separated IPs/CIDRs) |
 | `-smtp-host`, `-smtp-port`, `-smtp-username`, `-smtp-from` | `ARMADA_SMTP_HOST`, …, `ARMADA_SMTP_PASSWORD` (environment only) | no relay |
+| `-report-brand` | `ARMADA_REPORT_BRAND` | `Armada` (name on customer reports and their emails) |
 | `-disable-admin-token` | `ARMADA_DISABLE_ADMIN_TOKEN` | `false` |
 | `-rotate-admin-token` | | replace the generated token at startup |
 | `-password-login` | `ARMADA_PASSWORD_LOGIN` | `true` |
@@ -1338,6 +1410,8 @@ endpoints use the per-device key issued at enrollment.
 | `GET/POST /api/v1/channels`, `PUT/DELETE /api/v1/channels/{id}`, `POST …/{id}/test` | Notification channels (`client_scope` for a client's) |
 | `GET/POST /api/v1/alert-rules`, `PUT/DELETE /api/v1/alert-rules/{id}` | Alert rules (`client_scope` for a client's) |
 | `GET /api/v1/alerts[?status=firing]` | Firing and recent alerts |
+| `GET /api/v1/reports?label=k=v&period=last-month\|this-month\|last-week\|last-7d\|last-30d` (or `from=&to=`, `tz=`, `format=json\|csv\|html`) | Customer report |
+| `GET/POST /api/v1/report-schedules`, `DELETE …/{id}`, `POST …/{id}/send` | Scheduled report emails |
 | `POST /api/v1/alerts/{id}/ack` (`{"note": …}`), `POST …/{id}/unack` | Acknowledge a firing alert, or undo it |
 | `GET/POST /api/v1/maintenance`, `POST …/{id}/end`, `DELETE …/{id}` | Maintenance (`?all=1` includes long-ended ones) |
 | `GET /api/v1/devices/{id}/history?range=24h\|7d\|30d\|90d` | A device's check and metric history (raw or hourly) |

@@ -93,6 +93,7 @@ func run() error {
 	flag.BoolVar(&cfg.PasswordLogin, "password-login", envBool("ARMADA_PASSWORD_LOGIN", true), "allow email and password sign-in; turn off when everyone uses single sign-on (the admin token still works) (ARMADA_PASSWORD_LOGIN)")
 	flag.BoolVar(&cfg.Require2FA, "require-2fa", envBool("ARMADA_REQUIRE_2FA", false), "make password users set up an authenticator app before using the dashboard or API (ARMADA_REQUIRE_2FA)")
 	flag.StringVar(&cfg.TOTPIssuer, "totp-issuer", env("ARMADA_TOTP_ISSUER", "Armada"), "name shown in authenticator apps")
+	flag.StringVar(&cfg.ReportBrand, "report-brand", env("ARMADA_REPORT_BRAND", "Armada"), "name on customer reports and their emails (your company or product)")
 	flag.StringVar(&cfg.OIDC.Issuer, "oidc-issuer", os.Getenv("ARMADA_OIDC_ISSUER"), "OpenID Connect issuer URL for single sign-on, e.g. https://accounts.google.com (ARMADA_OIDC_ISSUER)")
 	flag.StringVar(&cfg.OIDC.ClientID, "oidc-client-id", os.Getenv("ARMADA_OIDC_CLIENT_ID"), "OIDC client ID (ARMADA_OIDC_CLIENT_ID)")
 	flag.StringVar(&cfg.OIDC.RedirectURL, "oidc-redirect-url", os.Getenv("ARMADA_OIDC_REDIRECT_URL"), "OIDC redirect URL; default <public-url>/api/v1/auth/sso/callback")

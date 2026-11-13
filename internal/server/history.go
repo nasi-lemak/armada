@@ -37,7 +37,13 @@ func (s *Server) recordHistory(ctx context.Context, dev *api.Device, now time.Ti
 	h.mu.Lock()
 	due := func(name string) bool {
 		k := dev.ID + "\x00" + name
-		if t, ok := h.last[k]; ok && now.Sub(t) < res {
+		every := res
+		if name == "online" {
+			// Sampled a little early so heartbeat timing never leaves a
+			// period without one: reports measure availability from it.
+			every = res * 9 / 10
+		}
+		if t, ok := h.last[k]; ok && now.Sub(t) < every {
 			return false
 		}
 		h.last[k] = now

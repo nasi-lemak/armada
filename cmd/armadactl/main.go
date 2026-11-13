@@ -105,6 +105,15 @@ without --yes they only preview what would happen):
   bulk list                                  recent bulk operations
   bulk get <id>                              per-device progress
 
+Customer reports:
+  report [--label K=V]... [--period last-month|this-month|last-week|this-week|last-7d|last-30d]
+         [--from 2026-10-01 --to 2026-10-31] [--tz Asia/Singapore] [--format csv|html -o FILE]
+                                             availability, alerts, updates, replacements, maintenance
+  report schedules list
+  report schedules create --period monthly|weekly --to ADDR [--to ADDR]... [--client K=V]... [--tz TZ] [--name N]
+                                             emailed through the server's SMTP relay
+  report schedules send|delete <id>
+
 Maintenance (alerts held and updates paused for the covered devices):
   maintenance list [--all]
   maintenance start --device ID|--label K=V|--channel C --for 2h [--note N] [--name N]
@@ -230,6 +239,8 @@ func (c *cli) run(args []string) error {
 		return c.maintenance(verb, rest)
 	case "bulk":
 		return c.bulk(verb, rest)
+	case "report", "reports":
+		return c.report(verb, rest)
 	case "history":
 		return c.history(verb, rest)
 	case "backup":

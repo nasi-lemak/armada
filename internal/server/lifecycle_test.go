@@ -57,6 +57,11 @@ func TestLifecycleAlertsAndUpdates(t *testing.T) {
 	if a := e.firing(t); len(a) != 0 {
 		t.Fatalf("alert still open: %+v", a)
 	}
+	var all []api.Alert
+	call(t, e.ts, admin, "GET", "/api/v1/alerts", nil, &all)
+	if len(all) != 1 || !all[0].ClosedOutOfService {
+		t.Fatalf("closed alert not marked out of service: %+v", all)
+	}
 	e.clock = e.clock.Add(time.Hour)
 	e.tick(t)
 	none(t, e.hook) // and no new ones

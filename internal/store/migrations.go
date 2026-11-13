@@ -60,6 +60,15 @@ CREATE TABLE IF NOT EXISTS bulk_operations (
 ALTER TABLE actions ADD COLUMN batch_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS actions_batch ON actions(batch_id) WHERE batch_id <> '';
 `},
+	{Version: 6, Name: "report schedules", SQL: `
+CREATE TABLE IF NOT EXISTS report_schedules (
+	id TEXT PRIMARY KEY,
+	spec TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS alerts_started ON alerts(started_at);
+CREATE INDEX IF NOT EXISTS device_updates_updated ON device_updates(updated_at);
+`},
 	// Append new migrations here.
 }
 

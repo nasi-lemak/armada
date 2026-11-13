@@ -195,6 +195,7 @@ func TestMigrationsAreFrozen(t *testing.T) {
 		"3 maintenance windows b1359bbc004d",
 		"4 device lifecycle 962fc48fe336",
 		"5 bulk operations 96628d342efc",
+		"6 report schedules 9ef124e2bf93",
 	}
 	var got []string
 	for i, m := range migrations {

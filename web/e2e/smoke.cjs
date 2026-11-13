@@ -77,7 +77,7 @@ async function visit(page, who, hash, expectHeading) {
   await admin.waitForSelector('#app:not(.hidden)', { timeout: 10000 });
   const pages = [['#/', 'Fleet overview'], ['#/devices', 'Devices'], ['#/devices/' + ids.acme, 'acme-kiosk'],
     ['#/deployments', 'Deployments'], ['#/releases', 'Releases'], ['#/monitoring', 'Monitoring'], ['#/config', 'Configuration'],
-    ['#/apps', 'Apps'], ['#/enroll', 'Enrollment'], ['#/activity', 'Activity'], ['#/users', 'Users'], ['#/account', 'My account']];
+    ['#/apps', 'Apps'], ['#/enroll', 'Enrollment'], ['#/activity', 'Activity'], ['#/reports', 'Reports'], ['#/users', 'Users'], ['#/account', 'My account']];
   for (const [hash, heading] of pages) {
     await visit(admin, 'admin', hash, heading);
     if (hash === '#/users') {
@@ -89,6 +89,11 @@ async function visit(page, who, hash, expectHeading) {
       if (rows.length !== 3) fail(`admin sees ${rows.length} devices, expected 3`);
       if (!rows.some(r => r.includes('stock-kiosk') && r.includes('spare'))) fail('device list does not mark the spare');
       if (!rows.some(r => r.includes('globex') && r.includes('maintenance'))) fail('device list does not mark the device in maintenance');
+    }
+    if (hash === '#/reports') {
+      await admin.waitForTimeout(500);
+      const text = await admin.textContent('#view');
+      if (!text.includes('Whole fleet') || !text.includes('Availability') || !text.includes('globex-kiosk')) fail('admin report does not cover the fleet');
     }
     if (hash === '#/monitoring') {
       const text = await admin.textContent('#view');
@@ -116,6 +121,10 @@ async function visit(page, who, hash, expectHeading) {
   await visit(client, 'client', '#/devices/' + ids.acme, 'acme-kiosk');
   await client.click('#view button:has-text("Start maintenance")');
   await client.waitForSelector('#view button:has-text("End maintenance")', { timeout: 5000 }).catch(() => fail('client could not start maintenance'));
+  await visit(client, 'client', '#/reports', 'Reports');
+  await client.waitForTimeout(500);
+  const clientReport = await client.textContent('#view');
+  if (!clientReport.includes('customer=acme') || clientReport.includes('globex')) fail('client report is not limited to the client');
   await visit(client, 'client', '#/monitoring', 'Monitoring');
   if ((await client.textContent('#view')).includes('Smoke maintenance')) fail('client sees vendor maintenance');
   await visit(client, 'client', '#/deployments');

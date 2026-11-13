@@ -882,6 +882,9 @@ type Alert struct {
 	AckedBy string     `json:"acked_by,omitempty"`
 	AckedAt *time.Time `json:"acked_at,omitempty"`
 	AckNote string     `json:"ack_note,omitempty"`
+	// ClosedOutOfService means it closed because its device left service
+	// (spare, repair, retired or removed), not because the problem was fixed.
+	ClosedOutOfService bool `json:"closed_out_of_service,omitempty"`
 	// InMaintenance is set (on read) when the alert's device is in a
 	// maintenance window: the alert neither repeats nor resolves meanwhile.
 	InMaintenance bool `json:"in_maintenance,omitempty"`
@@ -1238,4 +1241,113 @@ type APIToken struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	Token      string     `json:"token,omitempty"` // only in the create response
+}
+
+// ---- reports ----
+
+// Report summarises a set of devices (a client's, or the whole fleet) over a period.
+type Report struct {
+	Title       string              `json:"title"`
+	Brand       string              `json:"brand,omitempty"`
+	Scope       Selector            `json:"scope"`
+	From        time.Time           `json:"from"`
+	To          time.Time           `json:"to"`
+	TimeZone    string              `json:"time_zone"`
+	GeneratedAt time.Time           `json:"generated_at"`
+	Summary     ReportSummary       `json:"summary"`
+	Devices     []ReportDevice      `json:"devices"`
+	Alerts      []ReportAlert       `json:"alerts"`
+	AlertRules  []ReportCount       `json:"alert_rules"`
+	Updates     []ReportCount       `json:"updates"`
+	Changes     []Event             `json:"changes"`
+	Maintenance []ReportMaintWindow `json:"maintenance"`
+	// Notes explain what the numbers do and don't include.
+	Notes []string `json:"notes"`
+}
+
+// ReportSummary is the headline numbers of a report.
+type ReportSummary struct {
+	Devices  int `json:"devices"`
+	Active   int `json:"active"`
+	Spare    int `json:"spare"`
+	InRepair int `json:"in_repair"`
+	Retired  int `json:"retired"` // retired during the period
+	// Availability is the average over active devices (percent), if history is kept.
+	Availability     *float64 `json:"availability,omitempty"`
+	BelowTarget      int      `json:"below_target"` // active devices under AvailabilityTarget
+	AvailabilityGoal float64  `json:"availability_target"`
+	AlertsCritical   int      `json:"alerts_critical"`
+	AlertsWarning    int      `json:"alerts_warning"`
+	// MeanTimeToResolveMinutes is over alerts that resolved in the period.
+	MeanTimeToResolveMinutes *float64       `json:"mean_time_to_resolve_minutes,omitempty"`
+	UpdatesSucceeded         int            `json:"updates_succeeded"`
+	UpdatesFailed            int            `json:"updates_failed"`
+	Replacements             int            `json:"replacements"`
+	MaintenanceWindows       int            `json:"maintenance_windows"`
+	HealthNow                map[string]int `json:"health_now"`
+}
+
+// ReportDevice is one device's line in a report.
+type ReportDevice struct {
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
+	Lifecycle        string            `json:"lifecycle"`
+	Platform         string            `json:"platform"`
+	Availability     *float64          `json:"availability,omitempty"`
+	DowntimeMinutes  *int              `json:"downtime_minutes,omitempty"`
+	Alerts           int               `json:"alerts"`
+	UpdatesSucceeded int               `json:"updates_succeeded"`
+	UpdatesFailed    int               `json:"updates_failed"`
+	Health           string            `json:"health"`
+	Packages         map[string]string `json:"packages"`
+	LastSeenAt       time.Time         `json:"last_seen_at"`
+}
+
+// ReportAlert is an alert that started in the period.
+type ReportAlert struct {
+	Rule            string     `json:"rule"`
+	Severity        string     `json:"severity"`
+	DeviceID        string     `json:"device_id,omitempty"`
+	DeviceName      string     `json:"device_name,omitempty"`
+	Summary         string     `json:"summary"`
+	StartedAt       time.Time  `json:"started_at"`
+	ResolvedAt      *time.Time `json:"resolved_at,omitempty"`
+	DurationMinutes *int       `json:"duration_minutes,omitempty"`
+	// ClosedOutOfService: it closed because the device left service.
+	ClosedOutOfService bool `json:"closed_out_of_service,omitempty"`
+}
+
+// ReportCount counts something by name (alerts by rule, updates by version).
+type ReportCount struct {
+	Name   string `json:"name"`
+	Count  int    `json:"count"`
+	Failed int    `json:"failed,omitempty"`
+}
+
+// ReportMaintWindow is a maintenance window that overlapped the period.
+type ReportMaintWindow struct {
+	Name     string     `json:"name"`
+	Note     string     `json:"note,omitempty"`
+	StartsAt time.Time  `json:"starts_at"`
+	EndsAt   *time.Time `json:"ends_at,omitempty"`
+	Windows  string     `json:"windows,omitempty"`
+	Devices  int        `json:"devices"`
+}
+
+// ReportSchedule emails a report every week or month.
+type ReportSchedule struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// ClientScope is the client the report is about; empty is the whole fleet (admins only).
+	ClientScope Selector  `json:"client_scope"`
+	Period      string    `json:"period"` // weekly (Monday to Sunday) | monthly
+	TimeZone    string    `json:"time_zone,omitempty"`
+	Recipients  []string  `json:"recipients"`
+	CreatedBy   string    `json:"created_by,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	// LastPeriod is the start date of the last period sent ("2026-10-01").
+	LastPeriod    string     `json:"last_period,omitempty"`
+	LastSentAt    *time.Time `json:"last_sent_at,omitempty"`
+	LastAttemptAt *time.Time `json:"last_attempt_at,omitempty"`
+	LastError     string     `json:"last_error,omitempty"`
 }
