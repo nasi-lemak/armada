@@ -62,13 +62,30 @@ func (s *Server) enqueueNotification(ch *api.NotificationChannel, n api.AlertNot
 }
 
 func (s *Server) sendNotification(ctx context.Context, ch *api.NotificationChannel, n api.AlertNotification) error {
+	client := !scopeEmpty(ch.ClientScope)
+	if client {
+		ctx = withClientChannel(ctx)
+	}
 	switch ch.Type {
 	case "webhook":
 		return s.sendWebhook(ctx, ch.Webhook, n)
 	case "slack":
 		return s.sendSlack(ctx, ch.Slack, n)
 	case "email":
-		return sendEmail(ctx, ch.Email, n)
+		e := ch.Email
+		if e == nil {
+			return errors.New("email channel has no configuration")
+		}
+		if client || e.Host == "" {
+			// Through the vendor's relay; clients only choose recipients.
+			if s.cfg.SMTPRelay.Host == "" {
+				return errors.New("no SMTP relay is configured on the server (-smtp-host)")
+			}
+			relay := s.cfg.SMTPRelay
+			relay.To = e.To
+			e = &relay
+		}
+		return sendEmail(ctx, e, n)
 	}
 	return fmt.Errorf("unknown channel type %q", ch.Type)
 }
@@ -134,7 +151,11 @@ func (s *Server) sendWebhook(ctx context.Context, c *api.WebhookConfig, n api.Al
 }
 
 func (s *Server) doNotifyRequest(req *http.Request) error {
-	resp, err := s.notifyClient.Do(req)
+	cl := s.notifyClient
+	if isClientChannel(req.Context()) {
+		cl = s.clientNotifyClient
+	}
+	resp, err := cl.Do(req)
 	if err != nil {
 		return err
 	}

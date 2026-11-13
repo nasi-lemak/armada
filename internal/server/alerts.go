@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/mail"
 	"net/url"
@@ -74,7 +75,7 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 				limit = 10 * time.Minute
 			}
 			for _, d := range devices {
-				if !rollout.Matches(r.Selector, d) || d.LastSeenAt.IsZero() {
+				if !ruleCovers(r, d) || d.LastSeenAt.IsZero() {
 					continue
 				}
 				if gone := now.Sub(d.LastSeenAt); gone >= limit {
@@ -88,7 +89,7 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 				minRank = api.HealthRank(api.HealthWarning)
 			}
 			for _, d := range devices {
-				if !rollout.Matches(r.Selector, d) {
+				if !ruleCovers(r, d) {
 					continue
 				}
 				var failing []string
@@ -109,6 +110,9 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 				}
 			}
 		case api.ConditionDeploymentPaused:
+			if !scopeEmpty(r.ClientScope) {
+				continue // fleet-level: never for client rules
+			}
 			for _, dep := range deps {
 				want[r.ID+"/"+dep.ID] = candidate{rule: r, key: r.ID + "/" + dep.ID, severity: api.HealthCritical, depID: dep.ID,
 					summary: fmt.Sprintf("Rollout %q (%s %s) is paused: %s", dep.Name, dep.Package, dep.Version, dep.StatusReason)}
@@ -196,7 +200,7 @@ func (s *Server) alertOnEvent(ctx context.Context, typ, deviceID, deploymentID, 
 	}
 	now := s.now()
 	for _, r := range rules {
-		if !r.Enabled || r.Condition != api.ConditionUpdateFailed || (dev != nil && !rollout.Matches(r.Selector, dev)) {
+		if !r.Enabled || r.Condition != api.ConditionUpdateFailed || !scopeEmpty(r.ClientScope) || (dev != nil && !rollout.Matches(r.Selector, dev)) {
 			continue
 		}
 		key := r.ID + "/" + deploymentID
@@ -272,6 +276,70 @@ func (s *Server) dispatch(ctx context.Context, r *api.AlertRule, a *api.Alert, d
 		}
 		s.enqueueNotification(ch, n)
 	}
+}
+
+// ruleCovers reports whether a rule applies to a device: its selector, and
+// for a client rule also the client's scope.
+func ruleCovers(r *api.AlertRule, d *api.Device) bool {
+	return rollout.Matches(r.Selector, d) && (scopeEmpty(r.ClientScope) || rollout.Matches(r.ClientScope, d))
+}
+
+// sameScope compares two selectors (labels and channel).
+func sameScope(a, b api.Selector) bool {
+	if a.Channel != b.Channel || len(a.Labels) != len(b.Labels) {
+		return false
+	}
+	for k, v := range a.Labels {
+		if b.Labels[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// alertAccess decides who sees and manages rules and channels. Admins
+// manage everything. A client object (non-empty scope) is visible to anyone
+// with a grant on exactly that scope and editable by its operators. Vendor
+// rules are visible to fleet-wide staff; vendor channels only to admins.
+func alertAccess(p *principal, sc api.Selector, channel bool) (see, edit bool) {
+	if p.fleetRole() == api.RoleAdmin {
+		return true, true
+	}
+	if scopeEmpty(sc) {
+		return !channel && p.fleetRole() != "", false
+	}
+	for _, g := range p.grants {
+		if sameScope(g.Scope, sc) {
+			see = true
+			edit = edit || api.RoleRank(g.Role) >= api.RoleRank(api.RoleOperator)
+		}
+	}
+	return see, edit
+}
+
+// pickClientScope resolves which client a new rule or channel belongs to.
+// Admins may leave it empty (a vendor object). Others must name one where
+// they are operators, or have exactly one such scope.
+func pickClientScope(p *principal, sc api.Selector, channel bool) (api.Selector, error) {
+	if !scopeEmpty(sc) || p.fleetRole() == api.RoleAdmin {
+		if _, edit := alertAccess(p, sc, channel); !edit {
+			return sc, errors.New("you can only manage alerts for clients where you are an operator")
+		}
+		return sc, nil
+	}
+	var cands []api.Selector
+	for _, g := range p.grants {
+		if !scopeEmpty(g.Scope) && api.RoleRank(g.Role) >= api.RoleRank(api.RoleOperator) {
+			cands = append(cands, g.Scope)
+		}
+	}
+	switch len(cands) {
+	case 0:
+		return sc, errors.New("only admins manage fleet-wide alerts; client alerts need the operator role for a client")
+	case 1:
+		return cands[0], nil
+	}
+	return sc, errors.New("say which client this is for (client_scope)")
 }
 
 func roundDuration(d time.Duration) string {
@@ -390,11 +458,13 @@ func validateChannel(c *api.NotificationChannel) error {
 		c.Webhook, c.Email = nil, nil
 	case "email":
 		e := c.Email
-		if e == nil || e.Host == "" || len(e.To) == 0 {
-			return errors.New("email needs host, from and at least one recipient")
+		if e == nil || len(e.To) == 0 {
+			return errors.New("email needs at least one recipient")
 		}
-		if _, err := mail.ParseAddress(e.From); err != nil {
-			return errors.New("invalid from address")
+		if e.Host != "" { // its own server; otherwise the server's relay sends it
+			if _, err := mail.ParseAddress(e.From); err != nil {
+				return errors.New("invalid from address")
+			}
 		}
 		for _, to := range e.To {
 			if _, err := mail.ParseAddress(to); err != nil {
@@ -421,9 +491,12 @@ func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
+	p := principalFrom(r.Context())
 	out := make([]api.NotificationChannel, 0, len(chs))
 	for _, c := range chs {
-		out = append(out, redactChannel(*c))
+		if see, _ := alertAccess(p, c.ClientScope, true); see {
+			out = append(out, redactChannel(*c))
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -434,6 +507,7 @@ func (s *Server) handleSaveChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.now()
+	p := principalFrom(r.Context())
 	status := http.StatusCreated
 	if id := r.PathValue("id"); id != "" {
 		old, err := s.store.GetChannel(r.Context(), id)
@@ -444,12 +518,32 @@ func (s *Server) handleSaveChannel(w http.ResponseWriter, r *http.Request) {
 			s.internalError(w, err)
 			return
 		}
-		c.ID, c.CreatedAt, status = old.ID, old.CreatedAt, http.StatusOK
+		if see, edit := alertAccess(p, old.ClientScope, true); !see {
+			writeError(w, http.StatusNotFound, "channel not found")
+			return
+		} else if !edit {
+			writeError(w, http.StatusForbidden, "you can't change this channel")
+			return
+		}
+		c.ID, c.CreatedAt, c.ClientScope, status = old.ID, old.CreatedAt, old.ClientScope, http.StatusOK
 		keepSecrets(&c, old)
 	} else {
-		c.ID, c.CreatedAt = newID("chn"), now
+		sc, err := pickClientScope(p, c.ClientScope, true)
+		if err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		c.ID, c.CreatedAt, c.ClientScope = newID("chn"), now, sc
 	}
 	if err := validateChannel(&c); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if c.Type == "email" && c.Email.Host == "" && s.cfg.SMTPRelay.Host == "" {
+		writeError(w, http.StatusBadRequest, "set the email server, or configure the server's SMTP relay (-smtp-host)")
+		return
+	}
+	if err := s.validateClientChannel(&c); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -462,6 +556,9 @@ func (s *Server) handleSaveChannel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteChannel(w http.ResponseWriter, r *http.Request) {
+	if !s.canEditChannel(w, r) {
+		return
+	}
 	if err := s.store.DeleteChannel(r.Context(), r.PathValue("id")); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "channel not found")
 		return
@@ -474,11 +571,11 @@ func (s *Server) handleDeleteChannel(w http.ResponseWriter, r *http.Request) {
 
 // handleTestChannel sends a sample notification right away and reports the outcome.
 func (s *Server) handleTestChannel(w http.ResponseWriter, r *http.Request) {
-	c, err := s.store.GetChannel(r.Context(), r.PathValue("id"))
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "channel not found")
+	if !s.canEditChannel(w, r) {
 		return
-	} else if err != nil {
+	}
+	c, err := s.store.GetChannel(r.Context(), r.PathValue("id"))
+	if err != nil {
 		s.internalError(w, err)
 		return
 	}
@@ -499,7 +596,14 @@ func (s *Server) handleListAlertRules(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, nonNil(rules))
+	p := principalFrom(r.Context())
+	out := []*api.AlertRule{}
+	for _, rl := range rules {
+		if see, _ := alertAccess(p, rl.ClientScope, false); see {
+			out = append(out, rl)
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleSaveAlertRule(w http.ResponseWriter, r *http.Request) {
@@ -509,6 +613,7 @@ func (s *Server) handleSaveAlertRule(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	now := s.now()
+	p := principalFrom(ctx)
 	status := http.StatusCreated
 	if id := r.PathValue("id"); id != "" {
 		old, err := s.store.GetAlertRule(ctx, id)
@@ -519,9 +624,25 @@ func (s *Server) handleSaveAlertRule(w http.ResponseWriter, r *http.Request) {
 			s.internalError(w, err)
 			return
 		}
-		rule.ID, rule.CreatedAt, status = old.ID, old.CreatedAt, http.StatusOK
+		if see, edit := alertAccess(p, old.ClientScope, false); !see {
+			writeError(w, http.StatusNotFound, "rule not found")
+			return
+		} else if !edit {
+			writeError(w, http.StatusForbidden, "you can't change this rule")
+			return
+		}
+		rule.ID, rule.CreatedAt, rule.ClientScope, rule.CreatedBy, status = old.ID, old.CreatedAt, old.ClientScope, old.CreatedBy, http.StatusOK
 	} else {
-		rule.ID, rule.CreatedAt = newID("rul"), now
+		sc, err := pickClientScope(p, rule.ClientScope, false)
+		if err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		rule.ID, rule.CreatedAt, rule.ClientScope, rule.CreatedBy = newID("rul"), now, sc, p.name
+	}
+	if !scopeEmpty(rule.ClientScope) && rule.Condition != api.ConditionDeviceOffline && rule.Condition != api.ConditionHealth {
+		writeError(w, http.StatusBadRequest, "client alert rules can watch device_offline or health; update failures and paused rollouts are vendor-wide")
+		return
 	}
 	rule.Name = strings.TrimSpace(rule.Name)
 	switch {
@@ -544,8 +665,15 @@ func (s *Server) handleSaveAlertRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, id := range rule.Channels {
-		if _, err := s.store.GetChannel(ctx, id); err != nil {
+		ch, err := s.store.GetChannel(ctx, id)
+		if err != nil {
 			writeError(w, http.StatusBadRequest, "unknown channel "+id)
+			return
+		}
+		// A client's alerts only go to that client's channels, and vendor
+		// alerts only to vendor channels: no client sees another's devices.
+		if !sameScope(ch.ClientScope, rule.ClientScope) {
+			writeError(w, http.StatusBadRequest, "channel "+ch.Name+" belongs to a different client")
 			return
 		}
 	}
@@ -561,7 +689,22 @@ func (s *Server) handleSaveAlertRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteAlertRule(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.DeleteAlertRule(r.Context(), r.PathValue("id")); errors.Is(err, store.ErrNotFound) {
+	old, err := s.store.GetAlertRule(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "rule not found")
+		return
+	} else if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	if see, edit := alertAccess(principalFrom(r.Context()), old.ClientScope, false); !see {
+		writeError(w, http.StatusNotFound, "rule not found")
+		return
+	} else if !edit {
+		writeError(w, http.StatusForbidden, "you can't delete this rule")
+		return
+	}
+	if err := s.store.DeleteAlertRule(r.Context(), old.ID); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "rule not found")
 		return
 	} else if err != nil {
@@ -578,4 +721,70 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, nonNil(s.visibleAlerts(r.Context(), principalFrom(r.Context()), alerts)))
+}
+
+// canEditChannel checks the caller may change the channel in the path.
+func (s *Server) canEditChannel(w http.ResponseWriter, r *http.Request) bool {
+	c, err := s.store.GetChannel(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "channel not found")
+		return false
+	} else if err != nil {
+		s.internalError(w, err)
+		return false
+	}
+	see, edit := alertAccess(principalFrom(r.Context()), c.ClientScope, true)
+	if !see {
+		writeError(w, http.StatusNotFound, "channel not found")
+		return false
+	}
+	if !edit {
+		writeError(w, http.StatusForbidden, "you can't change this channel")
+		return false
+	}
+	return true
+}
+
+// validateClientChannel adds the limits on channels clients configure: the
+// server makes these requests on their behalf.
+func (s *Server) validateClientChannel(c *api.NotificationChannel) error {
+	if scopeEmpty(c.ClientScope) {
+		return nil
+	}
+	httpsOnly := func(raw string) error {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+			return errors.New("client webhooks must use an https:// URL")
+		}
+		if ip := net.ParseIP(u.Hostname()); ip != nil && !publicIP(ip) && !s.allowPrivateClientTargets {
+			return errNonPublic
+		}
+		return nil
+	}
+	switch c.Type {
+	case "webhook":
+		if err := httpsOnly(c.Webhook.URL); err != nil {
+			return err
+		}
+		if c.Webhook.BodyTemplate != "" {
+			return errors.New("client webhooks send the standard JSON notification; custom body templates are vendor-only")
+		}
+		if m := strings.ToUpper(c.Webhook.Method); m != "" && m != http.MethodPost && m != http.MethodPut {
+			return errors.New("client webhooks use POST or PUT")
+		}
+	case "slack":
+		if err := httpsOnly(c.Slack.WebhookURL); err != nil {
+			return err
+		}
+	case "email":
+		if s.cfg.SMTPRelay.Host == "" {
+			return errors.New("email alerts for clients need the server's SMTP relay (-smtp-host); ask your vendor")
+		}
+		if len(c.Email.To) > 20 {
+			return errors.New("at most 20 recipients")
+		}
+		// Clients choose recipients only; the relay sends.
+		c.Email = &api.EmailConfig{To: c.Email.To}
+	}
+	return nil
 }

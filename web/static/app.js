@@ -1694,9 +1694,22 @@ async function viewMonitoring(root) {
   mType.addEventListener('change', syncType);
 
   // --- rule form ---
+  // Who manages which alerts: admins everything; client operators their client's.
+  const isAdmin = !!me && me.fleet_role === 'admin';
+  const clientScopes = ((me && me.grants) || []).filter(g => (ROLE_RANK[g.role] || 0) >= ROLE_RANK.operator && scopeText(g.scope)).map(g => g.scope);
+  const canManageAlerts = isAdmin || clientScopes.length > 0;
+  const canEditScope = sc => isAdmin || (scopeText(sc) !== '' && clientScopes.some(c => scopeText(c) === scopeText(sc)));
+  const forClient = () => {
+    const input = isAdmin
+      ? h('input', { placeholder: 'empty = vendor-wide, or customer=acme', 'aria-label': 'For client' })
+      : h('select', { 'aria-label': 'For client' }, clientScopes.map((sc, i) => h('option', { value: String(i) }, scopeText(sc))));
+    return { input, label: h('label', { class: isAdmin || clientScopes.length > 1 ? '' : 'hidden' }, 'For client', input),
+      read: () => isAdmin ? { labels: parseLabels(input.value) } : clientScopes[parseInt(input.value || '0', 10)] };
+  };
+  const rFor = forClient(), cFor = forClient();
   const rName = h('input', { required: true, placeholder: 'Storage failing', 'aria-label': 'Rule name' });
   const rCond = h('select', { 'aria-label': 'Condition' }, [['health', 'Health check failing'], ['device_offline', 'Device offline'],
-    ['update_failed', 'Update failed'], ['deployment_paused', 'Rollout paused']].map(([v, l]) => h('option', { value: v }, l)));
+    ...(isAdmin ? [['update_failed', 'Update failed'], ['deployment_paused', 'Rollout paused']] : [])].map(([v, l]) => h('option', { value: v }, l)));
   const rSev = h('select', { 'aria-label': 'Minimum severity' }, ['critical', 'warning'].map(v => h('option', { value: v }, v)));
   const rKinds = h('input', { placeholder: 'any, or storage power temperature', 'aria-label': 'Check kinds' });
   const rOffline = h('input', { type: 'number', min: '1', value: '10', 'aria-label': 'Offline minutes' });
@@ -1728,8 +1741,11 @@ async function viewMonitoring(root) {
   const webhookFields = h('div', { class: 'form-grid' }, h('label', { class: 'wide' }, 'URL', cURL), h('label', {}, 'Signing secret', cSecret),
     h('label', { class: 'wide' }, 'Headers', cHeaders), h('label', { class: 'wide' }, 'Body template', cTemplate));
   const slackFields = h('div', { class: 'form-grid hidden' }, h('label', { class: 'wide' }, 'Slack incoming webhook URL', cSlack));
-  const emailFields = h('div', { class: 'form-grid hidden' }, h('label', {}, 'SMTP host', cHost), h('label', {}, 'Port', cPort),
-    h('label', {}, 'Username', cUser), h('label', {}, 'Password', cPass), h('label', {}, 'From', cFrom), h('label', { class: 'wide' }, 'To', cTo));
+  const serverOnly = isAdmin ? '' : ' hidden'; // clients' email goes through the vendor's relay
+  const emailFields = h('div', { class: 'form-grid hidden' }, h('label', { class: serverOnly }, 'SMTP host (empty = server relay)', cHost),
+    h('label', { class: serverOnly }, 'Port', cPort), h('label', { class: serverOnly }, 'Username', cUser), h('label', { class: serverOnly }, 'Password', cPass),
+    h('label', { class: serverOnly }, 'From', cFrom), h('label', { class: 'wide' }, 'To', cTo));
+  if (!isAdmin) cTemplate.closest('label').classList.add('hidden');
   cType.addEventListener('change', () => {
     webhookFields.classList.toggle('hidden', cType.value !== 'webhook');
     slackFields.classList.toggle('hidden', cType.value !== 'slack');
@@ -1738,8 +1754,7 @@ async function viewMonitoring(root) {
 
   const section = (title, sub, cls) => h('div', { class: 'page-head mt ' + (cls || '') }, h('div', {}, h('h2', {}, title), h('div', { class: 'muted' }, sub)));
   monitorsBox.classList.add('fleet-only');
-  rulesBox.classList.add('fleet-only');
-  channelsBox.classList.add('need-admin');
+
   append(root, pageHead('Monitoring', 'Health checks on devices, and who gets told when something goes wrong'),
     alertsBox,
     section('Health monitors', 'Program checks run by every matching device. Hardware checks (storage, temperature, power, battery) run automatically.', 'fleet-only'),
@@ -1759,30 +1774,33 @@ async function viewMonitoring(root) {
       h('label', {}, 'Must contain', mContains), h('label', {}, 'Every (seconds)', mInterval), h('label', {}, 'Devices (labels)', mLabels)),
     h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Add monitor')))),
     monitorsBox,
-    section('Alert rules', 'When to notify, and which channels to use.', 'fleet-only'),
-    h('div', { class: 'card mb need-admin' }, h('form', { class: 'stack', onsubmit: async e => {
+    section('Alert rules', isAdmin ? 'When to notify, and which channels to use. Rules for a client only see that client\'s devices and can only use its channels.'
+      : 'When to notify you about your devices, and where.'),
+    h('div', { class: 'card mb' + (canManageAlerts ? '' : ' hidden') }, h('form', { class: 'stack', onsubmit: async e => {
       e.preventDefault();
-      let labels;
-      try { labels = parseLabels(rLabels.value); } catch (err) { return toast(err.message, true); }
+      let labels, clientScope;
+      try { labels = parseLabels(rLabels.value); clientScope = rFor.read(); } catch (err) { return toast(err.message, true); }
       const chosen = [...rChannels.querySelectorAll('input:checked')].map(i => i.value);
       if (!chosen.length) return toast('Pick at least one channel (add one below first).', true);
       const body = { name: rName.value.trim(), enabled: true, condition: rCond.value, selector: { labels }, channels: chosen,
         min_severity: rSev.value, check_kinds: rKinds.value.split(/[\s,]+/).filter(Boolean), offline_minutes: parseInt(rOffline.value || '10', 10),
-        repeat_minutes: parseInt(rRepeat.value || '0', 10), notify_resolved: rResolved.checked };
+        repeat_minutes: parseInt(rRepeat.value || '0', 10), notify_resolved: rResolved.checked, client_scope: clientScope };
       if (await guard(() => api('POST', '/api/v1/alert-rules', body), 'Rule added')) { rName.value = ''; refresh(); }
     } },
-    h('div', { class: 'form-grid' }, h('label', {}, 'Name', rName), h('label', {}, 'When', rCond), h('label', {}, 'At least', rSev),
+    h('div', { class: 'form-grid' }, rFor.label, h('label', {}, 'Name', rName), h('label', {}, 'When', rCond), h('label', {}, 'At least', rSev),
       h('label', {}, 'Only check kinds', rKinds), h('label', { class: 'hidden' }, 'Offline for (minutes)', rOffline),
       h('label', {}, 'Devices (labels)', rLabels), h('label', {}, 'Repeat every (minutes, 0 = never)', rRepeat)),
     h('label', { class: 'check' }, rResolved, 'Also notify when it resolves'),
     h('div', {}, h('div', { class: 'muted mb' }, 'Notify:'), rChannels),
     h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Add rule')))),
     rulesBox,
-    section('Notification channels', 'Webhooks reach any service (PagerDuty, Opsgenie, Teams, Discord, your own API) using an optional body template.', 'need-admin'),
-    h('div', { class: 'card mb need-admin' }, h('form', { class: 'stack', onsubmit: async e => {
+    section('Notification channels', isAdmin ? 'Webhooks reach any service (PagerDuty, Opsgenie, Teams, Discord, your own API) using an optional body template.'
+      : 'Where your alerts go: a webhook (public HTTPS address; the standard JSON notification), Slack, or email.'),
+    h('div', { class: 'card mb' + (canManageAlerts ? '' : ' hidden') }, h('form', { class: 'stack', onsubmit: async e => {
       e.preventDefault();
       const body = { name: cName.value.trim(), type: cType.value };
       try {
+        body.client_scope = cFor.read();
         if (cType.value === 'webhook') body.webhook = { url: cURL.value.trim(), secret: cSecret.value, headers: kvLines(cHeaders.value), body_template: cTemplate.value };
         if (cType.value === 'slack') body.slack = { webhook_url: cSlack.value.trim() };
         if (cType.value === 'email') body.email = { host: cHost.value.trim(), port: parseInt(cPort.value || '587', 10), username: cUser.value,
@@ -1790,18 +1808,29 @@ async function viewMonitoring(root) {
       } catch (err) { return toast(err.message, true); }
       if (await guard(() => api('POST', '/api/v1/channels', body), 'Channel added')) { cName.value = ''; refresh(); }
     } },
-    h('div', { class: 'form-grid' }, h('label', {}, 'Name', cName), h('label', {}, 'Type', cType)),
+    h('div', { class: 'form-grid' }, cFor.label, h('label', {}, 'Name', cName), h('label', {}, 'Type', cType)),
     webhookFields, slackFields, emailFields,
     h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Add channel')))),
     channelsBox);
   syncType(); syncCond();
+  // A rule can only notify channels of the same client (or vendor channels
+  // for vendor rules): offer just those.
+  let allChannels = [];
+  const syncRuleChannels = () => {
+    let want = '';
+    try { want = scopeText(rFor.read()); } catch { /* typing */ }
+    const usable = allChannels.filter(c => scopeText(c.client_scope) === want);
+    replace(rChannels, usable.length ? usable.map(c => h('label', { class: 'check chip' }, h('input', { type: 'checkbox', value: c.id }), c.name))
+      : h('span', { class: 'muted' }, 'No channels for this client yet — add one below.'));
+  };
+  rFor.input.addEventListener(isAdmin ? 'input' : 'change', syncRuleChannels);
 
   async function refresh() {
     const [alerts, monitors, rules, chs] = await Promise.all([
       api('GET', '/api/v1/alerts'),
       fleetWide() ? api('GET', '/api/v1/monitors') : [],
-      fleetWide() ? api('GET', '/api/v1/alert-rules') : [],
-      atLeast('admin') ? api('GET', '/api/v1/channels') : []]);
+      api('GET', '/api/v1/alert-rules'),
+      api('GET', '/api/v1/channels')]);
     channels = chs;
     const chName = Object.fromEntries(chs.map(c => [c.id, c.name]));
     const firing = alerts.filter(a => a.status === 'firing');
@@ -1826,27 +1855,29 @@ async function viewMonitoring(root) {
           h('button', { class: 'btn small danger', onclick: del('/api/v1/monitors/' + m.id, `Delete monitor ${m.name}?`) }, 'Delete'))))),
       'No program monitors yet.'));
     const condLabel = { health: 'health', device_offline: 'offline', update_failed: 'update failed', deployment_paused: 'rollout paused' };
-    replace(rulesBox, table(['Rule', 'When', 'Devices', 'Notify', ''],
+    const forCell = sc => scopeText(sc) ? labelChips(sc.labels) : h('span', { class: 'muted' }, 'vendor-wide');
+    replace(rulesBox, table(['Rule', 'For', 'When', 'Devices', 'Notify', ''],
       rules.map(r => h('tr', {},
-        h('td', {}, h('strong', {}, r.name), ' ', badge(r.enabled ? 'enabled' : 'disabled')),
+        h('td', {}, h('strong', {}, r.name), ' ', badge(r.enabled ? 'enabled' : 'disabled'), r.created_by ? h('div', { class: 'muted' }, 'by ' + r.created_by) : null),
+        h('td', {}, forCell(r.client_scope)),
         h('td', {}, condLabel[r.condition] || r.condition,
           r.condition === 'health' ? h('div', { class: 'muted' }, `${r.min_severity || 'critical'}+${(r.check_kinds || []).length ? ' · ' + r.check_kinds.join(', ') : ''}`) : null,
           r.condition === 'device_offline' ? h('div', { class: 'muted' }, `${r.offline_minutes || 10} min`) : null),
         h('td', {}, labelChips(r.selector.labels)),
         h('td', {}, r.channels.map(id => chName[id] || id).join(', ')),
-        h('td', {}, h('div', { class: 'btn-row need-admin' },
+        h('td', {}, !canEditScope(r.client_scope) ? null : h('div', { class: 'btn-row' },
           h('button', { class: 'btn small', onclick: async () => {
             if (await guard(() => api('PUT', '/api/v1/alert-rules/' + r.id, { ...r, enabled: !r.enabled }))) refresh();
           } }, r.enabled ? 'Disable' : 'Enable'),
           h('button', { class: 'btn small danger', onclick: del('/api/v1/alert-rules/' + r.id, `Delete rule ${r.name}?`) }, 'Delete'))))),
       'No alert rules yet.'));
-    replace(rChannels, chs.length ? chs.map(c => h('label', { class: 'check chip' }, h('input', { type: 'checkbox', value: c.id }), c.name))
-      : h('span', { class: 'muted' }, 'No channels yet — add one below.'));
-    replace(channelsBox, table(['Channel', 'Type', 'Destination', ''],
+    allChannels = chs;
+    syncRuleChannels();
+    replace(channelsBox, table(['Channel', 'For', 'Type', 'Destination', ''],
       chs.map(c => h('tr', {},
-        h('td', {}, h('strong', {}, c.name)), h('td', {}, c.type),
+        h('td', {}, h('strong', {}, c.name)), h('td', {}, forCell(c.client_scope)), h('td', {}, c.type),
         h('td', { class: 'mono' }, c.webhook ? c.webhook.url : c.slack ? c.slack.webhook_url : c.email ? c.email.to.join(', ') : ''),
-        h('td', {}, h('div', { class: 'btn-row' },
+        h('td', {}, !canEditScope(c.client_scope) ? null : h('div', { class: 'btn-row' },
           h('button', { class: 'btn small', onclick: () => guard(() => api('POST', `/api/v1/channels/${c.id}/test`), 'Test notification sent') }, 'Send test'),
           h('button', { class: 'btn small danger', onclick: del('/api/v1/channels/' + c.id, `Delete channel ${c.name}?`) }, 'Delete'))))),
       'No channels yet.'));

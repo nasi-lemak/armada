@@ -76,12 +76,14 @@ Monitoring and alerts:
   channels create --name N --type slack --url HOOK_URL
   channels create --name N --type email --smtp-host H [--smtp-port 587] [--smtp-user U --smtp-password P]
                   --from ADDR --to ADDR [--to ADDR]...
+                  [--client K=V]...          a client's channel (client operators: their own client)
   channels test <id>
   channels delete <id>
   rules list
   rules create --name N --condition health|device_offline|update_failed|deployment_paused
                --channel ID [--channel ID]... [--min-severity warning|critical] [--kind storage]...
                [--offline-minutes 10] [--repeat-minutes 0] [--label K=V]... [--no-resolved]
+               [--client K=V]...             a client's rule: only their devices, only their channels
   rules delete <id>
   alerts [--firing]
   history <device-id> [--range 24h|7d|30d|90d] [--check NAME] [--csv]
@@ -1180,9 +1182,9 @@ func (c *cli) channels(verb string, args []string) error {
 			case ch.Email != nil:
 				dest = strings.Join(ch.Email.To, ", ")
 			}
-			rows = append(rows, []string{ch.ID, ch.Name, ch.Type, dest})
+			rows = append(rows, []string{ch.ID, ch.Name, forText(ch.ClientScope), ch.Type, dest})
 		}
-		c.table("ID\tNAME\tTYPE\tDESTINATION", rows)
+		c.table("ID\tNAME\tFOR\tTYPE\tDESTINATION", rows)
 		return nil
 	case "create", "add":
 		fs := flag.NewFlagSet("channels create", flag.ContinueOnError)
@@ -1196,13 +1198,19 @@ func (c *cli) channels(verb string, args []string) error {
 		user := fs.String("smtp-user", "", "")
 		pass := fs.String("smtp-password", "", "")
 		from := fs.String("from", "", "")
-		var headers, to multiFlag
+		var headers, to, client multiFlag
 		fs.Var(&headers, "header", "")
 		fs.Var(&to, "to", "")
+		fs.Var(&client, "client", "")
 		if _, err := parse(fs, args); err != nil {
 			return err
 		}
 		ch := api.NotificationChannel{Name: *name, Type: *typ}
+		cl, err := labelsOf(client)
+		if err != nil {
+			return err
+		}
+		ch.ClientScope.Labels = cl
 		switch *typ {
 		case "webhook":
 			hm := map[string]string{}
@@ -1259,9 +1267,9 @@ func (c *cli) rules(verb string, args []string) error {
 			if !r.Enabled {
 				state = "disabled"
 			}
-			rows = append(rows, []string{r.ID, r.Name, r.Condition, fmtLabels(r.Selector.Labels), strings.Join(r.Channels, ","), state})
+			rows = append(rows, []string{r.ID, r.Name, forText(r.ClientScope), r.Condition, fmtLabels(r.Selector.Labels), strings.Join(r.Channels, ","), state})
 		}
-		c.table("ID\tNAME\tCONDITION\tDEVICES\tCHANNELS\tSTATE", rows)
+		c.table("ID\tNAME\tFOR\tCONDITION\tDEVICES\tCHANNELS\tSTATE", rows)
 		return nil
 	case "create", "add":
 		fs := flag.NewFlagSet("rules create", flag.ContinueOnError)
@@ -1272,15 +1280,19 @@ func (c *cli) rules(verb string, args []string) error {
 		fs.IntVar(&r.OfflineMinutes, "offline-minutes", 0, "")
 		fs.IntVar(&r.RepeatMinutes, "repeat-minutes", 0, "")
 		noResolved := fs.Bool("no-resolved", false, "")
-		var labels, chans, kinds multiFlag
+		var labels, chans, kinds, client multiFlag
 		fs.Var(&labels, "label", "")
 		fs.Var(&chans, "channel", "")
 		fs.Var(&kinds, "kind", "")
+		fs.Var(&client, "client", "")
 		if _, err := parse(fs, args); err != nil {
 			return err
 		}
 		var err error
 		if r.Selector.Labels, err = labelsOf(labels); err != nil {
+			return err
+		}
+		if r.ClientScope.Labels, err = labelsOf(client); err != nil {
 			return err
 		}
 		r.Channels, r.CheckKinds, r.NotifyResolved = chans, kinds, !*noResolved

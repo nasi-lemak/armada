@@ -587,7 +587,9 @@ notify again when they resolve. Delivery is retried, and failures show up in the
   `.DeviceLabels`, `.DeploymentID`, `.URL`, `.StartedAt`, `.ResolvedAt`, `.Count`, `.AlertID`.
   Helper functions: `json`, `upper`, `lower`.
 - **Slack:** an incoming webhook URL.
-- **Email:** SMTP with STARTTLS on 587 or implicit TLS on 465.
+- **Email:** SMTP with STARTTLS on 587 or implicit TLS on 465. Either name a server per channel, or
+  leave the server out to use the server's relay (`-smtp-host`, `-smtp-port`, `-smtp-username`,
+  `-smtp-from`, and `ARMADA_SMTP_PASSWORD` in the environment).
 
 ```bash
 armadactl channels create --name oncall --type webhook --url https://events.pagerduty.com/v2/enqueue --template "$(cat pd.tmpl)"
@@ -599,6 +601,30 @@ armadactl rules create --name "Storage failing" --condition health --min-severit
 
 Set `-public-url` on the server so notifications link to the device page. Secrets aren't returned by
 the API.
+
+### Alerts for client accounts
+
+Client operators set up their own alerts on the **Monitoring** page, or with
+`armadactl rules create … --client customer=acme`. For example, they can email their on-call team
+when a kiosk goes offline. Your admins manage vendor-wide alerts and can see and change every
+client's.
+
+- **A client's rule only ever sees that client's devices.** It matches devices in the client's scope
+  (narrowed further by its own labels), however it was written.
+- **A client's alerts only go to that client's channels**, and vendor alerts only to vendor channels.
+  No notification about one customer's devices can reach another customer.
+- Client rules can watch `device_offline` and `health`. `update_failed` and `deployment_paused`
+  summarise rollouts across customers, so they stay vendor-only.
+- Everyone with access to a client sees its rules and channels. Its operators can change them, and
+  its viewers can only look. Someone covering several clients chooses which one each rule is for.
+- **The server sends client notifications for them, so they are limited:**
+  - **Webhooks and Slack:** public `https://` addresses only. The address is checked at connect time
+    on the resolved IP, so a DNS name pointing inside your network is refused too, and redirects are
+    checked the same way. Client requests never use the server's proxy.
+  - **Body templates:** client webhooks send the standard JSON notification; custom body templates
+    are vendor-only.
+  - **Email:** goes through your SMTP relay. Clients choose recipients only, not a mail server. Without
+    `-smtp-host`, clients can't create email channels.
 
 ## Peripherals: BLE sensors and other devices
 
@@ -666,8 +692,10 @@ for example `customer=acme`. A scoped user:
 
 - sees only matching devices, their alerts, history and activity. Other devices answer 404, as if they
   didn't exist;
-- never sees releases, deployments, enrollment-token lists, monitors, alert rules or fleet-wide history,
-  which are shared across customers;
+- never sees releases, deployments, enrollment-token lists, monitors, vendor alert rules or fleet-wide
+  history, which are shared across customers;
+- can set up their own alerts for their devices (see
+  [Alerts for client accounts](#alerts-for-client-accounts));
 - can only create enrollment tokens that put new devices in their scope (the scope labels are forced
   onto the token);
 - can't move a device out of their scope by relabelling it, and can't change app licensing (that is
@@ -1029,6 +1057,7 @@ Add `--json` to any command for machine-readable output.
 | `-rollout-approval` | `ARMADA_ROLLOUT_APPROVAL` | `second-person` (or `off`) |
 | `-unapproved-max-percent` | | `10` (largest first stage allowed before approval) |
 | `-trusted-proxies` | `ARMADA_TRUSTED_PROXIES` | none (comma-separated IPs/CIDRs) |
+| `-smtp-host`, `-smtp-port`, `-smtp-username`, `-smtp-from` | `ARMADA_SMTP_HOST`, …, `ARMADA_SMTP_PASSWORD` (environment only) | no relay |
 | `-disable-admin-token` | `ARMADA_DISABLE_ADMIN_TOKEN` | `false` |
 | `-rotate-admin-token` | | replace the generated token at startup |
 | `-password-login` | `ARMADA_PASSWORD_LOGIN` | `true` |
@@ -1097,8 +1126,8 @@ endpoints use the per-device key issued at enrollment.
 | `POST /api/v1/agent/challenge`, `POST /api/v1/agent/license` | Attestation and license protocol |
 | `GET /api/v1/license/jwks` | Public keys for verifying licenses |
 | `GET/POST /api/v1/monitors`, `PUT/DELETE /api/v1/monitors/{id}` | Program health checks |
-| `GET/POST /api/v1/channels`, `PUT/DELETE /api/v1/channels/{id}`, `POST …/{id}/test` | Notification channels |
-| `GET/POST /api/v1/alert-rules`, `PUT/DELETE /api/v1/alert-rules/{id}` | Alert rules |
+| `GET/POST /api/v1/channels`, `PUT/DELETE /api/v1/channels/{id}`, `POST …/{id}/test` | Notification channels (`client_scope` for a client's) |
+| `GET/POST /api/v1/alert-rules`, `PUT/DELETE /api/v1/alert-rules/{id}` | Alert rules (`client_scope` for a client's) |
 | `GET /api/v1/alerts[?status=firing]` | Firing and recent alerts |
 | `GET /api/v1/devices/{id}/history?range=24h\|7d\|30d\|90d` | A device's check and metric history (raw or hourly) |
 | `GET /api/v1/history/fleet?range=…` | Devices online, health problems and firing alerts over time |
@@ -1156,6 +1185,9 @@ How it works:
   - Uploads with `--auto-deploy` still canary automatically and then wait.
   - The admin token counts as one person, so it can't approve its own rollouts.
   - Use `-rollout-approval off` for a one-person team.
+- **Client alert channels can't reach your network.** Client webhooks go only to public HTTPS
+  addresses, checked when connecting, and client email only through your relay (see
+  [Alerts for client accounts](#alerts-for-client-accounts)).
 - **Code execution on devices is opt-in on the device and limited to fleet-wide staff.**
   - `exec` actions and **command** health checks both need `allow_exec: true` in the agent config.
     Without it, command checks report "unknown" and never run.

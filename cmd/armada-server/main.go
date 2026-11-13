@@ -108,7 +108,16 @@ func run() error {
 	trusted := flag.String("trusted-proxies", env("ARMADA_TRUSTED_PROXIES", ""), "comma-separated IPs/CIDRs of reverse proxies whose X-Forwarded-* headers are trusted, e.g. 10.0.0.0/8 (ARMADA_TRUSTED_PROXIES)")
 	flag.StringVar(&cfg.RolloutApproval, "rollout-approval", env("ARMADA_ROLLOUT_APPROVAL", "second-person"), "second-person: rollouts stop after their canary until someone other than their creator approves; off: no approval")
 	flag.IntVar(&cfg.UnapprovedMaxPercent, "unapproved-max-percent", 10, "largest first stage a rollout may run before approval")
+	flag.StringVar(&cfg.SMTPRelay.Host, "smtp-host", env("ARMADA_SMTP_HOST", ""), "SMTP relay for email alerts, including clients' email channels (ARMADA_SMTP_HOST)")
+	smtpPort := flag.Int("smtp-port", 587, "SMTP relay port (587 STARTTLS, 465 TLS)")
+	flag.StringVar(&cfg.SMTPRelay.Username, "smtp-username", env("ARMADA_SMTP_USERNAME", ""), "SMTP relay user name")
+	flag.StringVar(&cfg.SMTPRelay.From, "smtp-from", env("ARMADA_SMTP_FROM", ""), "From address for relayed alert email, e.g. alerts@fleet.example.com")
 	flag.Parse()
+	cfg.SMTPRelay.Port = *smtpPort
+	cfg.SMTPRelay.Password = os.Getenv("ARMADA_SMTP_PASSWORD") // environment only, never argv
+	if cfg.SMTPRelay.Host != "" && cfg.SMTPRelay.From == "" {
+		return errors.New("-smtp-from is required with -smtp-host")
+	}
 	if cfg.RolloutApproval == "off" || cfg.RolloutApproval == "none" {
 		cfg.RolloutApproval = ""
 	}

@@ -538,3 +538,11 @@ func parseGrants(vals []string) ([]api.Grant, error) {
 	}
 	return out, nil
 }
+
+// forText shows who an alert rule or channel belongs to.
+func forText(sc api.Selector) string {
+	if sc.Channel == "" && len(sc.Labels) == 0 {
+		return "vendor"
+	}
+	return scopeString(sc)
+}

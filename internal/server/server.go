@@ -66,6 +66,9 @@ type Config struct {
 	// to a person who went through SSO, 2FA and SCIM rules. New refuses to
 	// start without an enabled admin user.
 	AdminTokenDisabled bool
+	// SMTPRelay sends email for channels that don't name their own server,
+	// including every client email channel. Empty Host means none.
+	SMTPRelay api.EmailConfig
 	// TrustedProxies are reverse proxies whose X-Forwarded-For/-Proto/-Host
 	// headers are believed. Headers from anyone else are ignored.
 	TrustedProxies []*net.IPNet
@@ -175,13 +178,19 @@ type Server struct {
 	logins       loginLimiter
 	notifyQueue  chan notifyJob
 	notifyClient *http.Client
-	push         *pushHub
-	chunks       chunkIndexes
-	secrets      *secretBox
-	mfa          mfaChallenges
-	passkeys     passkeyState
-	closeOnce    sync.Once
-	adminSeen    struct {
+	// clientNotifyClient sends client-configured webhooks: public HTTPS
+	// addresses only, checked at connect time.
+	clientNotifyClient *http.Client
+	// allowPrivateClientTargets lets tests point client webhooks at
+	// httptest servers on 127.0.0.1.
+	allowPrivateClientTargets bool
+	push                      *pushHub
+	chunks                    chunkIndexes
+	secrets                   *secretBox
+	mfa                       mfaChallenges
+	passkeys                  passkeyState
+	closeOnce                 sync.Once
+	adminSeen                 struct {
 		sync.Mutex
 		m map[string]time.Time
 	}
@@ -291,6 +300,7 @@ func New(cfg Config) (*Server, error) {
 	s.history.last = map[string]time.Time{}
 	s.notifyQueue = make(chan notifyJob, 1000)
 	s.notifyClient = &http.Client{Timeout: 15 * time.Second}
+	s.clientNotifyClient = s.newClientNotifyClient()
 	go s.notifyLoop()
 	return s, nil
 }
@@ -451,19 +461,21 @@ func (s *Server) Handler() http.Handler {
 	operator(fleetOnly, "POST /api/v1/monitors", s.handleCreateMonitor)
 	operator(fleetOnly, "PUT /api/v1/monitors/{id}", s.handleUpdateMonitor)
 	operator(fleetOnly, "DELETE /api/v1/monitors/{id}", s.handleDeleteMonitor)
-	viewer(fleetOnly, "GET /api/v1/alert-rules", s.handleListAlertRules)
+	viewer(scopedOK, "GET /api/v1/alert-rules", s.handleListAlertRules)
 	viewer(fleetOnly, "GET /api/v1/apps", s.handleListApps)
 
 	admin("GET /api/v1/signing-key", s.handleSigningKey)
 	admin("GET /api/v1/backup", s.handleBackup)
-	admin("GET /api/v1/channels", s.handleListChannels)
-	admin("POST /api/v1/channels", s.handleSaveChannel)
-	admin("PUT /api/v1/channels/{id}", s.handleSaveChannel)
-	admin("DELETE /api/v1/channels/{id}", s.handleDeleteChannel)
-	admin("POST /api/v1/channels/{id}/test", s.handleTestChannel)
-	admin("POST /api/v1/alert-rules", s.handleSaveAlertRule)
-	admin("PUT /api/v1/alert-rules/{id}", s.handleSaveAlertRule)
-	admin("DELETE /api/v1/alert-rules/{id}", s.handleDeleteAlertRule)
+	// Rules and channels: admins manage all; client operators manage their
+	// client's (checked per object in the handlers).
+	viewer(scopedOK, "GET /api/v1/channels", s.handleListChannels)
+	operator(scopedOK, "POST /api/v1/channels", s.handleSaveChannel)
+	operator(scopedOK, "PUT /api/v1/channels/{id}", s.handleSaveChannel)
+	operator(scopedOK, "DELETE /api/v1/channels/{id}", s.handleDeleteChannel)
+	operator(scopedOK, "POST /api/v1/channels/{id}/test", s.handleTestChannel)
+	operator(scopedOK, "POST /api/v1/alert-rules", s.handleSaveAlertRule)
+	operator(scopedOK, "PUT /api/v1/alert-rules/{id}", s.handleSaveAlertRule)
+	operator(scopedOK, "DELETE /api/v1/alert-rules/{id}", s.handleDeleteAlertRule)
 	admin("PUT /api/v1/apps/{package}", s.handlePutApp)
 	admin("DELETE /api/v1/apps/{package}", s.handleDeleteApp)
 	admin("GET /api/v1/group-mappings", s.handleListGroupMappings)

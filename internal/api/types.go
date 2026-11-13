@@ -656,6 +656,11 @@ type NotificationChannel struct {
 	Email     *EmailConfig   `json:"email,omitempty"`
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
+	// ClientScope makes this a client's channel (e.g. customer=acme): only
+	// that client's rules can use it, and its users can manage it. Client
+	// webhooks must use public HTTPS addresses; client email goes through
+	// the server's SMTP relay. Empty means a vendor (fleet-wide) channel.
+	ClientScope Selector `json:"client_scope"`
 }
 
 // WebhookConfig posts alerts to any HTTP endpoint (PagerDuty, Opsgenie,
@@ -717,6 +722,12 @@ type AlertRule struct {
 	NotifyResolved bool      `json:"notify_resolved"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+	// ClientScope makes this a client's rule: it only ever matches devices
+	// in that scope, notifies that client's channels, and is managed by its
+	// users. Client rules support device_offline and health. Empty means a
+	// vendor (fleet-wide) rule.
+	ClientScope Selector `json:"client_scope"`
+	CreatedBy   string   `json:"created_by,omitempty"`
 }
 
 // Alert statuses.
