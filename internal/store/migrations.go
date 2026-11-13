@@ -47,6 +47,10 @@ CREATE TABLE IF NOT EXISTS maintenance (
 	created_at INTEGER NOT NULL
 );
 `},
+	{Version: 4, Name: "device lifecycle", SQL: `
+ALTER TABLE devices ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE devices ADD COLUMN lifecycle_info TEXT NOT NULL DEFAULT '';
+`},
 	// Append new migrations here.
 }
 

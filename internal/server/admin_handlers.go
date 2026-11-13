@@ -26,7 +26,7 @@ import (
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	devs, err := s.store.ListDevices(ctx)
+	devs, err := s.store.ListAllDevices(ctx)
 	if err != nil {
 		s.internalError(w, err)
 		return
@@ -38,12 +38,22 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		s.decorate(d)
-		sum.Devices++
-		if d.Status == api.DeviceOnline {
-			sum.Online++
-		} else {
-			sum.Offline++
+		switch d.Lifecycle {
+		case api.LifecycleRetired:
+			sum.Retired++
+			continue
+		case api.LifecycleSpare:
+			sum.Spare++
+		case api.LifecycleRepair:
+			sum.InRepair++
+		default:
+			if d.Status == api.DeviceOnline {
+				sum.Online++
+			} else {
+				sum.Offline++
+			}
 		}
+		sum.Devices++
 		sum.Channels[d.Channel]++
 		if d.ParentID != "" {
 			sum.Peripherals++
@@ -106,12 +116,22 @@ func (s *Server) decorate(d *api.Device) {
 }
 
 func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
-	devs, err := s.store.ListDevices(r.Context())
+	q := r.URL.Query()
+	// lifecycle: empty = every device but retired ones; "all"; or one state.
+	life := q.Get("lifecycle")
+	if life != "" && life != "all" && !api.ValidLifecycle(life) {
+		writeError(w, http.StatusBadRequest, "lifecycle must be active, spare, repair, retired or all")
+		return
+	}
+	list := s.store.ListDevices
+	if life == "all" || life == api.LifecycleRetired {
+		list = s.store.ListAllDevices
+	}
+	devs, err := list(r.Context())
 	if err != nil {
 		s.internalError(w, err)
 		return
 	}
-	q := r.URL.Query()
 	sel := api.Selector{Channel: q.Get("channel"), Labels: map[string]string{}}
 	for _, l := range q["label"] {
 		k, v, ok := strings.Cut(l, "=")
@@ -124,7 +144,8 @@ func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 	out := []*api.Device{}
 	for _, d := range devs {
 		s.decorate(d)
-		if !principalFrom(r.Context()).sees(d) || !rollout.Matches(sel, d) || (status != "" && d.Status != status) || (health != "" && d.Health != health) {
+		if !principalFrom(r.Context()).sees(d) || !rollout.Matches(sel, d) || (status != "" && d.Status != status) || (health != "" && d.Health != health) ||
+			(life != "" && life != "all" && d.Lifecycle != life) {
 			continue
 		}
 		out = append(out, d)
@@ -327,7 +348,7 @@ func (s *Server) handleListActions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateAction(w http.ResponseWriter, r *http.Request) {
 	d, ok := s.loadDevice(w, r)
-	if !ok || !needDeviceRole(w, r, d, api.RoleOperator) {
+	if !ok || !needDeviceRole(w, r, d, api.RoleOperator) || !notRetired(w, d) {
 		return
 	}
 	var req api.CreateActionRequest
@@ -967,7 +988,7 @@ func (s *Server) handleGetDeployment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, dev := range devs {
-		if rollout.Matches(d.Selector, dev) && rollout.PlatformMatches(det.Release, dev) {
+		if rollout.Matches(d.Selector, dev) && rollout.PlatformMatches(det.Release, dev) && dev.GetsUpdates() {
 			det.Targeted++
 			if rollout.InStage(d, dev.ID) {
 				det.Eligible++
@@ -1173,7 +1194,7 @@ func (s *Server) logEvent(ctx context.Context, typ, deviceID, deploymentID, msg 
 
 // visibleDeviceIDs is the set of devices a principal may see.
 func (s *Server) visibleDeviceIDs(ctx context.Context, p *principal) (map[string]bool, error) {
-	devs, err := s.store.ListDevices(ctx)
+	devs, err := s.store.ListAllDevices(ctx)
 	if err != nil {
 		return nil, err
 	}

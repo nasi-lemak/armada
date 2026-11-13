@@ -66,6 +66,64 @@ type Device struct {
 	ParentID string `json:"parent_id,omitempty"`
 	// Maintenance is set (on read) while a maintenance window covers the device.
 	Maintenance *MaintenanceInfo `json:"maintenance,omitempty"`
+	// Lifecycle is where the device is in its life: active | spare | repair | retired.
+	Lifecycle     string         `json:"lifecycle"`
+	LifecycleInfo *LifecycleInfo `json:"lifecycle_info,omitempty"`
+}
+
+// Lifecycle states.
+//   - active: in service. Gets updates and alerts.
+//   - spare: in stock, ready to replace a device. Gets updates (stays current), no alerts.
+//   - repair: out of service (RMA, at the bench). No updates, no alerts; it can still check in.
+//   - retired: decommissioned for good. Its key is destroyed and its licenses revoked; the
+//     record and history are kept. To use the hardware again, enroll it again.
+const (
+	LifecycleActive  = "active"
+	LifecycleSpare   = "spare"
+	LifecycleRepair  = "repair"
+	LifecycleRetired = "retired"
+)
+
+// ValidLifecycle reports whether s is a lifecycle state.
+func ValidLifecycle(s string) bool {
+	switch s {
+	case LifecycleActive, LifecycleSpare, LifecycleRepair, LifecycleRetired:
+		return true
+	}
+	return false
+}
+
+// GetsUpdates reports whether rollouts offer the device updates.
+func (d *Device) GetsUpdates() bool {
+	return d.Lifecycle == "" || d.Lifecycle == LifecycleActive || d.Lifecycle == LifecycleSpare
+}
+
+// Alerting reports whether alert rules watch the device.
+func (d *Device) Alerting() bool { return d.Lifecycle == "" || d.Lifecycle == LifecycleActive }
+
+// LifecycleInfo records the last lifecycle change and replacement links.
+type LifecycleInfo struct {
+	Note      string    `json:"note,omitempty"`
+	ChangedAt time.Time `json:"changed_at"`
+	ChangedBy string    `json:"changed_by,omitempty"`
+	// Replaces and ReplacedBy link a device and its replacement (RMA).
+	Replaces   string `json:"replaces,omitempty"`
+	ReplacedBy string `json:"replaced_by,omitempty"`
+}
+
+// LifecycleRequest changes a device's lifecycle state.
+type LifecycleRequest struct {
+	State string `json:"state"`
+	Note  string `json:"note,omitempty"`
+}
+
+// ReplaceRequest swaps a device for a replacement: the replacement takes
+// over its name, channel and labels; the old device leaves service.
+type ReplaceRequest struct {
+	ReplacementID string `json:"replacement_id"`
+	// OldState is what becomes of the old device: repair (default), spare or retired.
+	OldState string `json:"old_state,omitempty"`
+	Note     string `json:"note,omitempty"`
 }
 
 // Health statuses, from best to worst.
@@ -632,17 +690,22 @@ type ErrorResponse struct {
 
 // FleetSummary powers the dashboard overview.
 type FleetSummary struct {
-	Devices           int                       `json:"devices"`
-	Online            int                       `json:"online"`
-	Offline           int                       `json:"offline"`
-	ActiveDeployments int                       `json:"active_deployments"`
-	Releases          int                       `json:"releases"`
-	Peripherals       int                       `json:"peripherals"`
-	HealthWarning     int                       `json:"health_warning"`
-	HealthCritical    int                       `json:"health_critical"`
-	FiringAlerts      int                       `json:"firing_alerts"`
-	PackageVersions   map[string]map[string]int `json:"package_versions"`
-	Channels          map[string]int            `json:"channels"`
+	Devices           int `json:"devices"`
+	Online            int `json:"online"`
+	Offline           int `json:"offline"`
+	ActiveDeployments int `json:"active_deployments"`
+	Releases          int `json:"releases"`
+	Peripherals       int `json:"peripherals"`
+	HealthWarning     int `json:"health_warning"`
+	HealthCritical    int `json:"health_critical"`
+	FiringAlerts      int `json:"firing_alerts"`
+	// Spare and InRepair count devices out of service; Online and Offline
+	// count active devices only. Retired devices aren't counted.
+	Spare           int                       `json:"spare"`
+	InRepair        int                       `json:"in_repair"`
+	Retired         int                       `json:"retired"`
+	PackageVersions map[string]map[string]int `json:"package_versions"`
+	Channels        map[string]int            `json:"channels"`
 }
 
 // ---- alerting ----

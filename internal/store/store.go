@@ -230,14 +230,14 @@ type scanner interface{ Scan(dest ...any) error }
 
 // ---- devices ----
 
-const deviceCols = `id, name, channel, labels, info, metrics, packages, agent_status, enrolled_at, last_seen_at, attestation, license_revoked, health, parent_id`
+const deviceCols = `id, name, channel, labels, info, metrics, packages, agent_status, enrolled_at, last_seen_at, attestation, license_revoked, health, parent_id, lifecycle, lifecycle_info`
 
 func scanDevice(sc scanner) (*api.Device, error) {
 	var d api.Device
-	var labels, info, metrics, packages, attestation, health string
+	var labels, info, metrics, packages, attestation, health, lifeInfo string
 	var enrolled, seen int64
 	var revoked int
-	if err := sc.Scan(&d.ID, &d.Name, &d.Channel, &labels, &info, &metrics, &packages, &d.AgentStatus, &enrolled, &seen, &attestation, &revoked, &health, &d.ParentID); err != nil {
+	if err := sc.Scan(&d.ID, &d.Name, &d.Channel, &labels, &info, &metrics, &packages, &d.AgentStatus, &enrolled, &seen, &attestation, &revoked, &health, &d.ParentID, &d.Lifecycle, &lifeInfo); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -261,6 +261,13 @@ func scanDevice(sc scanner) (*api.Device, error) {
 	d.LicenseRevoked = revoked != 0
 	_ = json.Unmarshal([]byte(health), &d.Checks)
 	d.Health = api.WorstHealth(d.Checks)
+	if d.Lifecycle == "" {
+		d.Lifecycle = api.LifecycleActive
+	}
+	if lifeInfo != "" {
+		d.LifecycleInfo = &api.LifecycleInfo{}
+		_ = json.Unmarshal([]byte(lifeInfo), d.LifecycleInfo)
+	}
 	return &d, nil
 }
 
@@ -302,9 +309,52 @@ func (s *Store) GetDeviceByKeyHash(ctx context.Context, keyHash string) (*api.De
 	return scanDevice(s.db.QueryRowContext(ctx, `SELECT `+deviceCols+` FROM devices WHERE key_hash = ?`, keyHash))
 }
 
-// ListDevices returns all devices ordered by name.
+// ListDevices returns the fleet's devices ordered by name: every device but
+// retired ones, which are kept only as records.
 func (s *Store) ListDevices(ctx context.Context) ([]*api.Device, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+deviceCols+` FROM devices ORDER BY name, id`)
+	return s.listDevices(ctx, `SELECT `+deviceCols+` FROM devices WHERE lifecycle <> 'retired' ORDER BY name, id`)
+}
+
+// ListAllDevices returns every device, retired ones included.
+func (s *Store) ListAllDevices(ctx context.Context) ([]*api.Device, error) {
+	return s.listDevices(ctx, `SELECT `+deviceCols+` FROM devices ORDER BY name, id`)
+}
+
+// SetDeviceLifecycle stores devices' identity (name, channel, labels) and
+// lifecycle in one transaction. Retiring a device destroys its key (it can
+// never authenticate again), forgets its hardware key and revokes its
+// licenses.
+func (s *Store) SetDeviceLifecycle(ctx context.Context, devs ...*api.Device) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, d := range devs {
+		info := ""
+		if d.LifecycleInfo != nil {
+			info = mustJSON(d.LifecycleInfo)
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE devices SET name=?, channel=?, labels=?, lifecycle=?, lifecycle_info=? WHERE id=?`,
+			d.Name, d.Channel, mustJSON(d.Labels), d.Lifecycle, info, d.ID)
+		if err != nil {
+			return err
+		}
+		if err := expectOne(res); err != nil {
+			return err
+		}
+		if d.Lifecycle == api.LifecycleRetired {
+			d.LicenseRevoked = true
+			if _, err := tx.ExecContext(ctx, `UPDATE devices SET key_hash=?, hw_key='', license_revoked=1 WHERE id=?`, "retired:"+d.ID, d.ID); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) listDevices(ctx context.Context, q string) ([]*api.Device, error) {
+	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err
 	}
@@ -458,9 +508,9 @@ func (s *Store) Enroll(ctx context.Context, tokenHash string, d *api.Device, key
 	if d.Attestation != nil {
 		attestation = mustJSON(d.Attestation)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash, hw_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash, hw_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		d.ID, d.Name, d.Channel, mustJSON(d.Labels), mustJSON(d.Info), mustJSON(d.Metrics), mustJSON(d.Packages),
-		d.AgentStatus, ts(d.EnrolledAt), ts(d.LastSeenAt), attestation, boolInt(d.LicenseRevoked), "[]", d.ParentID, keyHash, hwKey); err != nil {
+		d.AgentStatus, ts(d.EnrolledAt), ts(d.LastSeenAt), attestation, boolInt(d.LicenseRevoked), "[]", d.ParentID, api.LifecycleActive, "", keyHash, hwKey); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1249,9 +1299,9 @@ func (s *Store) UpsertPeripheral(ctx context.Context, d *api.Device) (created bo
 	if n, _ := res.RowsAffected(); n > 0 {
 		return false, nil
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash, hw_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err = s.db.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash, hw_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		d.ID, d.Name, d.Channel, mustJSON(d.Labels), mustJSON(d.Info), mustJSON(d.Metrics), mustJSON(d.Packages),
-		"", ts(d.EnrolledAt), ts(d.LastSeenAt), "", 0, mustJSON(nonNilChecks(d.Checks)), d.ParentID,
+		"", ts(d.EnrolledAt), ts(d.LastSeenAt), "", 0, mustJSON(nonNilChecks(d.Checks)), d.ParentID, api.LifecycleActive, "",
 		// Peripherals have no credentials; this placeholder can never match a key hash.
 		"peripheral:"+d.ID, "")
 	return err == nil, err

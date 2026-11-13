@@ -94,7 +94,7 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 				limit = 10 * time.Minute
 			}
 			for _, d := range devices {
-				if !ruleCovers(r, d) || d.LastSeenAt.IsZero() || held[d.ID] {
+				if !ruleCovers(r, d) || d.LastSeenAt.IsZero() || held[d.ID] || !d.Alerting() {
 					continue
 				}
 				if gone := now.Sub(d.LastSeenAt); gone >= limit {
@@ -108,7 +108,7 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 				minRank = api.HealthRank(api.HealthWarning)
 			}
 			for _, d := range devices {
-				if !ruleCovers(r, d) || held[d.ID] {
+				if !ruleCovers(r, d) || held[d.ID] || !d.Alerting() {
 					continue
 				}
 				var failing []string
@@ -186,6 +186,25 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 		}
 	}
 
+	// Devices out of service (spare, in repair, retired or removed): their
+	// alerts close without a "resolved" notification, which would be untrue.
+	var outOfService map[string]bool
+	if devices != nil {
+		outOfService = map[string]bool{}
+		inFleet := map[string]bool{}
+		for _, d := range devices {
+			inFleet[d.ID] = true
+			if !d.Alerting() {
+				outOfService[d.ID] = true
+			}
+		}
+		for _, a := range active {
+			if a.DeviceID != "" && !inFleet[a.DeviceID] {
+				outOfService[a.DeviceID] = true
+			}
+		}
+	}
+
 	// Resolve alerts whose condition has cleared.
 	for _, a := range active {
 		if _, still := want[a.Key]; still {
@@ -202,6 +221,10 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 		a.ResolvedAt = &now
 		if err := s.store.PutAlert(ctx, a); err != nil {
 			return err
+		}
+		if outOfService[a.DeviceID] && a.DeploymentID == "" {
+			s.logEvent(ctx, "alert.closed", a.DeviceID, "", "closed (device out of service): "+a.RuleName+" — "+a.Summary)
+			continue
 		}
 		if r != nil && r.Enabled && r.NotifyResolved && a.Condition != api.ConditionUpdateFailed {
 			s.logEvent(ctx, "alert.resolved", a.DeviceID, a.DeploymentID, "resolved: "+a.RuleName+" — "+a.Summary)
@@ -230,6 +253,9 @@ func (s *Server) alertOnEvent(ctx context.Context, typ, deviceID, deploymentID, 
 		dev, _ = s.store.GetDevice(ctx, deviceID)
 	}
 	now := s.now()
+	if dev != nil && !dev.Alerting() {
+		return
+	}
 	if dev != nil {
 		mn, err := s.activeMaintenance(ctx, now)
 		if err != nil {

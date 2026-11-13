@@ -432,6 +432,8 @@ func (s *Server) Handler() http.Handler {
 	operator(scopedOK, "POST /api/v1/devices/{id}/actions", s.handleCreateAction)
 	operator(scopedOK, "POST /api/v1/devices/{id}/wake", s.handleWakeDevice)
 	operator(fleetOnly, "DELETE /api/v1/devices/{id}", s.handleDeleteDevice)
+	operator(fleetOnly, "POST /api/v1/devices/{id}/lifecycle", s.handleSetLifecycle)
+	operator(fleetOnly, "POST /api/v1/devices/{id}/replace", s.handleReplaceDevice)
 	viewer(scopedOK, "GET /api/v1/events", s.handleListEvents)
 	viewer(scopedOK, "GET /api/v1/alerts", s.handleListAlerts)
 	operator(scopedOK, "POST /api/v1/alerts/{id}/ack", s.handleAckAlert)

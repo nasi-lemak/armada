@@ -173,7 +173,17 @@ const STATUS_TONE = {
   succeeded: 'ok', failed: 'bad', rolled_back: 'warn', pending: '', downloading: 'info', installing: 'info',
   queued: '', sent: 'info', rejected: 'warn', 'no access': 'bad', awaiting_approval: 'warn', live: 'ok', scheduled: 'info', applied: 'ok', removing: 'info', revoked: 'bad', active: 'ok', attested: 'ok', 'attested (unlocked)': 'warn',
   maintenance: 'info', acked: 'info', waiting: '', ended: '',
+  spare: '', repair: 'warn', retired: '',
 };
+const LIFECYCLE_TEXT = { active: 'in service', spare: 'spare', repair: 'in repair', retired: 'retired' };
+function lifecycleBadge(d) {
+  if (!d.lifecycle || d.lifecycle === 'active') return null;
+  const b = badge(d.lifecycle);
+  b.lastChild.textContent = LIFECYCLE_TEXT[d.lifecycle];
+  const li = d.lifecycle_info;
+  if (li) b.title = `${LIFECYCLE_TEXT[d.lifecycle]} since ${new Date(li.changed_at).toLocaleString()}${li.changed_by ? ' by ' + li.changed_by : ''}${li.note ? ': ' + li.note : ''}`;
+  return b;
+}
 // untilText describes when a maintenance ends ("until 14:00", "until Nov 20").
 function untilText(ts) { return ts ? 'until ' + fmtTime(ts).replace(/:\d\d$/, '') : 'open-ended'; }
 function maintBadge(mi) {
@@ -319,11 +329,13 @@ async function viewOverview(root) {
     ]);
     const tile = (label, value, hint, href) => h(href ? 'a' : 'div', { class: 'card stat', href },
       h('div', { class: 'label' }, label), h('div', { class: 'value' }, value), h('div', { class: 'hint' }, hint));
-    const pct = sum.devices ? Math.round(100 * sum.online / sum.devices) : 0;
+    const inService = sum.online + sum.offline;
+    const pct = inService ? Math.round(100 * sum.online / inService) : 0;
+    const outOfService = [sum.spare && `${sum.spare} spare`, sum.in_repair && `${sum.in_repair} in repair`].filter(Boolean).join(' · ');
     replace(stats,
       tile('Devices', sum.devices, [Object.entries(sum.channels).map(([c, n]) => `${n} ${c}`).join(' · ') || 'none enrolled',
-        sum.peripherals ? ` · ${sum.peripherals} peripherals` : ''].join(''), '#/devices'),
-      tile('Online', sum.online, sum.devices ? `${pct}% · ${sum.offline} offline` : '—', '#/devices'),
+        sum.peripherals ? ` · ${sum.peripherals} peripherals` : '', outOfService ? ' · ' + outOfService : ''].join(''), '#/devices'),
+      tile('Online', sum.online, inService ? `${pct}% of active · ${sum.offline} offline` : '—', '#/devices'),
       tile('Health issues', sum.health_critical + sum.health_warning,
         sum.health_critical + sum.health_warning ? `${sum.health_critical} critical · ${sum.health_warning} warning` : 'all healthy', '#/devices'),
       tile('Firing alerts', sum.firing_alerts, sum.firing_alerts ? 'see Monitoring' : 'nothing firing', '#/monitoring'),
@@ -373,10 +385,12 @@ async function viewDevices(root) {
   const status = h('select', { 'aria-label': 'Status filter' }, h('option', { value: '' }, 'All statuses'), h('option', { value: 'online' }, 'Online'), h('option', { value: 'offline' }, 'Offline'));
   const healthSel = h('select', { 'aria-label': 'Health filter' }, ['', 'critical', 'warning', 'unknown', 'ok'].map(v => h('option', { value: v }, v ? 'Health: ' + v : 'Any health')));
   const kindSel = h('select', { 'aria-label': 'Kind filter' }, [['', 'All kinds'], ['agent', 'Agents'], ['peripheral', 'Peripherals']].map(([v, l]) => h('option', { value: v }, l)));
+  const lifeSel = h('select', { 'aria-label': 'Lifecycle filter' }, [['', 'In the fleet'], ['active', 'In service'], ['spare', 'Spares'],
+    ['repair', 'In repair'], ['retired', 'Retired'], ['all', 'All, with retired']].map(([v, l]) => h('option', { value: v }, l)));
   const list = h('div', { class: 'card flush' });
   const count = h('span', {});
   append(root, pageHead('Devices', count, h('a', { class: 'btn primary need-operator', href: '#/enroll' }, 'Enroll devices')),
-    h('div', { class: 'toolbar' }, search, status, healthSel, kindSel), h('div', { class: 'spacer' }), list);
+    h('div', { class: 'toolbar' }, search, status, healthSel, kindSel, lifeSel), h('div', { class: 'spacer' }), list);
   let devices = [];
   function render() {
     const q = search.value.trim().toLowerCase();
@@ -386,13 +400,15 @@ async function viewDevices(root) {
       d.id, d.name, d.channel, d.info.hostname, d.info.model, d.info.machine_id, ...(d.info.ips || []),
       ...Object.entries(d.labels).map(([k, v]) => k + '=' + v),
     ].some(s => (s || '').toLowerCase().includes(q))));
-    replace(count, `${devices.length} enrolled · ${devices.filter(d => d.status === 'online').length} online`);
+    replace(count, `${devices.length} ${lifeSel.value === 'retired' ? 'retired' : 'enrolled'} · ${devices.filter(d => d.status === 'online' && d.lifecycle !== 'retired').length} online`);
     replace(list, table(['Device', 'Status', 'Health', 'Channel', 'Platform', 'Packages', 'Labels', 'Last seen'],
       shown.map(d => h('tr', { class: 'clickable', onclick: () => { location.hash = '#/devices/' + d.id; } },
         h('td', {}, h('div', {}, h('strong', {}, d.name)), h('div', { class: 'muted mono' }, d.id),
           d.parent_id ? h('div', { class: 'muted' }, 'via ', names[d.parent_id] || d.parent_id) : null,
           d.agent_status ? h('div', { class: 'muted' }, d.agent_status) : null),
-        h('td', {}, badge(d.status), d.license_revoked ? h('div', {}, badge('revoked')) : null,
+        h('td', {}, d.lifecycle === 'retired' ? lifecycleBadge(d) : badge(d.status),
+          d.lifecycle !== 'retired' && lifecycleBadge(d) ? h('div', {}, lifecycleBadge(d)) : null,
+          d.license_revoked && d.lifecycle !== 'retired' ? h('div', {}, badge('revoked')) : null,
           d.maintenance ? h('div', {}, maintBadge(d.maintenance)) : null),
         h('td', {}, badge(d.health || 'ok')),
         h('td', {}, d.channel),
@@ -404,7 +420,8 @@ async function viewDevices(root) {
   }
   search.addEventListener('input', render);
   [status, healthSel, kindSel].forEach(el => el.addEventListener('change', render));
-  async function refresh() { devices = await api('GET', '/api/v1/devices'); render(); }
+  lifeSel.addEventListener('change', () => guard(refresh));
+  async function refresh() { devices = await api('GET', '/api/v1/devices' + (lifeSel.value ? '?lifecycle=' + lifeSel.value : '')); render(); }
   await guard(refresh);
   search.focus();
   return refresh;
@@ -415,6 +432,7 @@ async function viewDevice(root, id) {
   const info = h('div', { class: 'card' });
   const meta = h('div', { class: 'card need-operator' });
   const actions = h('div', { class: 'card need-operator' });
+  const lifeCard = h('div', { class: 'card fleet-only need-operator' });
   const updates = h('div', { class: 'card flush' });
   const actionLog = h('div', { class: 'card flush' });
   const events = h('div', { class: 'card flush' });
@@ -426,7 +444,7 @@ async function viewDevice(root, id) {
   append(root, head,
     h('div', { class: 'grid side' },
       h('div', { class: 'stack' }, info, healthCard, periphCard, configCard, logs.el, updates, actionLog),
-      h('div', { class: 'stack' }, meta, actions, events)),
+      h('div', { class: 'stack' }, meta, actions, lifeCard, events)),
     hist.el);
   let dev;
 
@@ -471,6 +489,70 @@ async function viewDevice(root, id) {
         queue('wipe', ['confirm=' + id]);
       } }, 'Wipe device')),
     h('p', { class: 'muted' }, 'Wipe is for lost or stolen devices: it erases everything.'));
+  // Lifecycle: spare, repair, replace (RMA), retire. Fleet operators only.
+  const lifeNow = h('div', {});
+  const lifeButtons = h('div', { class: 'btn-row' });
+  const replSel = h('select', { 'aria-label': 'Replacement device' });
+  const replOld = h('select', { 'aria-label': 'Old device becomes' },
+    [['repair', 'In repair'], ['spare', 'Spare'], ['retired', 'Retired']].map(([v, l]) => h('option', { value: v }, l)));
+  const replNote = h('input', { placeholder: 'e.g. RMA 4411 (optional)', 'aria-label': 'Replacement note' });
+  const replForm = h('form', { class: 'stack hidden mt', onsubmit: async e => {
+    e.preventDefault();
+    if (!replSel.value) return toast('Pick the replacement device', true);
+    const name = replSel.selectedOptions[0].textContent;
+    if (replOld.value === 'retired' && !confirm(`Retire ${dev.name} as part of the swap? Its key is destroyed and it can't come back.`)) return;
+    const r = await guard(() => api('POST', `/api/v1/devices/${id}/replace`, { replacement_id: replSel.value, old_state: replOld.value, note: replNote.value.trim() }),
+      `${name} now replaces ${dev.name}`);
+    if (r) location.hash = '#/devices/' + r.id;
+  } },
+  h('div', { class: 'form-grid' }, h('label', { class: 'wide' }, 'Replacement (takes over name, channel and labels)', replSel),
+    h('label', {}, 'This device becomes', replOld), h('label', {}, 'Note', replNote)),
+  h('div', { class: 'btn-row' }, h('button', { class: 'btn primary', type: 'submit' }, 'Replace'),
+    h('button', { class: 'btn', type: 'button', onclick: () => replForm.classList.add('hidden') }, 'Cancel')));
+  append(lifeCard, h('h2', {}, 'Lifecycle'), lifeNow, lifeButtons, replForm,
+    h('p', { class: 'muted' }, 'Spares get updates but no alerts. Devices in repair get neither. Retiring is final: the key is destroyed, licenses are revoked, and the record and history are kept.'));
+  const setLife = async (state, ask) => {
+    const note = prompt(ask + '\n\nNote (optional):', '');
+    if (note === null) return;
+    if (await guard(() => api('POST', `/api/v1/devices/${id}/lifecycle`, { state, note: note.trim() }), `${dev.name} is now ${LIFECYCLE_TEXT[state]}`)) refresh();
+  };
+  const openReplace = async () => {
+    const all = await guard(() => api('GET', '/api/v1/devices'));
+    if (!all) return;
+    const cands = all.filter(x => x.id !== id && !!x.parent_id === !!dev.parent_id && (x.lifecycle === 'spare' || x.lifecycle === 'active'))
+      .sort((a, b) => (a.lifecycle === 'spare' ? 0 : 1) - (b.lifecycle === 'spare' ? 0 : 1) || a.name.localeCompare(b.name));
+    replace(replSel, h('option', { value: '' }, cands.length ? 'Choose…' : 'No spare or active devices to use'),
+      cands.map(x => h('option', { value: x.id }, `${x.name}${x.lifecycle === 'spare' ? ' (spare)' : ''} · ${x.id}`)));
+    replForm.classList.remove('hidden');
+  };
+  function renderLifecycle(d) {
+    const li = d.lifecycle_info;
+    const link = (label, other) => other ? h('div', {}, label, ' ', h('a', { href: '#/devices/' + other }, other)) : null;
+    replace(lifeNow, h('div', { class: 'mb' },
+      h('div', {}, lifecycleBadge(d) || badge('active'), li ? h('span', { class: 'muted' }, ` since ${ago(li.changed_at)}${li.changed_by ? ' by ' + li.changed_by : ''}`) : null),
+      li && li.note ? h('div', { class: 'muted' }, li.note) : null,
+      link('Replaces', li && li.replaces), link('Replaced by', li && li.replaced_by),
+      d.lifecycle === 'retired' ? h('p', { class: 'muted' }, 'To use this hardware again, enroll it again; it joins as a new device.') : null));
+    const b = (label, fn, cls) => h('button', { class: 'btn' + (cls ? ' ' + cls : ''), onclick: fn }, label);
+    const retire = b('Retire…', () => {
+      const typed = prompt(`Retire ${d.name}? Its key is destroyed (it can never check in again) and its app licenses are revoked. The record and history are kept.\n\nType the device name to confirm:`);
+      if (typed === null) return;
+      if (typed.trim() !== d.name) return toast('The name did not match; nothing changed.', true);
+      guard(() => api('POST', `/api/v1/devices/${id}/lifecycle`, { state: 'retired' }), `${d.name} retired`).then(r => r && refresh());
+    }, 'danger');
+    const byState = {
+      active: [b('Replace…', openReplace), b('Mark as spare', () => setLife('spare', `Mark ${d.name} as a spare? It keeps getting updates but no alerts.`)),
+        b('Send for repair', () => setLife('repair', `Send ${d.name} for repair? It gets no updates or alerts until it returns.`)), retire],
+      spare: [b('Put in service', () => setLife('active', `Put ${d.name} in service? Alerts apply to it again.`)),
+        b('Send for repair', () => setLife('repair', `Send ${d.name} for repair?`)), retire],
+      repair: [b('Return to service', () => setLife('active', `Return ${d.name} to service?`)),
+        b('Back to spares', () => setLife('spare', `Put ${d.name} back with the spares?`)), retire],
+      retired: [],
+    };
+    replace(lifeButtons, byState[d.lifecycle || 'active']);
+    if (d.lifecycle !== 'active') replForm.classList.add('hidden');
+  }
+
   // Maintenance on this device: alerts held and updates paused for a while.
   const maintNow = h('div', {});
   const maintFor = h('select', { 'aria-label': 'Maintenance duration' },
@@ -540,8 +622,11 @@ async function viewDevice(root, id) {
       if (await guard(() => api('PATCH', '/api/v1/devices/' + id, { remove_labels: [k] }))) refresh();
     }));
     root.classList.toggle('device-readonly', (ROLE_RANK[roleForDevice(d)] || 0) < ROLE_RANK.operator);
+    renderLifecycle(d);
+    actions.classList.toggle('hidden', d.lifecycle === 'retired');
     replace(head, h('div', { class: 'crumb' }, h('a', { href: '#/devices' }, 'Devices'), ' / ', d.id),
-      pageHead(d.name, h('span', {}, badge(d.status),
+      pageHead(d.name, h('span', {}, d.lifecycle === 'retired' ? null : badge(d.status),
+        lifecycleBadge(d) ? [' ', lifecycleBadge(d)] : null,
         d.connected ? [' ', h('span', { title: 'Holding a live connection: actions reach it within seconds' }, badge('live'))] : null,
         d.license_revoked ? [' ', badge('revoked')] : null,
         d.maintenance ? [' ', maintBadge(d.maintenance), ' ', untilText(d.maintenance.until), ' ·'] : null, ' last seen ', ago(d.last_seen_at),

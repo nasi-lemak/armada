@@ -37,7 +37,7 @@ Connection (flags or environment):
 
 Commands:
   status                                     fleet overview
-  devices list [--channel C] [--label K=V] [--status online|offline]
+  devices list [--channel C] [--label K=V] [--status online|offline] [--lifecycle active|spare|repair|retired|all]
   devices get <id>                           details, update history, actions
   devices set <id> [--name N] [--channel C] [--label K=V]... [--unlabel K]...
   devices logs <id> [--unit U | --file NAME] [--lines 200] [--since 1h] [--grep TEXT] [--timeout 2m]
@@ -45,7 +45,12 @@ Commands:
   devices wake <id>                          ask the device to check in now
   devices action <id> lock                   Android: lock the screen
   devices action <id> wipe confirm=<id>      Android: factory reset (lost or stolen devices)
-  devices delete <id>
+  devices delete <id>                        remove the device and its history (retire keeps them)
+  devices lifecycle <id> active|spare|repair [--note N]
+                                             spare: in stock, gets updates, no alerts; repair: out of service
+  devices retire <id> --yes [--note N]       decommission for good: key destroyed, licenses revoked, history kept
+  devices replace <id> --with <new-id> [--old-state repair|spare|retired] [--note N]
+                                             RMA: the replacement takes over name, channel and labels
   devices action <id> reboot|restart-agent
   devices action <id> exec -- <command> [args...]
   tokens list
@@ -402,7 +407,14 @@ func (c *cli) status() error {
 	if c.json {
 		return c.printJSON(s)
 	}
-	fmt.Fprintf(c.out, "Devices:      %d (%d online, %d offline)\n", s.Devices, s.Online, s.Offline)
+	fmt.Fprintf(c.out, "Devices:      %d (%d online, %d offline", s.Devices, s.Online, s.Offline)
+	if s.Spare > 0 || s.InRepair > 0 {
+		fmt.Fprintf(c.out, "; %d spare, %d in repair", s.Spare, s.InRepair)
+	}
+	if s.Retired > 0 {
+		fmt.Fprintf(c.out, "; %d retired", s.Retired)
+	}
+	fmt.Fprintln(c.out, ")")
 	fmt.Fprintf(c.out, "Releases:     %d\n", s.Releases)
 	fmt.Fprintf(c.out, "Deployments:  %d active\n", s.ActiveDeployments)
 	pkgs := make([]string, 0, len(s.PackageVersions))
@@ -427,12 +439,16 @@ func (c *cli) devices(verb string, args []string) error {
 		fs := flag.NewFlagSet("devices list", flag.ContinueOnError)
 		channel := fs.String("channel", "", "")
 		status := fs.String("status", "", "")
+		lifecycle := fs.String("lifecycle", "", "")
 		var labels multiFlag
 		fs.Var(&labels, "label", "")
 		if _, err := parse(fs, args); err != nil {
 			return err
 		}
 		q := url.Values{}
+		if *lifecycle != "" {
+			q.Set("lifecycle", *lifecycle)
+		}
 		if *channel != "" {
 			q.Set("channel", *channel)
 		}
@@ -459,7 +475,11 @@ func (c *cli) devices(verb string, args []string) error {
 			if health == "" {
 				health = "ok"
 			}
-			rows = append(rows, []string{d.ID, d.Name, d.Status, health, d.Channel, platform, fmtPackages(d.Packages), fmtLabels(d.Labels), ago(d.LastSeenAt)})
+			status := d.Status
+			if d.Lifecycle != "" && d.Lifecycle != api.LifecycleActive {
+				status = d.Lifecycle
+			}
+			rows = append(rows, []string{d.ID, d.Name, status, health, d.Channel, platform, fmtPackages(d.Packages), fmtLabels(d.Labels), ago(d.LastSeenAt)})
 		}
 		c.table("ID\tNAME\tSTATUS\tHEALTH\tCHANNEL\tPLATFORM\tPACKAGES\tLABELS\tLAST SEEN", rows)
 		return nil
@@ -486,6 +506,22 @@ func (c *cli) devices(verb string, args []string) error {
 		if d.AgentStatus != "" {
 			fmt.Fprintf(c.out, "Agent:     %s\n", d.AgentStatus)
 		}
+		if li := d.LifecycleInfo; d.Lifecycle != api.LifecycleActive || li != nil {
+			fmt.Fprintf(c.out, "Lifecycle: %s", d.Lifecycle)
+			if li != nil {
+				fmt.Fprintf(c.out, " (%s by %s)", ago(li.ChangedAt), dash(li.ChangedBy))
+				if li.Note != "" {
+					fmt.Fprintf(c.out, ": %s", li.Note)
+				}
+				if li.Replaces != "" {
+					fmt.Fprintf(c.out, "; replaces %s", li.Replaces)
+				}
+				if li.ReplacedBy != "" {
+					fmt.Fprintf(c.out, "; replaced by %s", li.ReplacedBy)
+				}
+			}
+			fmt.Fprintln(c.out)
+		}
 		m := d.Metrics
 		fmt.Fprintf(c.out, "Uptime:    %s   Load: %.2f   Mem free: %s / %s   Disk free: %s / %s\n",
 			time.Duration(m.UptimeSeconds)*time.Second, m.Load1, bytesH(m.MemAvailableBytes), bytesH(m.MemTotalBytes), bytesH(m.DiskFreeBytes), bytesH(m.DiskTotalBytes))
@@ -505,6 +541,60 @@ func (c *cli) devices(verb string, args []string) error {
 			}
 			c.table("ID\tACTION\tSTATUS\tUPDATED\tOUTPUT", rows)
 		}
+		return nil
+	case "lifecycle", "retire":
+		fs := flag.NewFlagSet("devices "+verb, flag.ContinueOnError)
+		note := fs.String("note", "", "")
+		yes := fs.Bool("yes", false, "")
+		pos, err := parse(fs, args)
+		if err != nil {
+			return err
+		}
+		if err := need(pos, 1, "device id"); err != nil {
+			return err
+		}
+		state := api.LifecycleRetired
+		if verb == "lifecycle" {
+			if err := need(pos, 2, "state (active, spare or repair; use devices retire to retire)"); err != nil {
+				return err
+			}
+			state = pos[1]
+		}
+		if state == api.LifecycleRetired && !*yes {
+			return fmt.Errorf("retiring is final: the device's key is destroyed and its licenses revoked; add --yes to go ahead")
+		}
+		var d api.Device
+		if err := c.do("POST", "/api/v1/devices/"+url.PathEscape(pos[0])+"/lifecycle", api.LifecycleRequest{State: state, Note: *note}, &d); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(d)
+		}
+		fmt.Fprintf(c.out, "%s is now %s\n", d.Name, d.Lifecycle)
+		return nil
+	case "replace":
+		fs := flag.NewFlagSet("devices replace", flag.ContinueOnError)
+		with := fs.String("with", "", "")
+		oldState := fs.String("old-state", "", "")
+		note := fs.String("note", "", "")
+		pos, err := parse(fs, args)
+		if err != nil {
+			return err
+		}
+		if err := need(pos, 1, "device id"); err != nil {
+			return err
+		}
+		if *with == "" {
+			return fmt.Errorf("say which device replaces it: --with <device-id>")
+		}
+		var d api.Device
+		if err := c.do("POST", "/api/v1/devices/"+url.PathEscape(pos[0])+"/replace", api.ReplaceRequest{ReplacementID: *with, OldState: *oldState, Note: *note}, &d); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(d)
+		}
+		fmt.Fprintf(c.out, "%s (%s) now replaces %s\n", d.Name, d.ID, pos[0])
 		return nil
 	case "set", "label":
 		fs := flag.NewFlagSet("devices set", flag.ContinueOnError)

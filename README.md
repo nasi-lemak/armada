@@ -53,6 +53,8 @@ It has three parts, all in Go with no external services:
   (`02:00-05:00`, the agent's `maintenance_window`).
 - **Maintenance mode.** Put devices into planned maintenance, one-off or recurring: their alerts are
   held and rollouts skip them. Firing alerts can be **acknowledged**, which stops repeat notifications.
+- **Device lifecycle.** Track spares and devices in repair, swap a broken device for a spare in one
+  step (RMA), and retire devices for good while keeping their history.
 - **Remote actions, in seconds.** Reboot, restart the agent, run a command, or ask for a check-in.
   Each agent holds a long-poll connection, so actions reach it within a second or two, even behind
   NAT, without opening ports. `exec` is off by default and each device opts in.
@@ -698,6 +700,67 @@ client's.
   - **Email:** goes through your SMTP relay. Clients choose recipients only, not a mail server. Without
     `-smtp-host`, clients can't create email channels.
 
+## Device lifecycle
+
+Every device has a lifecycle state, shown as a badge in the device list and on its page:
+
+| State | Meaning | Updates | Alerts | Can check in |
+|---|---|---|---|---|
+| `active` | In service (every new device starts here) | yes | yes | yes |
+| `spare` | In stock, ready to replace a device | yes, so it's current when needed | no | yes |
+| `repair` | Out of service: RMA, at the bench | no | no | yes |
+| `retired` | Decommissioned for good | no | no | **no** |
+
+When a device leaves service (spare, repair, retired or removed), its open alerts close without a
+"resolved" notification. The device didn't recover, it just stopped being watched. Spares and devices
+in repair don't count as offline in the fleet overview.
+
+**Replacing a device (RMA).** On the broken device's page, choose **Replace…** and pick a spare (or
+any active device). In one step:
+
+- The replacement takes over the old device's **name, channel and labels**. With them come its
+  client, configuration profiles, alert rules, rollouts and maintenance by labels. It checks in
+  straight away to pick up its configuration.
+- The old device is renamed "… (replaced)" and **loses its labels**, so it leaves the client's
+  account: the customer can't see or act on a unit sitting at your repair bench. By default it goes
+  to `repair`. You can choose `spare` or `retired` instead.
+- Both devices link to each other, and the activity log records the swap and its note
+  (for example the RMA number).
+- Each device keeps its own key and its own history.
+
+**Retiring a device** is final:
+- **Key destroyed:** it can never check in again, and its live connection drops.
+- **Licenses revoked:** its app licenses are revoked and its hardware key is forgotten.
+- **Records kept:** its record, events and history stay. It leaves the device list, counts, rollouts
+  and alerts. Show retired devices with the **Retired** filter or `?lifecycle=retired`.
+- **Using the hardware again:** enroll it again. It joins as a new device.
+- **Android:** wipe the device first (**Wipe device**), then retire it.
+
+Removing a device instead (`DELETE`) also deletes its history.
+
+```bash
+armadactl devices lifecycle <id> spare
+```
+
+```bash
+armadactl devices lifecycle <id> repair --note "RMA 4411: cracked screen"
+```
+
+```bash
+armadactl devices replace <broken-id> --with <spare-id> --note "RMA 4411"
+```
+
+```bash
+armadactl devices retire <id> --yes --note "end of life"
+```
+
+```bash
+armadactl devices list --lifecycle spare
+```
+
+Lifecycle changes need a fleet-wide operator, because they move devices between clients and revoke
+credentials. Client accounts see the state of their devices.
+
 ## Peripherals: BLE sensors and other devices
 
 Devices that can't run an agent can be managed through a **gateway**: any Linux agent near them, such as
@@ -1079,7 +1142,7 @@ binary and reports `rolled_back`.
 
 ```
 armadactl status
-armadactl devices list [--channel C] [--label K=V] [--status online|offline]
+armadactl devices list [--channel C] [--label K=V] [--status online|offline] [--lifecycle spare|repair|retired|all]
 armadactl devices get <id>
 armadactl devices set <id> [--name N] [--channel C] [--label K=V]... [--unlabel K]...
 armadactl devices action <id> reboot|restart-agent
@@ -1087,6 +1150,9 @@ armadactl devices action <id> exec -- systemctl status myapp
 armadactl devices logs <id> [--unit myapp.service | --file myapp] [--lines 200] [--since 1h] [--grep error]
 armadactl devices wake <id>
 armadactl devices delete <id>
+armadactl devices lifecycle <id> active|spare|repair [--note N]
+armadactl devices retire <id> --yes [--note N]
+armadactl devices replace <id> --with <new-id> [--old-state repair|spare|retired] [--note N]
 armadactl tokens create|list|revoke
 armadactl releases upload|list|delete
 armadactl deployments create --release <id> [--channel C] [--label K=V] [--device ID]
@@ -1182,10 +1248,12 @@ endpoints use the per-device key issued at enrollment.
 | Method & path | Purpose |
 |---|---|
 | `GET /api/v1/summary` | Fleet counts and version distribution |
-| `GET /api/v1/devices` (`?channel=&label=k=v&status=`) | List devices |
+| `GET /api/v1/devices` (`?channel=&label=k=v&status=&lifecycle=`) | List devices (retired ones only with `lifecycle=retired` or `all`) |
 | `GET/PATCH/DELETE /api/v1/devices/{id}` | Device detail (with updates, actions, events), edit name/channel/labels, remove |
 | `GET/POST /api/v1/devices/{id}/actions` | List or queue `reboot`, `restart-agent`, `exec`, `logs`; on Android `lock`, `wipe` |
 | `POST /api/v1/devices/{id}/wake` | Ask a device to check in now |
+| `POST /api/v1/devices/{id}/lifecycle` (`{"state": "spare\|repair\|active\|retired", "note": …}`) | Change a device's lifecycle state (retiring is final) |
+| `POST /api/v1/devices/{id}/replace` (`{"replacement_id": …, "old_state": "repair"}`) | Replace a device (RMA): the replacement takes over name, channel and labels |
 | `GET/POST /api/v1/config-profiles`, `GET/PUT/DELETE /api/v1/config-profiles/{id}` | Configuration profiles (with compliance counts) |
 | `GET/POST /api/v1/tokens`, `DELETE /api/v1/tokens/{id}` | Enrollment tokens |
 | `GET/POST /api/v1/releases`, `GET/DELETE /api/v1/releases/{id}`, `GET …/artifact` | Releases (upload is `multipart/form-data`) |

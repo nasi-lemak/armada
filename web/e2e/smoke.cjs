@@ -22,8 +22,8 @@ async function api(method, path, body, token = adminToken) {
 async function seed() {
   // Two customers' devices, enrolled and checked in through the agent API.
   const ids = {}, keys = {};
-  for (const customer of ['acme', 'globex']) {
-    const tok = await api('POST', '/api/v1/tokens', { labels: { customer } });
+  for (const customer of ['acme', 'globex', 'stock']) {
+    const tok = await api('POST', '/api/v1/tokens', { labels: customer === 'stock' ? {} : { customer } });
     const res = await fetch(base + '/api/v1/agent/enroll', { method: 'POST', body: JSON.stringify({
       token: tok.token, name: customer + '-kiosk', info: { os: 'linux', arch: 'arm64', hostname: customer } }) });
     const er = await res.json();
@@ -32,6 +32,7 @@ async function seed() {
     ids[customer] = er.device_id;
     keys[customer] = er.device_key;
   }
+  await api('POST', `/api/v1/devices/${ids.stock}/lifecycle`, { state: 'spare' });
   await api('POST', '/api/v1/users', { email: 'it@acme.example', role: 'operator', scope: { labels: { customer: 'acme' } }, password: 'smoke-test-password' });
 
   // globex is in maintenance; acme has a firing alert to acknowledge.
@@ -85,7 +86,8 @@ async function visit(page, who, hash, expectHeading) {
     }
     if (hash === '#/devices') {
       const rows = await admin.$$eval('#view table tbody tr', r => r.map(x => x.textContent)).catch(() => []);
-      if (rows.length !== 2) fail(`admin sees ${rows.length} devices, expected 2`);
+      if (rows.length !== 3) fail(`admin sees ${rows.length} devices, expected 3`);
+      if (!rows.some(r => r.includes('stock-kiosk') && r.includes('spare'))) fail('device list does not mark the spare');
       if (!rows.some(r => r.includes('globex') && r.includes('maintenance'))) fail('device list does not mark the device in maintenance');
     }
     if (hash === '#/monitoring') {
@@ -118,6 +120,20 @@ async function visit(page, who, hash, expectHeading) {
   if ((await client.textContent('#view')).includes('Smoke maintenance')) fail('client sees vendor maintenance');
   await visit(client, 'client', '#/deployments');
   if (!(await client.evaluate(() => location.hash)).match(/^#\/?$/)) fail('client reached a fleet page');
+
+  // RMA: the admin swaps acme's kiosk for the spare from the device page.
+  await visit(admin, 'admin', '#/devices/' + ids.acme, 'acme-kiosk');
+  await admin.click('#view button:has-text("Replace…")');
+  const replSel = '#view select[aria-label="Replacement device"]';
+  await admin.waitForSelector(`${replSel} option[value="${ids.stock}"]`, { state: 'attached', timeout: 5000 });
+  await admin.selectOption(replSel, ids.stock);
+  await admin.click('#view form button.primary:has-text("Replace")');
+  await admin.waitForFunction(id => location.hash === '#/devices/' + id, ids.stock, { timeout: 5000 }).catch(() => fail('replace did not open the replacement'));
+  await admin.waitForTimeout(700);
+  if (!(await admin.textContent('h1')).includes('acme-kiosk')) fail('replacement did not take over the name');
+  await visit(client, 'client', '#/devices', 'Devices');
+  const after = await client.$$eval('#view table tbody tr', r => r.map(x => x.textContent));
+  if (after.length !== 1 || !after[0].includes(ids.stock)) fail(`client devices after the swap: ${JSON.stringify(after)}`);
 
   await browser.close();
   if (failures.length) {
