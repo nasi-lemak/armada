@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -23,7 +22,8 @@ var ErrConflict = errors.New("already exists")
 
 // Store wraps the SQLite database.
 type Store struct {
-	db *sql.DB
+	db        *sql.DB
+	migration MigrationInfo
 }
 
 const schema = `
@@ -183,83 +183,22 @@ func Open(path string) (*Store, error) {
 	// SQLite allows one writer at a time; a single connection avoids SQLITE_BUSY
 	// churn and keeps :memory: databases shared.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate: %w", err)
-	}
-	if _, err := db.Exec(usersSchema); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate users: %w", err)
-	}
-	if _, err := db.Exec(historySchema); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate history: %w", err)
-	}
-	if _, err := db.Exec(scimSchema); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate scim: %w", err)
-	}
-	if _, err := db.Exec(passkeySchema); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate passkeys: %w", err)
-	}
-	if _, err := db.Exec(mfaSchema); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate mfa: %w", err)
-	}
-	if _, err := db.Exec(configSchema); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate config: %w", err)
-	}
 	st := &Store{db: db}
-	if err := st.addColumns(); err != nil {
+	migPath := path
+	if path == ":memory:" {
+		migPath = ""
+	}
+	if st.migration, err = migrate(context.Background(), db, migPath); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("migrate: %w", err)
+		return nil, err
 	}
 	return st, nil
 }
 
+// Migration reports what Open did to the database schema.
+func (s *Store) Migration() MigrationInfo { return s.migration }
+
 // addColumns upgrades databases created by earlier versions in place.
-func (s *Store) addColumns() error {
-	cols := []struct{ table, name, def string }{
-		{"devices", "hw_key", "TEXT NOT NULL DEFAULT ''"},
-		{"devices", "attestation", "TEXT NOT NULL DEFAULT ''"},
-		{"devices", "license_revoked", "INTEGER NOT NULL DEFAULT 0"},
-		{"devices", "health", "TEXT NOT NULL DEFAULT '[]'"},
-		{"devices", "parent_id", "TEXT NOT NULL DEFAULT ''"},
-		{"events", "actor", "TEXT NOT NULL DEFAULT ''"},
-		{"releases", "version_code", "INTEGER NOT NULL DEFAULT 0"},
-		{"sessions", "method", "TEXT NOT NULL DEFAULT 'password'"},
-		{"deployments", "created_by", "TEXT NOT NULL DEFAULT ''"},
-		{"deployments", "approved_by", "TEXT NOT NULL DEFAULT ''"},
-		{"deployments", "approved_at", "INTEGER NOT NULL DEFAULT 0"},
-		{"sessions", "created_at", "INTEGER NOT NULL DEFAULT 0"},
-	}
-	for _, c := range cols {
-		rows, err := s.db.Query(`SELECT name FROM pragma_table_info(?)`, c.table)
-		if err != nil {
-			return err
-		}
-		exists := false
-		for rows.Next() {
-			var n string
-			if err := rows.Scan(&n); err != nil {
-				rows.Close()
-				return err
-			}
-			if n == c.name {
-				exists = true
-			}
-		}
-		rows.Close()
-		if !exists {
-			if _, err := s.db.Exec(`ALTER TABLE ` + c.table + ` ADD COLUMN ` + c.name + ` ` + c.def); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
 
 // Close closes the database.
 func (s *Store) Close() error { return s.db.Close() }

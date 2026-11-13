@@ -1,0 +1,11 @@
+{
+  "name": "armada-dashboard-e2e",
+  "private": true,
+  "description": "Browser smoke test for the Armada dashboard (run by CI).",
+  "scripts": {
+    "smoke": "node smoke.cjs"
+  },
+  "dependencies": {
+    "playwright": "1.48.2"
+  }
+}

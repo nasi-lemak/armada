@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/nasi-lemak/armada/internal/server"
+	"github.com/nasi-lemak/armada/internal/store"
 )
 
 var version = "dev"
@@ -55,6 +56,7 @@ func run() error {
 		tlsKey      = flag.String("tls-key", os.Getenv("ARMADA_TLS_KEY"), "TLS key file (ARMADA_TLS_KEY)")
 		stages      = flag.String("default-stages", env("ARMADA_DEFAULT_STAGES", "5,25,50,100"), "default rollout stages, cumulative percentages")
 		showVersion = flag.Bool("version", false, "print version and exit")
+		migStatus   = flag.Bool("migrate-status", false, "print the database schema version and pending migrations, change nothing, and exit")
 		maxArtifact = flag.Int64("max-artifact-mb", 2048, "maximum release artifact size in MiB")
 		jsonLogs    = flag.Bool("json-logs", os.Getenv("ARMADA_JSON_LOGS") != "", "log as JSON (ARMADA_JSON_LOGS)")
 	)
@@ -140,6 +142,29 @@ func run() error {
 	cfg.Android.RequireAttestation = !*allowNoAttest
 	cfg.Android.DisableDebugging = !*allowADB
 
+	if *migStatus {
+		path := filepath.Join(cfg.DataDir, "armada.db")
+		cur, pending, err := store.SchemaStatus(path)
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Printf("no database at %s yet; the first start creates schema version %d\n", path, store.LatestSchemaVersion())
+			return nil
+		} else if err != nil {
+			return err
+		}
+		fmt.Printf("database: %s\nschema version: %d (this build: %d)\n", path, cur, store.LatestSchemaVersion())
+		switch {
+		case cur > store.LatestSchemaVersion():
+			fmt.Println("the database is NEWER than this build: run a newer armada-server")
+		case len(pending) == 0:
+			fmt.Println("up to date")
+		default:
+			fmt.Println("pending (applied at next start, after an automatic backup):")
+			for _, p := range pending {
+				fmt.Println("  " + p)
+			}
+		}
+		return nil
+	}
 	if *showVersion {
 		fmt.Println("armada-server", version)
 		return nil
@@ -192,6 +217,11 @@ func run() error {
 		return err
 	}
 	defer srv.Close()
+	if m := srv.Migration(); len(m.Applied) > 0 {
+		log.Info("database schema migrated", "from", m.From, "to", m.To, "applied", strings.Join(m.Applied, "; "), "backup", m.Backup)
+	} else {
+		log.Info("database schema up to date", "version", m.To)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

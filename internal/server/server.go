@@ -608,3 +608,6 @@ func (s *Server) Tick(ctx context.Context) error {
 	}
 	return s.historyTick(ctx, now)
 }
+
+// Migration reports what opening the database did to its schema.
+func (s *Server) Migration() store.MigrationInfo { return s.store.Migration() }

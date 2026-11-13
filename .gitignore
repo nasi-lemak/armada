@@ -4,3 +4,5 @@
 *.db
 *.db-shm
 *.db-wal
+!internal/store/testdata/*.db
+/web/e2e/node_modules/

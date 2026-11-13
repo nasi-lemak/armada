@@ -1052,6 +1052,18 @@ server, extract the archive into an empty data directory, and start the server w
 token. Losing `signing.key` means agents that pinned the old key
 reject new releases.
 
+**Upgrading.** Replace the binary and restart. On start, the server brings the database schema up to
+date:
+- It first copies the database next to itself as `armada.db.before-v<N>-<time>`. If anything goes
+  wrong, stop the server, put that file back as `armada.db`, and run the previous version. Delete these
+  copies once you're happy.
+- Each schema change is applied in a transaction. A failed one leaves the database untouched at its
+  previous version, and the server doesn't start.
+- To see what an upgrade will do without changing anything, run
+  `armada-server -data-dir ./data -migrate-status`.
+- An older armada-server refuses to open a database a newer one has upgraded, instead of corrupting
+  it. To go back to an older version, restore the `before-v…` copy.
+
 Deployment options: [`deploy/armada-server.service`](deploy/armada-server.service)
 (systemd), [`Dockerfile`](Dockerfile) and
 [`deploy/docker-compose.yml`](deploy/docker-compose.yml). In production, put the server
@@ -1181,6 +1193,34 @@ package update, a failed health check with rollback, the auto-pause, remote acti
 self-update with the restart simulated, and crash-loop rollback.
 `internal/server/server_test.go` simulates a 200-device fleet through a staged rollout.
 
+**CI** (`.github/workflows/ci.yml`) runs on every push to `main` and every pull request:
+
+| Job | What it checks |
+|---|---|
+| Go (go.mod and stable) | `gofmt`, `go vet`, `go mod tidy`, all tests with the race detector, agent cross-compiles for every platform, server and CLI builds for macOS, Windows and FreeBSD |
+| Vulnerability scan | `govulncheck` with the latest Go release |
+| Dashboard | JavaScript syntax, then a browser smoke test (`web/e2e/smoke.cjs`): signs in, opens every page as an admin, and checks a client account sees only its customer's devices and no fleet pages. It fails on any JavaScript error. |
+| Android | agent APK and client library build, unit tests, Android lint |
+
+Run the dashboard smoke test against a local server with:
+
+```bash
+cd web/e2e && npm ci && npx playwright install chromium
+node smoke.cjs http://localhost:8080 "$(cat ../../data/admin-token)"
+```
+
+Build releases with the **current Go release** rather than the minimum in `go.mod`. Many security
+fixes land in the standard library, and the vulnerability scan uses the latest Go for that reason.
+
+**Changing the database schema.** Schema changes are numbered migrations in
+`internal/store/migrations.go`. Each is applied once, in order, inside a transaction, and recorded in
+the `schema_migrations` table.
+- Add a new migration at the end. Never edit a released one; `TestMigrationsAreFrozen` fails if you
+  do. Then add its fingerprint (printed by the test) to the list in that test.
+- `TestLegacyDatabaseUpgrades` upgrades a real database written by the first release
+  (`internal/store/testdata`) and checks it ends up with exactly the same tables, columns and indexes as
+  a new one.
+
 Layout:
 
 ```
@@ -1190,7 +1230,8 @@ cmd/armadactl       CLI
 internal/api        wire types shared by everything
 internal/rollout    pure rollout logic: targeting, staging, version ordering, health evaluation
 internal/chunk      content-defined chunking for delta updates
-internal/store      SQLite persistence
+internal/store      SQLite persistence and numbered schema migrations
+web/e2e             dashboard browser smoke test (run by CI)
 internal/server     HTTP API, agent protocol, rollout engine
 internal/agent      agent: enrollment, heartbeat, updates, self-update, actions
 internal/attestation Android key attestation verifier (Google roots, revocation list)
