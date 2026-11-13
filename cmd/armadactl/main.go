@@ -116,6 +116,11 @@ Certificates on devices (the agent's managed_certs; keys never leave the devices
   certs upload FILE...                       signed certificates (any order, chains welcome): matched,
                                              checked and installed, with rollback if the service fails
   certs cancel <device-id> <service>
+  certs policies list
+  certs policies create [--client K=V] [--label K=V]... [--target T]... [--days 30] [--key-type T]
+                        [--to ADDR]... [--remind-days 7] [--note N] [--name N]
+                                             renew automatically: CSRs requested before expiry, emailed, reminded
+  certs policies enable|disable|run|delete <id>
 
 Customer reports:
   report [--label K=V]... [--period last-month|this-month|last-week|this-week|last-7d|last-30d]

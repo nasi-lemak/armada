@@ -81,6 +81,13 @@ CREATE TABLE IF NOT EXISTS device_certs (
 );
 CREATE INDEX IF NOT EXISTS device_certs_device ON device_certs(device_id);
 `},
+	{Version: 9, Name: "certificate renewal policies", SQL: `
+CREATE TABLE IF NOT EXISTS cert_policies (
+	id TEXT PRIMARY KEY,
+	spec TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+`},
 	// Append new migrations here.
 }
 

@@ -336,25 +336,15 @@ func (s *Server) handleRenewCerts(w http.ResponseWriter, r *http.Request) {
 			skip("a renewal is already in progress (" + c.Renewal.Status + "); cancel it first")
 			continue
 		}
-		spec, err := renewalSpec(req, c, d)
-		if err != nil {
-			skip(err.Error())
-			continue
-		}
-		spec.RenewalID = newID("rnw")
-		args, _ := json.Marshal(spec)
-		a, err := s.queueAction(ctx, d, api.CreateActionRequest{Type: api.ActionCertCSR, Args: []string{string(args)}}, "")
-		if err != nil {
+		if err := s.startRenewal(ctx, c, d, req, nil); err != nil {
+			var bad renewalSpecError
+			if errors.As(err, &bad) {
+				skip(bad.Error())
+				continue
+			}
 			s.internalError(w, err)
 			return
 		}
-		c.Renewal = &api.CertRenewal{ID: spec.RenewalID, Status: api.RenewalRequested, Spec: spec, RequestedBy: p.name,
-			RequestedAt: now, ActionID: a.ID, UpdatedAt: now}
-		if err := s.store.PutDeviceCert(ctx, c); err != nil {
-			s.internalError(w, err)
-			return
-		}
-		s.logEvent(ctx, "cert.renewal_requested", d.ID, "", fmt.Sprintf("%s: new %s key and CSR requested for %s", d.Name, spec.KeyType, describeSpec(spec)))
 		c.DaysLeft = daysLeft(c.Installed, now)
 		resp.Started = append(resp.Started, *c)
 		wake = append(wake, d.ID)
@@ -365,6 +355,40 @@ func (s *Server) handleRenewCerts(w http.ResponseWriter, r *http.Request) {
 	}
 	s.wakeIDs(wake)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// renewalSpecError is a certificate a renewal can't be made for (a reason to skip it).
+type renewalSpecError struct{ error }
+
+// startRenewal asks a device for a new key and CSR. The caller has checked
+// it may (role, lifecycle, no renewal in progress); the actor is whoever
+// ctx names. A policy that started it is recorded.
+func (s *Server) startRenewal(ctx context.Context, c *api.DeviceCert, d *api.Device, req api.RenewCertsRequest, policy *api.CertPolicy) error {
+	spec, err := renewalSpec(req, c, d)
+	if err != nil {
+		return renewalSpecError{err}
+	}
+	now := s.now()
+	spec.RenewalID = newID("rnw")
+	args, _ := json.Marshal(spec)
+	a, err := s.queueAction(ctx, d, api.CreateActionRequest{Type: api.ActionCertCSR, Args: []string{string(args)}}, "")
+	if err != nil {
+		return err
+	}
+	c.Renewal = &api.CertRenewal{ID: spec.RenewalID, Status: api.RenewalRequested, Spec: spec, RequestedBy: principalFrom(ctx).name,
+		RequestedAt: now, ActionID: a.ID, UpdatedAt: now}
+	why := ""
+	if policy != nil {
+		c.Renewal.PolicyID, c.Renewal.PolicyName = policy.ID, policy.Name
+		if left := daysLeft(c.Installed, now); left != nil {
+			why = fmt.Sprintf(" (expires in %d days; policy %q)", *left, policy.Name)
+		}
+	}
+	if err := s.store.PutDeviceCert(ctx, c); err != nil {
+		return err
+	}
+	s.logEvent(ctx, "cert.renewal_requested", d.ID, "", fmt.Sprintf("%s: new %s key and CSR requested for %s%s", d.Name, spec.KeyType, describeSpec(spec), why))
+	return nil
 }
 
 func describeSpec(spec api.CertCSRSpec) string {
@@ -473,6 +497,14 @@ func (s *Server) certActionResult(ctx context.Context, dev *api.Device, a *api.A
 	if err := s.store.PutDeviceCert(ctx, c); err != nil {
 		s.log.Error("store certificate", "device", dev.ID, "err", err)
 	}
+}
+
+// plural writes "1 thing" or "3 things".
+func plural(n int, thing string) string {
+	if n == 1 {
+		return "1 " + thing
+	}
+	return fmt.Sprintf("%d %ss", n, thing)
 }
 
 func firstLineOf(s string) string {
@@ -606,37 +638,80 @@ func (s *Server) handleEmailCSRs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no CSRs are waiting to be signed on those devices")
 		return
 	}
-	zipData, err := csrZip(list)
-	if err != nil {
-		s.internalError(w, err)
+	if err := s.emailCSRs(ctx, list, req.Recipients, req.Note, false); err != nil {
+		writeError(w, http.StatusBadGateway, "sending failed: "+err.Error())
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]int{"sent": len(list)})
+}
+
+// emailCSRs sends waiting CSRs (a zip) to whoever signs them, and records
+// on each renewal that it was sent (or reminded).
+func (s *Server) emailCSRs(ctx context.Context, list []*api.DeviceCert, recipients []string, note string, reminder bool) error {
+	zipData, err := csrZip(list)
+	if err != nil {
+		return err
+	}
+	now := s.now()
 	var body strings.Builder
-	fmt.Fprintf(&body, "Hello,\r\n\r\nAttached are %d certificate signing requests (CSRs) for devices we manage for you.\r\n", len(list))
+	csrs := plural(len(list), "certificate signing request")
+	if reminder {
+		fmt.Fprintf(&body, "Hello,\r\n\r\nA reminder: we're still waiting for the signed certificates for these %s (CSRs).\r\n", csrs)
+	} else {
+		fmt.Fprintf(&body, "Hello,\r\n\r\nAttached are %s (CSRs) for devices we manage for you.\r\n", csrs)
+	}
 	fmt.Fprintf(&body, "Please sign each one with your CA and send the certificates back (PEM; one file or many, in any order).\r\n")
 	if base := strings.TrimRight(s.cfg.Android.PublicURL, "/"); base != "" {
 		fmt.Fprintf(&body, "If you have an account, you can also upload them yourself: %s/#/certificates\r\n", base)
 	}
-	if note := strings.TrimSpace(req.Note); note != "" {
+	if note = strings.TrimSpace(note); note != "" {
 		fmt.Fprintf(&body, "\r\n%s\r\n", note)
 	}
 	body.WriteString("\r\n")
+	var soonest *time.Time
 	for _, c := range list {
-		fmt.Fprintf(&body, "  - %s · %s\r\n", c.DeviceName, describeSpec(c.Renewal.Spec))
+		line := fmt.Sprintf("  - %s · %s", c.DeviceName, describeSpec(c.Renewal.Spec))
+		if c.Installed != nil {
+			line += ", current certificate expires " + c.Installed.NotAfter.Format("2 Jan 2006")
+			if soonest == nil || c.Installed.NotAfter.Before(*soonest) {
+				t := c.Installed.NotAfter
+				soonest = &t
+			}
+		}
+		body.WriteString(line + "\r\n")
 	}
 	fmt.Fprintf(&body, "\r\nThe private keys stay on the devices; only the requests are attached.\r\n\r\n%s\r\n", s.cfg.ReportBrand)
-	subject := fmt.Sprintf("[%s] %d certificate signing requests", s.cfg.ReportBrand, len(list))
+	subject := fmt.Sprintf("[%s] %s", s.cfg.ReportBrand, csrs)
+	if reminder {
+		subject = fmt.Sprintf("[%s] Reminder: %s still to sign", s.cfg.ReportBrand, plural(len(list), "certificate"))
+	}
+	if soonest != nil {
+		subject += ", the first expiring " + soonest.Format("2 Jan")
+	}
 	relay := s.cfg.SMTPRelay
-	relay.To = req.Recipients
+	relay.To = recipients
 	sendCtx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	if err := smtpDeliver(sendCtx, &relay, mimeWithAttachment(relay.From, req.Recipients, subject, body.String(),
-		fmt.Sprintf("csrs-%s.zip", s.now().Format("2006-01-02")), "application/zip", zipData)); err != nil {
-		writeError(w, http.StatusBadGateway, "sending failed: "+err.Error())
-		return
+	if err := smtpDeliver(sendCtx, &relay, mimeWithAttachment(relay.From, recipients, subject, body.String(),
+		fmt.Sprintf("csrs-%s.zip", now.Format("2006-01-02")), "application/zip", zipData)); err != nil {
+		return err
 	}
-	s.logEvent(ctx, "cert.csrs_emailed", "", "", fmt.Sprintf("%d CSRs emailed to %s", len(list), strings.Join(req.Recipients, ", ")))
-	writeJSON(w, http.StatusOK, map[string]int{"sent": len(list)})
+	for _, c := range list {
+		if reminder {
+			c.Renewal.RemindedAt = &now
+		} else {
+			c.Renewal.EmailedAt, c.Renewal.EmailedTo = &now, recipients
+		}
+		if err := s.store.PutDeviceCert(ctx, c); err != nil {
+			return err
+		}
+	}
+	kind, verb := "cert.csrs_emailed", "emailed"
+	if reminder {
+		kind, verb = "cert.csrs_reminded", "reminder sent"
+	}
+	s.logEvent(ctx, kind, "", "", fmt.Sprintf("%d CSRs %s to %s", len(list), verb, strings.Join(recipients, ", ")))
+	return nil
 }
 
 // ---- signed certificates in ----

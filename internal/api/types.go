@@ -1465,6 +1465,45 @@ type CertRenewal struct {
 	InstalledAt *time.Time `json:"installed_at,omitempty"`
 	ActionID    string     `json:"action_id,omitempty"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+	// PolicyID is set when a renewal policy started it.
+	PolicyID   string `json:"policy_id,omitempty"`
+	PolicyName string `json:"policy_name,omitempty"`
+	// EmailedAt/EmailedTo record when the CSR was emailed to be signed;
+	// RemindedAt the last reminder.
+	EmailedAt  *time.Time `json:"emailed_at,omitempty"`
+	EmailedTo  []string   `json:"emailed_to,omitempty"`
+	RemindedAt *time.Time `json:"reminded_at,omitempty"`
+}
+
+// CertPolicy renews certificates automatically before they expire: it
+// starts renewals (a new key and CSR on each device) RenewDays before
+// expiry, emails the CSRs to whoever signs them, and reminds them while
+// certificates haven't come back. Returned certificates install as usual.
+type CertPolicy struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+	// ClientScope is the client it's for (empty: every client; admins only).
+	ClientScope Selector `json:"client_scope"`
+	// Selector narrows the devices; Targets the certificates (managed_certs
+	// names; empty: all of them).
+	Selector Selector `json:"selector"`
+	Targets  []string `json:"targets,omitempty"`
+	// RenewDays: start this many days before expiry (default 30).
+	RenewDays int `json:"renew_days"`
+	// KeyType for the new keys (empty: the same type as now).
+	KeyType string `json:"key_type,omitempty"`
+	// Recipients get the CSRs by email once they're ready (one email per
+	// batch). Without recipients, CSRs wait on the Certificates page.
+	Recipients []string `json:"recipients,omitempty"`
+	// ReminderDays re-sends CSRs still waiting after this many days (0: no reminders).
+	ReminderDays int       `json:"reminder_days"`
+	Note         string    `json:"note,omitempty"` // added to the emails, e.g. a contract number
+	CreatedBy    string    `json:"created_by,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	// LastRunAt is when the policy last checked the certificates.
+	LastRunAt *time.Time `json:"last_run_at,omitempty"`
 }
 
 // DeviceCert is a certificate managed on a device, with its latest renewal.

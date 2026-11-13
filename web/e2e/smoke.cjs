@@ -105,6 +105,11 @@ async function visit(page, who, hash, expectHeading) {
       await admin.click('#view tbody input[type=checkbox]');
       await admin.click('.bulk-bar button:has-text("Request CSRs")');
       await admin.waitForSelector('#view :text("making CSR")', { timeout: 5000 }).catch(() => fail('requesting a CSR did not start a renewal'));
+      // Automatic renewal: set one up from the form and run it.
+      await admin.click('#view button:has-text("Set up automatic renewal")');
+      await admin.waitForSelector('#view td:has-text("Renew certificates")', { timeout: 5000 }).catch(() => fail('renewal policy not listed'));
+      await admin.click('#view button:has-text("Check now")');
+      await admin.waitForSelector('#toast:has-text("Checked:")', { timeout: 5000 }).catch(() => fail('running the renewal policy failed'));
     }
     if (hash === '#/enroll') {
       const toks = await admin.$$eval('#view table tbody tr', r => r.map(x => x.textContent)).catch(() => []);

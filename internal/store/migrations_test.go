@@ -198,6 +198,7 @@ func TestMigrationsAreFrozen(t *testing.T) {
 		"6 report schedules 9ef124e2bf93",
 		"7 enrollment tokens choose lifecycle 798424001601",
 		"8 device certificates 929cea2a3748",
+		"9 certificate renewal policies 8a75ec1dde82",
 	}
 	var got []string
 	for i, m := range migrations {

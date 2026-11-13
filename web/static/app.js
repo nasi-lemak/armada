@@ -1418,6 +1418,8 @@ async function viewCertificates(root) {
     h('button', { class: 'btn primary', onclick: requestCSRs }, 'Request CSRs'),
     h('button', { class: 'btn', onclick: () => { selected.clear(); render(); } }, 'Clear selection'));
 
+  const policyBox = certPolicies(() => refresh());
+
   // Upload signed certificates: paste or files, any number, any order.
   const pemIn = h('textarea', { placeholder: '-----BEGIN CERTIFICATE-----\n… paste certificates here (with their chain if you have it), or choose files', 'aria-label': 'Signed certificates', rows: 4 });
   const filesIn = h('input', { type: 'file', multiple: true, accept: '.pem,.crt,.cer,.txt', 'aria-label': 'Certificate files' });
@@ -1443,7 +1445,7 @@ async function viewCertificates(root) {
     h('div', { class: 'toolbar' }, search, filter,
       h('button', { class: 'btn need-operator', onclick: downloadCSRs, title: 'The selected waiting CSRs, or all of them' }, 'Download CSRs'),
       h('button', { class: 'btn need-operator', onclick: emailCSRs, title: 'Email the selected waiting CSRs, or all of them' }, 'Email CSRs…')),
-    bar, h('div', { class: 'spacer' }), list);
+    bar, h('div', { class: 'spacer' }), list, policyBox.el);
 
   function render() {
     const q = search.value.trim().toLowerCase(), f = filter.value;
@@ -1476,7 +1478,9 @@ async function viewCertificates(root) {
             h('div', { class: 'muted' }, `${i.issuer} · ${i.key_type}`), i.key_matches ? null : h('div', { class: 'bad' }, 'the key file does not match this certificate')]
             : h('span', { class: 'bad' }, c.error || 'no certificate')),
           h('td', { class: 'nowrap' }, expiryBadge(c), i ? h('div', { class: 'muted' }, new Date(i.not_after).toLocaleDateString()) : null),
-          h('td', {}, r ? [renewalBadge(r), h('div', { class: 'muted' }, `${r.requested_by || ''} · ${ago(r.updated_at)}`),
+          h('td', {}, r ? [renewalBadge(r),
+            h('div', { class: 'muted' }, r.policy_name ? `automatic (${r.policy_name})` : r.requested_by || '', ' · ', ago(r.updated_at)),
+            r.status === 'csr_ready' && r.emailed_at ? h('div', { class: 'muted' }, `CSR emailed ${ago(r.emailed_at)} to ${(r.emailed_to || []).join(', ')}${r.reminded_at ? ' · reminded ' + ago(r.reminded_at) : ''}`) : null,
             r.message ? h('div', { class: 'bad', title: r.message }, r.message.length > 120 ? r.message.slice(0, 120) + '…' : r.message) : null] : h('span', { class: 'muted' }, '—')),
           h('td', {}, h('div', { class: 'btn-row' },
             r && r.status === 'csr_ready' ? h('button', { class: 'btn small', onclick: () => saveText(`${c.device_name}_${c.target}.csr`, r.csr) }, 'CSR') : null,
@@ -1487,9 +1491,75 @@ async function viewCertificates(root) {
   }
   search.addEventListener('input', render);
   filter.addEventListener('change', render);
-  async function refresh() { certsList = await api('GET', '/api/v1/certificates'); render(); }
+  async function refresh() { certsList = await api('GET', '/api/v1/certificates'); render(); await policyBox.load(); }
   await guard(refresh);
   return async () => { if (!root.contains(document.activeElement) || document.activeElement === document.body) await refresh(); };
+}
+
+// certPolicies is the automatic-renewal section of the Certificates page.
+function certPolicies(onRun) {
+  const isAdmin = !!me && me.fleet_role === 'admin';
+  const opScopes = ((me && me.grants) || []).filter(g => (ROLE_RANK[g.role] || 0) >= ROLE_RANK.operator && scopeText(g.scope)).map(g => g.scope);
+  const canManage = isAdmin || opScopes.length > 0;
+  const canEdit = sc => isAdmin || (scopeText(sc) !== '' && opScopes.some(c => scopeText(c) === scopeText(sc)));
+  const listBox = h('div', { class: 'card flush' });
+  const pFor = isAdmin
+    ? h('input', { placeholder: 'customer=acme (empty = every client)', 'aria-label': 'Policy for' })
+    : h('select', { 'aria-label': 'Policy for' }, opScopes.map((sc, i) => h('option', { value: String(i) }, scopeText(sc))));
+  const pName = h('input', { placeholder: 'optional', 'aria-label': 'Policy name' });
+  const pDays = h('input', { type: 'number', min: '1', max: '365', value: '30', 'aria-label': 'Days before expiry' });
+  const pTargets = h('input', { placeholder: 'all, or mosquitto nginx', 'aria-label': 'Certificates' });
+  const pLabels = h('input', { placeholder: 'all devices, or site=sg', 'aria-label': 'Devices (labels)' });
+  const pKey = h('select', { 'aria-label': 'New key type' }, [['', 'Same as now'], ['ecdsa-p256', 'ECDSA P-256'], ['ecdsa-p384', 'ECDSA P-384'],
+    ['rsa-2048', 'RSA 2048'], ['rsa-3072', 'RSA 3072'], ['rsa-4096', 'RSA 4096']].map(([v, l]) => h('option', { value: v }, l)));
+  const pTo = h('input', { placeholder: 'pki@customer.com (empty: collect CSRs here)', 'aria-label': 'Email CSRs to' });
+  const pRemind = h('input', { type: 'number', min: '0', max: '90', value: '7', 'aria-label': 'Remind every (days)' });
+  const pNote = h('input', { placeholder: 'optional, e.g. contract or ticket number', 'aria-label': 'Note in emails' });
+  const form = h('div', { class: 'card mb' + (canManage ? '' : ' hidden') }, h('form', { class: 'stack', onsubmit: async e => {
+    e.preventDefault();
+    let scope, labels;
+    try {
+      scope = isAdmin ? { labels: parseLabels(pFor.value) } : opScopes[parseInt(pFor.value || '0', 10)];
+      labels = parseLabels(pLabels.value);
+    } catch (err) { return toast(err.message, true); }
+    const body = { name: pName.value.trim(), client_scope: scope, selector: { labels }, targets: pTargets.value.split(/[\s,]+/).filter(Boolean),
+      renew_days: parseInt(pDays.value || '30', 10), key_type: pKey.value, recipients: pTo.value.split(/[\s,;]+/).filter(Boolean),
+      reminder_days: parseInt(pRemind.value || '0', 10), note: pNote.value.trim() };
+    if (await guard(() => api('POST', '/api/v1/cert-policies', body), 'Automatic renewal set up')) { pName.value = ''; pTo.value = ''; pNote.value = ''; load(); }
+  } },
+  h('div', { class: 'form-grid' }, h('label', { class: isAdmin || opScopes.length > 1 ? '' : 'hidden' }, 'For', pFor), h('label', {}, 'Name', pName),
+    h('label', {}, 'Start this many days before expiry', pDays), h('label', {}, 'Certificates', pTargets), h('label', {}, 'Devices', pLabels),
+    h('label', {}, 'New key', pKey), h('label', { class: 'wide' }, 'Email CSRs to', pTo), h('label', {}, 'Remind every (days, 0 = never)', pRemind),
+    h('label', { class: 'wide' }, 'Note in emails', pNote)),
+  h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Set up automatic renewal'))));
+  const el = h('div', {}, h('div', { class: 'page-head mt' }, h('div', {}, h('h2', {}, 'Automatic renewal'),
+    h('div', { class: 'muted' }, 'Starts renewals before certificates expire, emails the CSRs to whoever signs them, and reminds them until the certificates come back. Returned certificates install as usual.'))),
+    form, listBox);
+  async function load() {
+    const pols = await api('GET', '/api/v1/cert-policies');
+    replace(listBox, table(['Policy', 'For', 'When', 'CSRs go to', 'Last checked', ''], pols.map(p => h('tr', {},
+      h('td', {}, h('strong', {}, p.name), ' ', badge(p.enabled ? 'enabled' : 'disabled'), p.created_by ? h('div', { class: 'muted' }, 'by ' + p.created_by) : null),
+      h('td', {}, scopeText(p.client_scope) || h('span', { class: 'muted' }, 'every client'),
+        scopeText(p.selector) ? h('div', { class: 'muted' }, scopeText(p.selector)) : null,
+        (p.targets || []).length ? h('div', { class: 'muted mono' }, p.targets.join(', ')) : null),
+      h('td', {}, `${p.renew_days} days before expiry`, p.key_type ? h('div', { class: 'muted' }, 'new key: ' + p.key_type) : null),
+      h('td', {}, (p.recipients || []).length ? [p.recipients.join(', '), h('div', { class: 'muted' }, p.reminder_days ? `reminder every ${p.reminder_days} days` : 'no reminders')]
+        : h('span', { class: 'muted' }, 'collected here')),
+      h('td', { class: 'nowrap' }, p.last_run_at ? ago(p.last_run_at) : h('span', { class: 'muted' }, 'not yet')),
+      h('td', {}, !canEdit(p.client_scope) ? null : h('div', { class: 'btn-row' },
+        h('button', { class: 'btn small', onclick: async () => {
+          const r = await guard(() => api('POST', `/api/v1/cert-policies/${p.id}/run`));
+          if (r) { toast(`Checked: ${r.started} renewal(s) started, ${r.emailed} CSR(s) emailed, ${r.reminded} reminded`); onRun(); }
+        } }, 'Check now'),
+        h('button', { class: 'btn small', onclick: async () => {
+          if (await guard(() => api('PUT', '/api/v1/cert-policies/' + p.id, { ...p, enabled: !p.enabled }))) load();
+        } }, p.enabled ? 'Disable' : 'Enable'),
+        h('button', { class: 'btn small danger', onclick: async () => {
+          if (confirm(`Delete ${p.name}? Renewals it started carry on.`) && await guard(() => api('DELETE', '/api/v1/cert-policies/' + p.id)) !== undefined) load();
+        } }, 'Delete'))))),
+    'No automatic renewal set up. Certificates are renewed when someone requests CSRs.'));
+  }
+  return { el, load };
 }
 
 // ---------- customer reports ----------

@@ -189,3 +189,24 @@ func (s *Store) DeleteDeviceCert(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM device_certs WHERE id=?`, id)
 	return err
 }
+
+// PutCertPolicy creates or replaces a certificate renewal policy.
+func (s *Store) PutCertPolicy(ctx context.Context, p *api.CertPolicy) error {
+	return s.putDoc(ctx, "cert_policies", p.ID, p.CreatedAt, p)
+}
+
+// GetCertPolicy loads a renewal policy.
+func (s *Store) GetCertPolicy(ctx context.Context, id string) (*api.CertPolicy, error) {
+	var p api.CertPolicy
+	return &p, s.getDoc(ctx, "cert_policies", id, &p)
+}
+
+// ListCertPolicies returns all renewal policies.
+func (s *Store) ListCertPolicies(ctx context.Context) ([]*api.CertPolicy, error) {
+	return listDocs[api.CertPolicy](ctx, s, "cert_policies")
+}
+
+// DeleteCertPolicy removes a renewal policy.
+func (s *Store) DeleteCertPolicy(ctx context.Context, id string) error {
+	return s.deleteDoc(ctx, "cert_policies", id)
+}

@@ -213,6 +213,13 @@ func (c *cli) certs(verb string, args []string) error {
 		fmt.Fprintf(c.out, "emailed %d CSRs to %s\n", out["sent"], strings.Join(to, ", "))
 		return nil
 
+	case "policies", "policy", "auto":
+		sub := ""
+		if len(args) > 0 {
+			sub, args = args[0], args[1:]
+		}
+		return c.certPolicies(sub, args)
+
 	case "cancel":
 		if err := need(args, 2, "device id and service (target)"); err != nil {
 			return err
@@ -220,4 +227,105 @@ func (c *cli) certs(verb string, args []string) error {
 		return c.do("POST", "/api/v1/certificates/"+url.PathEscape(args[0])+"/"+url.PathEscape(args[1])+"/cancel", nil, nil)
 	}
 	return fmt.Errorf("unknown certs command %q", verb)
+}
+
+func (c *cli) certPolicies(verb string, args []string) error {
+	switch verb {
+	case "", "list", "ls":
+		var ps []api.CertPolicy
+		if err := c.do("GET", "/api/v1/cert-policies", nil, &ps); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(ps)
+		}
+		var rows [][]string
+		for _, p := range ps {
+			state := "enabled"
+			if !p.Enabled {
+				state = "disabled"
+			}
+			to := "collected in Armada"
+			if len(p.Recipients) > 0 {
+				to = strings.Join(p.Recipients, ", ")
+				if p.ReminderDays > 0 {
+					to += fmt.Sprintf(" (remind every %dd)", p.ReminderDays)
+				}
+			}
+			last := "never"
+			if p.LastRunAt != nil {
+				last = ago(*p.LastRunAt)
+			}
+			rows = append(rows, []string{p.ID, p.Name, state, fmt.Sprintf("%dd before expiry", p.RenewDays), dash(strings.Join(p.Targets, ",")), to, last})
+		}
+		c.table("ID\tNAME\tSTATE\tSTARTS\tCERTIFICATES\tCSRS GO TO\tLAST CHECKED", rows)
+		return nil
+	case "create", "add":
+		fs := flag.NewFlagSet("certs policies create", flag.ContinueOnError)
+		name := fs.String("name", "", "")
+		days := fs.Int("days", 30, "")
+		remind := fs.Int("remind-days", 7, "")
+		keyType := fs.String("key-type", "", "")
+		note := fs.String("note", "", "")
+		var to, client, labels, targets multiFlag
+		fs.Var(&to, "to", "")
+		fs.Var(&client, "client", "")
+		fs.Var(&labels, "label", "")
+		fs.Var(&targets, "target", "")
+		if _, err := parse(fs, args); err != nil {
+			return err
+		}
+		p := api.CertPolicy{Name: *name, RenewDays: *days, ReminderDays: *remind, KeyType: *keyType, Note: *note, Recipients: to, Targets: targets}
+		var err error
+		if p.ClientScope.Labels, err = labelsOf(client); err != nil {
+			return err
+		}
+		if p.Selector.Labels, err = labelsOf(labels); err != nil {
+			return err
+		}
+		if len(to) == 0 {
+			p.ReminderDays = 0
+		}
+		var out api.CertPolicy
+		if err := c.do("POST", "/api/v1/cert-policies", p, &out); err != nil {
+			return err
+		}
+		fmt.Fprintf(c.out, "%s %s: renewals start %d days before expiry\n", out.ID, out.Name, out.RenewDays)
+		return nil
+	case "enable", "disable":
+		if err := need(args, 1, "policy id"); err != nil {
+			return err
+		}
+		var p api.CertPolicy
+		var all []api.CertPolicy
+		if err := c.do("GET", "/api/v1/cert-policies", nil, &all); err != nil {
+			return err
+		}
+		for _, x := range all {
+			if x.ID == args[0] {
+				p = x
+			}
+		}
+		if p.ID == "" {
+			return fmt.Errorf("no renewal policy %s", args[0])
+		}
+		p.Enabled = verb == "enable"
+		return c.do("PUT", "/api/v1/cert-policies/"+p.ID, p, nil)
+	case "run", "check":
+		if err := need(args, 1, "policy id"); err != nil {
+			return err
+		}
+		var res struct{ Started, Emailed, Reminded int }
+		if err := c.do("POST", "/api/v1/cert-policies/"+url.PathEscape(args[0])+"/run", nil, &res); err != nil {
+			return err
+		}
+		fmt.Fprintf(c.out, "%d renewals started, %d CSRs emailed, %d reminded\n", res.Started, res.Emailed, res.Reminded)
+		return nil
+	case "delete", "rm":
+		if err := need(args, 1, "policy id"); err != nil {
+			return err
+		}
+		return c.do("DELETE", "/api/v1/cert-policies/"+url.PathEscape(args[0]), nil, nil)
+	}
+	return fmt.Errorf("unknown certs policies command %q", verb)
 }

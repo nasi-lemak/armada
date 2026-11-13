@@ -193,7 +193,11 @@ type Server struct {
 	mfa                       mfaChallenges
 	passkeys                  passkeyState
 	closeOnce                 sync.Once
-	adminSeen                 struct {
+	// Certificate renewal policies: when they last ran, and one run at a time.
+	certPolicyMu      sync.Mutex
+	certPolicyLastRun time.Time
+	certPolicyRunMu   sync.Mutex
+	adminSeen         struct {
 		sync.Mutex
 		m map[string]time.Time
 	}
@@ -447,6 +451,13 @@ func (s *Server) Handler() http.Handler {
 	operator(scopedOK, "POST /api/v1/certificates/upload", s.handleUploadCerts)
 	operator(scopedOK, "POST /api/v1/certificates/email", s.handleEmailCSRs)
 	operator(scopedOK, "POST /api/v1/certificates/{device}/{target}/cancel", s.handleCancelRenewal)
+	// Renewal policies follow the client-alert rules: admins manage all,
+	// client operators their client's.
+	viewer(scopedOK, "GET /api/v1/cert-policies", s.handleListCertPolicies)
+	operator(scopedOK, "POST /api/v1/cert-policies", s.handleCreateCertPolicy)
+	operator(scopedOK, "PUT /api/v1/cert-policies/{id}", s.handleUpdateCertPolicy)
+	operator(scopedOK, "DELETE /api/v1/cert-policies/{id}", s.handleDeleteCertPolicy)
+	operator(scopedOK, "POST /api/v1/cert-policies/{id}/run", s.handleRunCertPolicy)
 	viewer(scopedOK, "GET /api/v1/bulk", s.handleListBulk)
 	viewer(scopedOK, "GET /api/v1/bulk/{id}", s.handleGetBulk)
 	viewer(scopedOK, "GET /api/v1/events", s.handleListEvents)
@@ -648,6 +659,9 @@ func (s *Server) Tick(ctx context.Context) error {
 		return err
 	}
 	if err := s.reportTick(ctx, now); err != nil {
+		return err
+	}
+	if err := s.certPolicyTick(ctx, now); err != nil {
 		return err
 	}
 	if err := s.store.PruneSessions(ctx, now); err != nil {

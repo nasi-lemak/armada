@@ -61,7 +61,8 @@ It has three parts, all in Go with no external services:
 - **Certificates on devices.** Track the TLS certificates your applications use (Mosquitto, web
   servers…) and renew them with your clients' CAs: a new key and CSR are made on each device (keys
   never leave it), the CSRs go to the client (download, email, or their own login), and the signed
-  certificates are matched, checked and installed with automatic rollback.
+  certificates are matched, checked and installed with automatic rollback. Renewal policies start
+  all this before expiry on their own, and remind the client until the certificates come back.
 - **Customer reports.** Availability, alerts, updates, replacements and maintenance for a client
   over a week, a month or any dates. View them in the dashboard, download them as CSV or a printable
   page, or have them emailed every week or month.
@@ -907,6 +908,43 @@ exchange:
    - **Rollback:** if either step fails, it **puts the previous certificate and key back**, reloads
      again, and the renewal shows as failed with the reason.
 
+### Automatic renewal
+
+A **renewal policy** runs the steps above on its own, up to the signature. Set one up under
+**Automatic renewal** on the Certificates page, or with
+`armadactl certs policies create --client customer=acme --to pki@acme.example`.
+
+- **Starting:** `renew_days` (default 30) before a certificate expires, the policy starts its
+  renewal: the device makes a new key and CSR, with the same names as now (and optionally a new key
+  type).
+- **Sending:** once CSRs are ready, they're emailed to the policy's recipients, in one email per
+  batch with a zip and the policy's note (a contract or ticket number). Without recipients, they wait
+  on the Certificates page for the client or your team.
+- **Reminding:** while certificates haven't come back, a reminder goes out every `reminder_days`
+  (default 7; 0 for none), with the soonest expiry in the subject.
+- **Installing:** returned certificates install like any other: matched, checked, installed, verified,
+  rolled back on failure.
+- **Retrying:** a renewal that failed (for example the device couldn't make the CSR) or that someone
+  cancelled is started again after a week. To stop renewing a certificate, narrow or disable the
+  policy.
+- **Scope:** it covers devices in service. Spares, devices in repair and retired devices are left
+  alone. Narrow it with device labels and certificate names (`targets`).
+- **Who manages policies:** client operators set up policies for their own client, and admins for
+  any client or all of them. Renewals a policy starts are recorded as made by that policy.
+- **How often:** policies check every 15 minutes. **Check now** runs one immediately.
+
+```bash
+armadactl certs policies create --client customer=acme --days 45 --to pki@acme.example --note "Contract 77"
+```
+
+```bash
+armadactl certs policies list
+```
+
+```bash
+armadactl certs policies run <id>
+```
+
 **Who can do what:**
 - **Seeing certificates:** everyone sees the certificates of the devices they can see.
 - **Renewing and installing:** operators on a device (including a client's own operators) can renew
@@ -1428,6 +1466,7 @@ armadactl bulk list | bulk get <id>
 armadactl report [--label K=V]... [--period last-month] [--from D --to D] [--tz TZ] [--format csv|html -o FILE]
 armadactl report schedules list|create|send|delete
 armadactl certs list|renew|csrs|email|upload|cancel
+armadactl certs policies list|create|enable|disable|run|delete
 armadactl maintenance list|start|schedule|end|delete   (start --device ID --for 2h; schedule --windows 02:00-04:00 --days sun)
 armadactl config list|get|apply -f FILE|enable|disable|delete
 armadactl groups [list|map --group G --role R [--scope K=V]...|unmap G]
@@ -1546,6 +1585,7 @@ endpoints use the per-device key issued at enrollment.
 | `GET /api/v1/certificates/csrs`, `POST /api/v1/certificates/email` | Waiting CSRs as a zip, or emailed |
 | `POST /api/v1/certificates/upload` (`{"pem": …}`) | Signed certificates: matched by key, checked, installed |
 | `POST /api/v1/certificates/{device}/{target}/cancel` | Cancel a waiting renewal |
+| `GET/POST /api/v1/cert-policies`, `PUT/DELETE …/{id}`, `POST …/{id}/run` | Automatic renewal policies |
 | `GET /api/v1/reports?label=k=v&period=last-month\|this-month\|last-week\|last-7d\|last-30d` (or `from=&to=`, `tz=`, `format=json\|csv\|html`) | Customer report |
 | `GET/POST /api/v1/report-schedules`, `DELETE …/{id}`, `POST …/{id}/send` | Scheduled report emails |
 | `POST /api/v1/alerts/{id}/ack` (`{"note": …}`), `POST …/{id}/unack` | Acknowledge a firing alert, or undo it |
