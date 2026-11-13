@@ -170,25 +170,75 @@ func (s *Server) buildReport(ctx context.Context, p *principal, rr reportRequest
 		order = append(order, d)
 	}
 
+	// Maintenance that holds alerts is planned downtime: it's listed, and
+	// left out of availability.
+	maint, err := s.store.ListMaintenance(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	// Availability from the "online" history series.
 	res := s.cfg.HistoryResolution
-	var coverage map[string]int
-	perHour := 0
+	results := map[string]availResult{}
 	histFrom := rr.from
 	if res > 0 {
-		perHour = max(1, int(time.Hour/res))
+		perHour := max(1, int(time.Hour/res))
 		if oldest := now.Add(-s.cfg.HistoryRetention); histFrom.Before(oldest) {
 			histFrom = oldest
 			rep.Notes = append(rep.Notes, fmt.Sprintf("History is kept for %d days, so availability covers %s onwards.",
 				int(s.cfg.HistoryRetention.Hours()/24), oldest.In(rr.loc).Format("2 Jan 2006")))
 		}
-		if end.After(histFrom) {
-			if coverage, err = s.store.OnlineCoverage(ctx, histFrom, end, perHour); err != nil {
-				return nil, err
+		// When each maintenance window was in force during the period.
+		planned := map[string][]rollout.Interval{}
+		for _, m := range maint {
+			if !m.Holds() {
+				continue
+			}
+			from, to := maxTime(histFrom, m.StartsAt), end
+			if m.EndsAt != nil && m.EndsAt.Before(to) {
+				to = *m.EndsAt
+			}
+			if m.Recurring() {
+				planned[m.ID] = rollout.WindowIntervals(api.Strategy{Windows: m.Windows, Days: m.Days, TimeZone: m.TimeZone}, from, to)
+			} else if to.After(from) {
+				planned[m.ID] = []rollout.Interval{{Start: from, End: to}}
 			}
 		}
-		rep.Notes = append(rep.Notes, "Availability is the share of time each device was checking in with the server, measured per hour. "+
-			"It counts any time a device was off or unreachable, including planned maintenance.")
+		measure := func(d *api.Device, counts map[int64]int) {
+			var ivs []rollout.Interval
+			for _, m := range maint {
+				if len(planned[m.ID]) > 0 && maintenanceCovers(m, d) {
+					ivs = append(ivs, planned[m.ID]...)
+				}
+			}
+			results[d.ID] = measureAvailability(counts, maxTime(histFrom, d.EnrolledAt), end, perHour, rollout.MergeIntervals(ivs))
+		}
+		if end.After(histFrom) {
+			cur, counts := "", map[int64]int{}
+			flush := func() {
+				if d := devs[cur]; d != nil {
+					measure(d, counts)
+				}
+			}
+			err := s.store.OnlineHours(ctx, histFrom, end, func(id string, hour time.Time, n int) {
+				if id != cur {
+					flush()
+					cur, counts = id, map[int64]int{}
+				}
+				counts[hour.Unix()] += n
+			})
+			if err != nil {
+				return nil, err
+			}
+			flush()
+			for _, d := range order {
+				if _, done := results[d.ID]; !done {
+					measure(d, nil) // never checked in during the period
+				}
+			}
+		}
+		rep.Notes = append(rep.Notes, "Availability is the share of time each device was checking in with the server, measured per hour, "+
+			"leaving out planned maintenance (maintenance windows that hold alerts). Downtime during maintenance isn't counted against it.")
 	} else {
 		rep.Notes = append(rep.Notes, "Availability isn't shown: history is turned off on this server.")
 	}
@@ -203,16 +253,14 @@ func (s *Server) buildReport(ctx context.Context, p *principal, rr reportRequest
 		}
 		line := api.ReportDevice{ID: d.ID, Name: d.Name, Lifecycle: d.Lifecycle, Platform: platform, Health: d.Health,
 			Packages: d.Packages, LastSeenAt: d.LastSeenAt}
-		if coverage != nil {
-			start := histFrom
-			if d.EnrolledAt.After(start) {
-				start = d.EnrolledAt
+		if r, ok := results[d.ID]; ok {
+			if r.maintenance > 0 {
+				m := int(math.Round(r.maintenance))
+				line.MaintenanceMinutes = &m
 			}
-			if span := end.Sub(start); span >= time.Minute {
-				expected := span.Hours() * float64(perHour)
-				a := math.Min(100, 100*float64(coverage[d.ID])/expected)
-				a = math.Round(a*100) / 100
-				down := int(math.Round((1 - a/100) * span.Minutes()))
+			if r.measured {
+				a := math.Round(r.availability*100) / 100
+				down := int(math.Round(r.downtime))
 				line.Availability, line.DowntimeMinutes = &a, &down
 				if d.Lifecycle == api.LifecycleActive {
 					availSum += a
@@ -342,10 +390,6 @@ func (s *Server) buildReport(ctx context.Context, p *principal, rr reportRequest
 	}
 
 	// Maintenance that overlapped the period and covered these devices.
-	maint, err := s.store.ListMaintenance(ctx)
-	if err != nil {
-		return nil, err
-	}
 	for _, m := range maint {
 		if !m.StartsAt.Before(rr.to) || (m.EndsAt != nil && !m.EndsAt.After(rr.from)) {
 			continue
@@ -377,6 +421,64 @@ func (s *Server) buildReport(ctx context.Context, p *principal, rr reportRequest
 	return rep, nil
 }
 
+// availResult is one device's availability over a period.
+type availResult struct {
+	measured     bool    // false if the device spent the whole period in maintenance
+	availability float64 // percent, outside maintenance
+	downtime     float64 // minutes, outside maintenance
+	maintenance  float64 // minutes in maintenance
+}
+
+// measureAvailability works out availability from per-hour check-in counts
+// (counts[hour] = samples, perHour of them in a fully online hour) over
+// [start, end), leaving out the planned intervals. History only says how
+// much of each hour a device was up, not when, so down time in an hour
+// with maintenance counts against the maintenance first.
+func measureAvailability(counts map[int64]int, start, end time.Time, perHour int, planned []rollout.Interval) availResult {
+	var r availResult
+	var downOut, expected float64
+	next := 0
+	for h := start.Truncate(time.Hour); h.Before(end); h = h.Add(time.Hour) {
+		ws, we := maxTime(h, start), minTime(h.Add(time.Hour), end)
+		window := we.Sub(ws).Minutes()
+		if window <= 0 {
+			continue
+		}
+		var inMaint float64
+		for next < len(planned) && !planned[next].End.After(ws) {
+			next++ // intervals are sorted: skip those that ended already
+		}
+		for i := next; i < len(planned) && planned[i].Start.Before(we); i++ {
+			inMaint += minTime(planned[i].End, we).Sub(maxTime(planned[i].Start, ws)).Minutes()
+		}
+		inMaint = math.Min(inMaint, window)
+		online := math.Min(window, float64(counts[h.Unix()])*60/float64(perHour))
+		downOut += math.Max(0, window-online-inMaint)
+		expected += window - inMaint
+		r.maintenance += inMaint
+	}
+	if expected >= 1 {
+		r.measured = true
+		r.availability = math.Max(0, 100*(1-downOut/expected))
+		r.downtime = downOut
+	}
+	return r
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
 func sortedCounts(ok, failed map[string]int) []api.ReportCount {
 	out := []api.ReportCount{}
 	for k, n := range ok {
@@ -396,13 +498,16 @@ func sortedCounts(ok, failed map[string]int) []api.ReportCount {
 func reportCSV(rep *api.Report) []byte {
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
-	w.Write([]string{"device_id", "name", "lifecycle", "platform", "availability_percent", "downtime_minutes", "alerts",
+	w.Write([]string{"device_id", "name", "lifecycle", "platform", "availability_percent", "downtime_minutes", "maintenance_minutes", "alerts",
 		"updates_succeeded", "updates_failed", "health_now", "last_seen", "packages"})
 	for _, d := range rep.Devices {
-		avail, down := "", ""
+		avail, down, maint := "", "", "0"
 		if d.Availability != nil {
 			avail = strconv.FormatFloat(*d.Availability, 'f', 2, 64)
 			down = strconv.Itoa(*d.DowntimeMinutes)
+		}
+		if d.MaintenanceMinutes != nil {
+			maint = strconv.Itoa(*d.MaintenanceMinutes)
 		}
 		pk := make([]string, 0, len(d.Packages))
 		for k, v := range d.Packages {
@@ -413,7 +518,7 @@ func reportCSV(rep *api.Report) []byte {
 		if !d.LastSeenAt.IsZero() {
 			seen = d.LastSeenAt.UTC().Format(time.RFC3339)
 		}
-		w.Write([]string{d.ID, csvSafe(d.Name), d.Lifecycle, d.Platform, avail, down, strconv.Itoa(d.Alerts),
+		w.Write([]string{d.ID, csvSafe(d.Name), d.Lifecycle, d.Platform, avail, down, maint, strconv.Itoa(d.Alerts),
 			strconv.Itoa(d.UpdatesSucceeded), strconv.Itoa(d.UpdatesFailed), d.Health, seen, csvSafe(strings.Join(pk, " "))})
 	}
 	w.Flush()
@@ -527,9 +632,9 @@ footer { margin-top: 32px; color: #667085; font-size: 12px; }
 </div>
 
 <h2>Devices</h2>
-{{if .Devices}}<table><thead><tr><th>Device</th><th>State</th><th class="num">Availability</th><th class="num">Downtime</th><th class="num">Alerts</th><th class="num">Updates</th><th>Health now</th></tr></thead><tbody>
+{{if .Devices}}<table><thead><tr><th>Device</th><th>State</th><th class="num">Availability</th><th class="num">Downtime</th><th class="num">Maintenance</th><th class="num">Alerts</th><th class="num">Updates</th><th>Health now</th></tr></thead><tbody>
 {{range .Devices}}<tr><td>{{.Name}}<div class="muted mono">{{.ID}}</div></td><td>{{lifecycle .Lifecycle}}</td>
-<td class="num{{if below .Availability $.Summary.AvailabilityGoal}} bad{{end}}">{{pct .Availability}}</td><td class="num">{{if .DowntimeMinutes}}{{dur .DowntimeMinutes}}{{else}}—{{end}}</td>
+<td class="num{{if below .Availability $.Summary.AvailabilityGoal}} bad{{end}}">{{pct .Availability}}</td><td class="num">{{if .DowntimeMinutes}}{{dur .DowntimeMinutes}}{{else}}—{{end}}</td><td class="num">{{if .MaintenanceMinutes}}{{dur .MaintenanceMinutes}}{{else}}—{{end}}</td>
 <td class="num">{{.Alerts}}</td><td class="num">{{.UpdatesSucceeded}}{{if .UpdatesFailed}} <span class="bad">({{.UpdatesFailed}} failed)</span>{{end}}</td><td>{{.Health}}</td></tr>
 {{end}}</tbody></table>{{else}}<p class="muted">No devices.</p>{{end}}
 

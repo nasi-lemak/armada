@@ -9,40 +9,39 @@ import (
 	"github.com/nasi-lemak/armada/internal/api"
 )
 
-// OnlineCoverage measures how much of [from, to) each device was checking
-// in. The "online" history series has a sample in each resolution period a
-// device checked in. Per hour, a device scores the samples it has, up to
-// perHour (the number one fully online hour has); the result is the score
-// summed over the range. Hours already rolled up come from the hourly
-// table, later ones from raw samples.
-func (s *Store) OnlineCoverage(ctx context.Context, from, to time.Time, perHour int) (map[string]int, error) {
+// OnlineHours streams, for each device, how many "online" history samples
+// it has in each hour of [from, to): the series has one per resolution
+// period the device checked in. Rows come ordered by device and hour, and
+// hours with no samples are left out. Hours already rolled up come from the
+// hourly table, later ones from raw samples.
+func (s *Store) OnlineHours(ctx context.Context, from, to time.Time, fn func(deviceID string, hour time.Time, n int)) error {
 	until, err := s.rolledUntil(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	f, t := from.Unix(), to.Unix()
+	f, t := from.Truncate(time.Hour).Unix(), to.Unix()
 	split := min(max(until, f), t)
-	rows, err := s.db.QueryContext(ctx, `SELECT device_id, SUM(MIN(n, ?)) FROM (
-		SELECT se.device_id AS device_id, h.n AS n FROM samples_hourly h JOIN series se ON se.id = h.series_id
+	rows, err := s.db.QueryContext(ctx, `SELECT device_id, hr, n FROM (
+		SELECT se.device_id AS device_id, h.hour AS hr, h.n AS n FROM samples_hourly h JOIN series se ON se.id = h.series_id
 			WHERE se.name = 'online' AND h.hour >= ? AND h.hour < ?
 		UNION ALL
-		SELECT se.device_id AS device_id, COUNT(*) AS n FROM samples r JOIN series se ON se.id = r.series_id
-			WHERE se.name = 'online' AND r.ts >= ? AND r.ts < ? GROUP BY se.device_id, r.ts / 3600
-	) GROUP BY device_id`, perHour, f, split, split, t)
+		SELECT se.device_id AS device_id, (r.ts / 3600) * 3600 AS hr, COUNT(*) AS n FROM samples r JOIN series se ON se.id = r.series_id
+			WHERE se.name = 'online' AND r.ts >= ? AND r.ts < ? GROUP BY se.device_id, hr
+	) ORDER BY device_id, hr`, f, split, split, t)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
-	out := map[string]int{}
 	for rows.Next() {
 		var id string
+		var hr int64
 		var n int
-		if err := rows.Scan(&id, &n); err != nil {
-			return nil, err
+		if err := rows.Scan(&id, &hr, &n); err != nil {
+			return err
 		}
-		out[id] = n
+		fn(id, time.Unix(hr, 0).UTC(), n)
 	}
-	return out, rows.Err()
+	return rows.Err()
 }
 
 // ListAlertsBetween returns alerts that started in [from, to), oldest first.

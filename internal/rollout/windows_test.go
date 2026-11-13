@@ -1,6 +1,7 @@
 package rollout
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -70,6 +71,40 @@ func TestWindowEnd(t *testing.T) {
 	} {
 		if got := WindowEnd(c.s, at(c.now)); !got.Equal(at(c.want)) {
 			t.Errorf("%+v at %s: got %s, want %s", c.s, c.now, got.UTC().Format(time.RFC3339), c.want)
+		}
+	}
+}
+
+func TestWindowIntervals(t *testing.T) {
+	at := func(s string) time.Time {
+		v, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	str := func(ivs []Interval) string {
+		var parts []string
+		for _, iv := range ivs {
+			parts = append(parts, iv.Start.UTC().Format("02T15:04")+"-"+iv.End.UTC().Format("02T15:04"))
+		}
+		return strings.Join(parts, " ")
+	}
+	for _, c := range []struct {
+		s        api.Strategy
+		from, to string
+		want     string
+	}{
+		{api.Strategy{Windows: "02:00-04:00"}, "2026-11-01T00:00:00Z", "2026-11-03T03:00:00Z", "01T02:00-01T04:00 02T02:00-02T04:00 03T02:00-03T03:00"},
+		// Overnight, Sundays only (1 Nov 2026 is a Sunday): the window started the day before reaches in.
+		{api.Strategy{Windows: "22:00-02:00", Days: []string{"sun"}}, "2026-11-01T00:00:00Z", "2026-11-09T00:00:00Z", "01T22:00-02T02:00 08T22:00-09T00:00"},
+		{api.Strategy{Windows: "22:00-02:00", Days: []string{"sat"}}, "2026-11-01T00:00:00Z", "2026-11-02T00:00:00Z", "01T00:00-01T02:00"},
+		// Whole days in a time zone, back to back: merged.
+		{api.Strategy{Days: []string{"sat", "sun"}, TimeZone: "Asia/Singapore"}, "2026-11-06T00:00:00Z", "2026-11-10T00:00:00Z", "06T16:00-08T16:00"},
+		{api.Strategy{}, "2026-11-01T00:00:00Z", "2026-11-02T00:00:00Z", "01T00:00-02T00:00"},
+	} {
+		if got := str(WindowIntervals(c.s, at(c.from), at(c.to))); got != c.want {
+			t.Errorf("%+v: got %s, want %s", c.s, got, c.want)
 		}
 	}
 }

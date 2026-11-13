@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/csv"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nasi-lemak/armada/internal/api"
+	"github.com/nasi-lemak/armada/internal/rollout"
 	"github.com/nasi-lemak/armada/internal/store"
 )
 
@@ -427,5 +429,93 @@ func TestReportCountsReplacementsOnceAndNotClosedAlertsAsFixed(t *testing.T) {
 	call(t, ts, admin, "GET", "/api/v1/reports?from=2026-11-01&to=2026-11-14&label=customer=acme", nil, &client)
 	if client.Summary.Replacements != 1 || client.Summary.Devices != 2 {
 		t.Fatalf("client replacements: %+v", client.Summary)
+	}
+}
+
+func TestMeasureAvailability(t *testing.T) {
+	day := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+	hour := func(h int) time.Time { return day.Add(time.Duration(h) * time.Hour) }
+	full := func(except ...int) map[int64]int { // 12 samples an hour, none in the hours given
+		c := map[int64]int{}
+		for h := 0; h < 24; h++ {
+			c[hour(h).Unix()] = 12
+		}
+		for _, h := range except {
+			delete(c, hour(h).Unix())
+		}
+		return c
+	}
+	iv := func(from, to time.Time) []rollout.Interval { return []rollout.Interval{{Start: from, End: to}} }
+	for _, c := range []struct {
+		name             string
+		counts           map[int64]int
+		start, end       time.Time
+		planned          []rollout.Interval
+		avail, down, mnt float64
+		measured         bool
+	}{
+		{"always up", full(), hour(0), hour(24), nil, 100, 0, 0, true},
+		{"down 2h, no maintenance", full(3, 4), hour(0), hour(24), nil, 100 * (1 - 120.0/1440), 120, 0, true},
+		{"down 2h, all in maintenance", full(3, 4), hour(0), hour(24), iv(hour(3), hour(5)), 100, 0, 120, true},
+		{"down 2h, half in maintenance", full(3, 4), hour(0), hour(24), iv(hour(3), hour(4)), 100 * (1 - 60.0/1380), 60, 60, true},
+		{"up during maintenance", full(), hour(0), hour(24), iv(hour(3).Add(30*time.Minute), hour(4)), 100, 0, 30, true},
+		{"down 30 min in an hour with 20 min maintenance", map[int64]int{hour(0).Unix(): 6}, hour(0), hour(1), iv(hour(0), hour(0).Add(20*time.Minute)), 100 * (1 - 10.0/40), 10, 20, true},
+		{"all in maintenance", nil, hour(0), hour(2), iv(hour(0), hour(2)), 0, 0, 120, false},
+		// Enrolled at 10:20: a partial first hour is measured on its own.
+		{"partial first hour", map[int64]int{hour(10).Unix(): 9, hour(11).Unix(): 12}, hour(10).Add(20 * time.Minute), hour(12), nil, 100, 0, 0, true},
+	} {
+		r := measureAvailability(c.counts, c.start, c.end, 12, c.planned)
+		if r.measured != c.measured || math.Abs(r.availability-c.avail) > 0.001 || math.Abs(r.downtime-c.down) > 0.001 || math.Abs(r.maintenance-c.mnt) > 0.001 {
+			t.Errorf("%s: %+v", c.name, r)
+		}
+	}
+}
+
+func TestReportLeavesOutMaintenance(t *testing.T) {
+	e := setupReports(t, nil) // clock: 31 October
+	ts, a1 := e.ts, e.ids["acme-1"]
+	nov := func(day, hour int) time.Time { return time.Date(2026, 11, day, hour, 0, 0, 0, time.UTC) }
+	// Weekly maintenance for the client on Sundays 02:00-04:00 (1 and 8 November),
+	// and an updates-only window on 5 November, which doesn't excuse downtime.
+	f := false
+	if code := call(t, ts, admin, "POST", "/api/v1/maintenance", api.Maintenance{Name: "Sunday reboot",
+		Selector: api.Selector{Labels: map[string]string{"customer": "acme"}}, Windows: "02:00-04:00", Days: []string{"sun"}}, nil); code != 201 {
+		t.Fatalf("recurring maintenance: %d", code)
+	}
+	from, to := nov(5, 10), nov(5, 12)
+	if code := call(t, ts, admin, "POST", "/api/v1/maintenance", api.Maintenance{Name: "Updates only",
+		Selector: api.Selector{DeviceIDs: []string{a1}}, StartsAt: from, EndsAt: &to, SuppressAlerts: &f}, nil); code != 201 {
+		t.Fatalf("updates-only maintenance: %d", code)
+	}
+	// acme-1 is down during both Sunday windows and for those two hours on 5 November.
+	down := []rollout.Interval{{Start: nov(1, 2), End: nov(1, 4)}, {Start: nov(8, 2), End: nov(8, 4)}, {Start: from, End: to}}
+	var samples []store.Sample
+	for at := nov(1, 0); at.Before(nov(15, 0)); at = at.Add(270 * time.Second) {
+		off := false
+		for _, d := range down {
+			off = off || (!at.Before(d.Start) && at.Before(d.End))
+		}
+		if !off {
+			samples = append(samples, store.Sample{DeviceID: a1, Name: "online", Kind: "connectivity", At: at, Status: api.HealthOK})
+		}
+	}
+	if err := e.s.store.AddSamples(t.Context(), samples); err != nil {
+		t.Fatal(err)
+	}
+	e.clock = nov(15, 12)
+	var rep api.Report
+	call(t, ts, admin, "GET", "/api/v1/reports?from=2026-11-01&to=2026-11-14&label=customer=acme", nil, &rep)
+	var line api.ReportDevice
+	for _, d := range rep.Devices {
+		if d.ID == a1 {
+			line = d
+		}
+	}
+	want := math.Round(100*(1-120.0/(14*1440-240))*100) / 100 // 99.40
+	if line.Availability == nil || *line.Availability != want || *line.DowntimeMinutes != 120 || line.MaintenanceMinutes == nil || *line.MaintenanceMinutes != 240 {
+		t.Fatalf("acme-1: availability %v downtime %v maintenance %v (want %v, 120, 240)", line.Availability, line.DowntimeMinutes, line.MaintenanceMinutes, want)
+	}
+	if len(rep.Maintenance) != 2 {
+		t.Fatalf("maintenance listed: %+v", rep.Maintenance)
 	}
 }

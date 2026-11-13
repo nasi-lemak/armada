@@ -677,7 +677,8 @@ armadactl maintenance end <id>
   devices still show the badge.
 - **Activity log:** creating, ending and deleting maintenance are recorded.
 - **Retention:** ended maintenance stays listed for a day (`?all=1` or `--all` for longer), and is
-  removed after 30 days.
+  removed after 100 days. Customer reports use it to leave planned downtime out of availability, so
+  end a maintenance rather than deleting it.
 
 This is different from the agent's `maintenance_window`, which only limits when a device installs
 updates.
@@ -835,17 +836,24 @@ to the customer:
 - **Summary:** devices in service, spare and in repair; average availability, and how many devices
   are below the 99% target; alerts by severity and the mean time to resolve them; updates installed
   and failed; replacements; maintenance windows.
-- **Per device:** availability, downtime, alerts, updates installed and failed, and health now.
-  Devices are sorted least available first.
+- **Per device:** availability, downtime, time in maintenance, alerts, updates installed and failed,
+  and health now. Devices are sorted least available first.
 - **Alerts** that started in the period, with how long each lasted.
 - **Updates** by release, **replacements and lifecycle changes**, and **maintenance windows** that
   covered the devices.
 
 **How the numbers are measured:**
-- **Availability** is the share of time a device was checking in. Each device's history has an
-  `online` sample for every 5-minute period it checked in, measured per hour. It counts any time the
-  device was off or unreachable, including planned maintenance (listed separately so you can explain
-  it).
+- **Availability** is the share of time a device was checking in, **outside planned maintenance**.
+  Each device's history has an `online` sample for every 5-minute period it checked in, measured per
+  hour.
+- **What counts as maintenance:** windows that hold alerts, one-off or recurring. Their time is left
+  out of availability, and downtime during them isn't counted. Updates-only windows (alerts not held)
+  don't excuse downtime.
+- **Hours with maintenance:** history records how much of each hour a device was up, not exactly
+  when. So in an hour with maintenance, down time counts against the maintenance first.
+- **Downtime and time in maintenance** are shown per device. Maintenance windows are also listed.
+- **Keeping maintenance in reports:** ended maintenance is kept 100 days so reports can use it.
+  Deleting a maintenance also removes it from reports, so to keep the record, end it instead.
 - **Average availability** is over devices in service. Spares and devices in repair are listed but
   not averaged.
 - **Mean time to resolve** leaves out alerts that closed because their device left service.

@@ -1289,18 +1289,20 @@ type ReportSummary struct {
 
 // ReportDevice is one device's line in a report.
 type ReportDevice struct {
-	ID               string            `json:"id"`
-	Name             string            `json:"name"`
-	Lifecycle        string            `json:"lifecycle"`
-	Platform         string            `json:"platform"`
-	Availability     *float64          `json:"availability,omitempty"`
-	DowntimeMinutes  *int              `json:"downtime_minutes,omitempty"`
-	Alerts           int               `json:"alerts"`
-	UpdatesSucceeded int               `json:"updates_succeeded"`
-	UpdatesFailed    int               `json:"updates_failed"`
-	Health           string            `json:"health"`
-	Packages         map[string]string `json:"packages"`
-	LastSeenAt       time.Time         `json:"last_seen_at"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Lifecycle       string   `json:"lifecycle"`
+	Platform        string   `json:"platform"`
+	Availability    *float64 `json:"availability,omitempty"`
+	DowntimeMinutes *int     `json:"downtime_minutes,omitempty"` // outside maintenance
+	// MaintenanceMinutes is time in planned maintenance, left out of availability.
+	MaintenanceMinutes *int              `json:"maintenance_minutes,omitempty"`
+	Alerts             int               `json:"alerts"`
+	UpdatesSucceeded   int               `json:"updates_succeeded"`
+	UpdatesFailed      int               `json:"updates_failed"`
+	Health             string            `json:"health"`
+	Packages           map[string]string `json:"packages"`
+	LastSeenAt         time.Time         `json:"last_seen_at"`
 }
 
 // ReportAlert is an alert that started in the period.

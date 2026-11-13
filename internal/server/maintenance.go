@@ -26,7 +26,8 @@ import (
 
 const (
 	maxMaintenanceSpan = 30 * 24 * time.Hour
-	maintenanceKeep    = 30 * 24 * time.Hour // ended windows stay listed this long
+	// Ended windows are kept this long: reports leave them out of availability.
+	maintenanceKeep = 100 * 24 * time.Hour
 )
 
 // maintenanceState works out whether a maintenance applies at now and, if

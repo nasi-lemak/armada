@@ -164,8 +164,8 @@ func TestMaintenanceValidationAndRecurring(t *testing.T) {
 	if ended.State != "ended" {
 		t.Fatalf("cancelled: %+v", ended)
 	}
-	// Long-ended windows are pruned.
-	e.clock = e.clock.Add(31 * 24 * time.Hour)
+	// Long-ended windows are pruned (after reports stop needing them).
+	e.clock = e.clock.Add(101 * 24 * time.Hour)
 	e.tick(t)
 	var list []api.Maintenance
 	call(t, e.ts, admin, "GET", "/api/v1/maintenance?all=1", nil, &list)

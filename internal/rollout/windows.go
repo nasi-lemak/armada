@@ -2,6 +2,7 @@ package rollout
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -197,4 +198,80 @@ func windowClose(s api.Strategy, t time.Time) time.Time {
 		}
 	}
 	return best
+}
+
+// Interval is a span of time [Start, End).
+type Interval struct{ Start, End time.Time }
+
+// WindowIntervals lists the times within [from, to) when a schedule's
+// windows are open, as intervals in order. A window that crosses midnight
+// belongs to the day it starts on (as in WindowOpen). No windows and no
+// days means always open.
+func WindowIntervals(s api.Strategy, from, to time.Time) []Interval {
+	if !to.After(from) {
+		return nil
+	}
+	if s.Windows == "" && len(s.Days) == 0 {
+		return []Interval{{from, to}}
+	}
+	loc := time.UTC
+	if s.TimeZone != "" {
+		if l, err := time.LoadLocation(s.TimeZone); err == nil {
+			loc = l
+		}
+	}
+	ws, _ := ParseWindows(s.Windows)
+	if len(ws) == 0 {
+		ws = []Window{{0, 24 * 60}}
+	}
+	days := map[time.Weekday]bool{}
+	for _, d := range s.Days {
+		days[weekdays[d]] = true
+	}
+	var out []Interval
+	// Start a day early: an overnight window from the day before reaches in.
+	f := from.In(loc)
+	for day := time.Date(f.Year(), f.Month(), f.Day()-1, 0, 0, 0, 0, loc); day.Before(to); day = day.AddDate(0, 0, 1) {
+		if len(days) > 0 && !days[day.Weekday()] {
+			continue
+		}
+		for _, w := range ws {
+			start := time.Date(day.Year(), day.Month(), day.Day(), 0, w.Start, 0, 0, loc)
+			end := time.Date(day.Year(), day.Month(), day.Day(), 0, w.End, 0, 0, loc)
+			if w.End <= w.Start {
+				end = time.Date(day.Year(), day.Month(), day.Day()+1, 0, w.End, 0, 0, loc)
+			}
+			if start.Before(from) {
+				start = from
+			}
+			if end.After(to) {
+				end = to
+			}
+			if end.After(start) {
+				out = append(out, Interval{start, end})
+			}
+		}
+	}
+	return MergeIntervals(out)
+}
+
+// MergeIntervals sorts intervals and joins overlapping or touching ones.
+func MergeIntervals(in []Interval) []Interval {
+	if len(in) < 2 {
+		return in
+	}
+	sorted := append([]Interval(nil), in...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Start.Before(sorted[j].Start) })
+	out := []Interval{sorted[0]}
+	for _, iv := range sorted[1:] {
+		last := &out[len(out)-1]
+		if !iv.Start.After(last.End) {
+			if iv.End.After(last.End) {
+				last.End = iv.End
+			}
+			continue
+		}
+		out = append(out, iv)
+	}
+	return out
 }
