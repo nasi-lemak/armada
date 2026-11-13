@@ -135,6 +135,26 @@ async function visit(page, who, hash, expectHeading) {
   const after = await client.$$eval('#view table tbody tr', r => r.map(x => x.textContent));
   if (after.length !== 1 || !after[0].includes(ids.stock)) fail(`client devices after the swap: ${JSON.stringify(after)}`);
 
+  // Bulk: the admin selects every device, adds a label, then restarts the agents.
+  await visit(admin, 'admin', '#/devices', 'Devices');
+  admin.on('dialog', d => d.accept());
+  await admin.click('input[aria-label="Select all shown"]');
+  await admin.selectOption('select[aria-label="Bulk operation"]', 'set_labels');
+  await admin.fill('input[aria-label="Bulk operation value"]', 'floor=2');
+  await admin.click('.bulk-bar button:has-text("Apply")');
+  await admin.waitForTimeout(1500);
+  const fleet = await api('GET', '/api/v1/devices');
+  const labelled = fleet.filter(d => d.labels.floor === '2').length;
+  if (labelled !== fleet.length) fail(`bulk label reached ${labelled} of ${fleet.length} devices`);
+  await admin.click('input[aria-label="Select all shown"]');
+  await admin.selectOption('select[aria-label="Bulk operation"]', 'restart-agent');
+  await admin.click('.bulk-bar button:has-text("Apply")');
+  await admin.waitForFunction(() => location.hash.startsWith('#/bulk/'), null, { timeout: 5000 }).catch(() => fail('bulk run did not open its progress page'));
+  await admin.waitForTimeout(800);
+  if (!(await admin.textContent('h1')).includes('restart-agent')) fail('bulk progress page heading');
+  const rows = (await admin.$$('#view table tbody tr')).length;
+  if (rows !== fleet.length) fail(`bulk progress page lists ${rows} devices, expected ${fleet.length}`);
+
   await browser.close();
   if (failures.length) {
     console.error(`${failures.length} failure(s)`);

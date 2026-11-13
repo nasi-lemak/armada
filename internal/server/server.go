@@ -434,6 +434,10 @@ func (s *Server) Handler() http.Handler {
 	operator(fleetOnly, "DELETE /api/v1/devices/{id}", s.handleDeleteDevice)
 	operator(fleetOnly, "POST /api/v1/devices/{id}/lifecycle", s.handleSetLifecycle)
 	operator(fleetOnly, "POST /api/v1/devices/{id}/replace", s.handleReplaceDevice)
+	// Bulk operations: every device is checked as if changed on its own.
+	operator(scopedOK, "POST /api/v1/bulk", s.handleBulk)
+	viewer(scopedOK, "GET /api/v1/bulk", s.handleListBulk)
+	viewer(scopedOK, "GET /api/v1/bulk/{id}", s.handleGetBulk)
 	viewer(scopedOK, "GET /api/v1/events", s.handleListEvents)
 	viewer(scopedOK, "GET /api/v1/alerts", s.handleListAlerts)
 	operator(scopedOK, "POST /api/v1/alerts/{id}/ack", s.handleAckAlert)
@@ -626,6 +630,9 @@ func (s *Server) Tick(ctx context.Context) error {
 		return err
 	}
 	if err := s.store.PruneSessions(ctx, now); err != nil {
+		return err
+	}
+	if err := s.store.PruneBulkOperations(ctx, now.Add(-bulkRetention)); err != nil {
 		return err
 	}
 	return s.historyTick(ctx, now)

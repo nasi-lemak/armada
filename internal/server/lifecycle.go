@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -42,33 +43,48 @@ func (s *Server) handleSetLifecycle(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if d.Lifecycle == api.LifecycleRetired {
-		writeError(w, http.StatusConflict, "this device is retired; to use the hardware again, enroll it again")
+	if err := checkLifecycle(d); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	from := d.Lifecycle
-	d.Lifecycle = req.State
-	d.LifecycleInfo = s.lifecycleChange(r, d.LifecycleInfo, req.Note)
-	if err := s.store.SetDeviceLifecycle(ctx, d); err != nil {
+	if err := s.changeLifecycle(ctx, d, req.State, req.Note); err != nil {
 		s.internalError(w, err)
 		return
-	}
-	msg := fmt.Sprintf("%s: %s → %s", d.Name, lifecycleLabel[from], lifecycleLabel[d.Lifecycle])
-	if req.Note != "" {
-		msg += " (" + req.Note + ")"
-	}
-	s.logEvent(ctx, "device.lifecycle", d.ID, "", msg)
-	if d.Lifecycle == api.LifecycleRetired {
-		s.push.wake(d.ID) // drop its live connection: its key no longer works
 	}
 	s.decorate(d)
 	writeJSON(w, http.StatusOK, d)
 }
 
+func checkLifecycle(d *api.Device) error {
+	if d.Lifecycle == api.LifecycleRetired {
+		return errors.New("this device is retired; to use the hardware again, enroll it again")
+	}
+	return nil
+}
+
+// changeLifecycle moves a checked device to a new state and logs it.
+func (s *Server) changeLifecycle(ctx context.Context, d *api.Device, state, note string) error {
+	from := d.Lifecycle
+	d.Lifecycle = state
+	d.LifecycleInfo = s.lifecycleChange(ctx, d.LifecycleInfo, note)
+	if err := s.store.SetDeviceLifecycle(ctx, d); err != nil {
+		return err
+	}
+	msg := fmt.Sprintf("%s: %s → %s", d.Name, lifecycleLabel[from], lifecycleLabel[d.Lifecycle])
+	if note != "" {
+		msg += " (" + note + ")"
+	}
+	s.logEvent(ctx, "device.lifecycle", d.ID, "", msg)
+	if d.Lifecycle == api.LifecycleRetired {
+		s.push.wake(d.ID) // drop its live connection: its key no longer works
+	}
+	return nil
+}
+
 // lifecycleChange records who changed a lifecycle and why, keeping the
 // replacement links.
-func (s *Server) lifecycleChange(r *http.Request, old *api.LifecycleInfo, note string) *api.LifecycleInfo {
-	li := &api.LifecycleInfo{Note: note, ChangedAt: s.now(), ChangedBy: principalFrom(r.Context()).name}
+func (s *Server) lifecycleChange(ctx context.Context, old *api.LifecycleInfo, note string) *api.LifecycleInfo {
+	li := &api.LifecycleInfo{Note: note, ChangedAt: s.now(), ChangedBy: principalFrom(ctx).name}
 	if old != nil {
 		li.Replaces, li.ReplacedBy = old.Replaces, old.ReplacedBy
 	}
@@ -123,14 +139,14 @@ func (s *Server) handleReplaceDevice(w http.ResponseWriter, r *http.Request) {
 	oldName := old.Name
 	repl.Name, repl.Channel, repl.Labels = old.Name, old.Channel, old.Labels
 	repl.Lifecycle = api.LifecycleActive
-	repl.LifecycleInfo = s.lifecycleChange(r, repl.LifecycleInfo, req.Note)
+	repl.LifecycleInfo = s.lifecycleChange(ctx, repl.LifecycleInfo, req.Note)
 	repl.LifecycleInfo.Replaces = old.ID
 	// The old device leaves it: no labels means it no longer belongs to a
 	// client, rollout or configuration profile.
 	old.Name = oldName + " (replaced)"
 	old.Labels = map[string]string{}
 	old.Lifecycle = req.OldState
-	old.LifecycleInfo = s.lifecycleChange(r, old.LifecycleInfo, req.Note)
+	old.LifecycleInfo = s.lifecycleChange(ctx, old.LifecycleInfo, req.Note)
 	old.LifecycleInfo.ReplacedBy = repl.ID
 	if err := s.store.SetDeviceLifecycle(ctx, old, repl); err != nil {
 		s.internalError(w, err)

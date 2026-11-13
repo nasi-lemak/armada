@@ -268,31 +268,8 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "only fleet-wide accounts can change app licensing")
 		return
 	}
-	if req.Name != nil {
-		d.Name = truncate(strings.TrimSpace(*req.Name), 128)
-	}
-	if req.Channel != nil {
-		if !channelRe.MatchString(*req.Channel) {
-			writeError(w, http.StatusBadRequest, "invalid channel")
-			return
-		}
-		d.Channel = *req.Channel
-	}
-	if req.Labels != nil {
-		d.Labels = req.Labels
-	}
-	for k, v := range req.SetLabels {
-		d.Labels[k] = v
-	}
-	for _, k := range req.RemoveLabels {
-		delete(d.Labels, k)
-	}
-	if err := validLabels(d.Labels); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if api.RoleRank(principalFrom(r.Context()).roleFor(d)) < api.RoleRank(api.RoleOperator) {
-		writeError(w, http.StatusForbidden, "this change would move the device out of the devices you can manage")
+	if code, err := applyPatch(principalFrom(r.Context()), d, req); err != nil {
+		writeError(w, code, err.Error())
 		return
 	}
 	if err := s.store.UpdateDeviceMeta(r.Context(), d.ID, d.Name, d.Channel, d.Labels); err != nil {
@@ -313,6 +290,42 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	s.decorate(d)
 	writeJSON(w, http.StatusOK, d)
+}
+
+// applyPatch changes a device's name, channel and labels in memory and
+// checks the caller may make the change: in particular, that it doesn't
+// move the device out of the devices they manage.
+func applyPatch(p *principal, d *api.Device, req patchDeviceRequest) (int, error) {
+	if req.Name != nil {
+		d.Name = truncate(strings.TrimSpace(*req.Name), 128)
+	}
+	if req.Channel != nil {
+		if !channelRe.MatchString(*req.Channel) {
+			return http.StatusBadRequest, errors.New("invalid channel")
+		}
+		d.Channel = *req.Channel
+	}
+	labels := map[string]string{}
+	if req.Labels == nil {
+		req.Labels = d.Labels
+	}
+	for k, v := range req.Labels {
+		labels[k] = v
+	}
+	for k, v := range req.SetLabels {
+		labels[k] = v
+	}
+	for _, k := range req.RemoveLabels {
+		delete(labels, k)
+	}
+	if err := validLabels(labels); err != nil {
+		return http.StatusBadRequest, err
+	}
+	d.Labels = labels
+	if api.RoleRank(p.roleFor(d)) < api.RoleRank(api.RoleOperator) {
+		return http.StatusForbidden, errors.New("this change would move the device out of the devices you can manage")
+	}
+	return 0, nil
 }
 
 func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
@@ -355,54 +368,71 @@ func (s *Server) handleCreateAction(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
+	if code, err := checkAction(principalFrom(r.Context()), d, &req); err != nil {
+		writeError(w, code, err.Error())
+		return
+	}
+	a, err := s.queueAction(r.Context(), d, req, "")
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	s.push.wake(d.ID) // a connected agent runs it within a second or two
+	writeJSON(w, http.StatusCreated, a)
+}
+
+// checkAction validates an action for a device (normalizing its args) and
+// checks the caller may send it. The caller has already checked the
+// operator role on the device.
+func checkAction(p *principal, d *api.Device, req *api.CreateActionRequest) (int, error) {
+	bad := func(msg string) (int, error) { return http.StatusBadRequest, errors.New(msg) }
 	switch req.Type {
 	case api.ActionReboot, api.ActionRestartAgent:
 		req.Args = nil
 	case api.ActionExec:
 		if len(req.Args) == 0 {
-			writeError(w, http.StatusBadRequest, "exec requires args (the command and its arguments)")
-			return
+			return bad("exec requires args (the command and its arguments)")
 		}
 	case api.ActionLogs:
 		if err := validLogArgs(req.Args); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
+			return bad(err.Error())
 		}
 	case api.ActionLock, api.ActionWipe:
 		if !strings.EqualFold(d.Info.OS, "android") {
-			writeError(w, http.StatusBadRequest, req.Type+" is only available on Android devices")
-			return
+			return bad(req.Type + " is only available on Android devices")
 		}
 		if req.Type == api.ActionLock {
 			req.Args = nil
 		} else if len(req.Args) != 1 || req.Args[0] != "confirm="+d.ID {
-			writeError(w, http.StatusBadRequest, "wipe erases the device: confirm with args [\"confirm="+d.ID+"\"]")
-			return
+			return bad("wipe erases the device: confirm with args [\"confirm=" + d.ID + "\"]")
 		}
 	default:
-		writeError(w, http.StatusBadRequest, "unknown action type; use reboot, restart-agent, exec, logs, lock or wipe")
-		return
+		return bad("unknown action type; use reboot, restart-agent, exec, logs, lock or wipe")
 	}
 	if d.ParentID != "" {
-		writeError(w, http.StatusBadRequest, "peripherals run no agent; send actions to their gateway")
-		return
+		return bad("peripherals run no agent; send actions to their gateway")
+	}
+	if d.Lifecycle == api.LifecycleRetired {
+		return http.StatusConflict, errors.New("this device is retired")
 	}
 	// Running commands as root and factory-resetting devices you supplied
 	// are vendor powers: per-client operators can reboot, restart, lock
 	// and read logs, but not these.
-	if (req.Type == api.ActionExec || req.Type == api.ActionWipe) && api.RoleRank(principalFrom(r.Context()).fleetRole()) < api.RoleRank(api.RoleOperator) {
-		writeError(w, http.StatusForbidden, req.Type+" needs the operator role on the whole fleet")
-		return
+	if (req.Type == api.ActionExec || req.Type == api.ActionWipe) && api.RoleRank(p.fleetRole()) < api.RoleRank(api.RoleOperator) {
+		return http.StatusForbidden, errors.New(req.Type + " needs the operator role on the whole fleet")
 	}
+	return 0, nil
+}
+
+// queueAction stores a checked action for a device and logs it. The caller wakes the device.
+func (s *Server) queueAction(ctx context.Context, d *api.Device, req api.CreateActionRequest, batch string) (*api.Action, error) {
 	now := s.now()
-	a := &api.Action{ID: newID("act"), DeviceID: d.ID, Type: req.Type, Args: req.Args, Status: api.ActionQueued, CreatedAt: now, UpdatedAt: now}
-	if err := s.store.CreateAction(r.Context(), a); err != nil {
-		s.internalError(w, err)
-		return
+	a := &api.Action{ID: newID("act"), DeviceID: d.ID, Type: req.Type, Args: req.Args, Status: api.ActionQueued, CreatedAt: now, UpdatedAt: now, BatchID: batch}
+	if err := s.store.CreateAction(ctx, a); err != nil {
+		return nil, err
 	}
-	s.event(r.Context(), "action.queued", d.ID, "", fmt.Sprintf("%s queued for %s", describeAction(a), d.Name))
-	s.push.wake(d.ID) // a connected agent runs it within a second or two
-	writeJSON(w, http.StatusCreated, a)
+	s.event(ctx, "action.queued", d.ID, "", fmt.Sprintf("%s queued for %s", describeAction(a), d.Name))
+	return a, nil
 }
 
 func describeAction(a *api.Action) string {

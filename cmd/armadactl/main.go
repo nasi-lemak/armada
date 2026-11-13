@@ -94,6 +94,17 @@ Monitoring and alerts:
   alerts ack <id> [--note "replacing the disk"]   stop repeat notifications (getting worse still notifies)
   alerts unack <id>
 
+Bulk operations (pick devices with --device ID... | --label K=V... | --channel C | --all;
+without --yes they only preview what would happen):
+  bulk reboot|restart-agent|wake|lock <devices> [--yes]
+  bulk exec <devices> [--yes] -- <command> [args...]
+  bulk label K=V... <devices> [--yes]        add or change labels
+  bulk unlabel KEY... <devices> [--yes]
+  bulk set-channel C <devices> [--yes]
+  bulk lifecycle active|spare|repair|retired <devices> [--note N] [--yes]
+  bulk list                                  recent bulk operations
+  bulk get <id>                              per-device progress
+
 Maintenance (alerts held and updates paused for the covered devices):
   maintenance list [--all]
   maintenance start --device ID|--label K=V|--channel C --for 2h [--note N] [--name N]
@@ -217,6 +228,8 @@ func (c *cli) run(args []string) error {
 		return c.alerts(append([]string{verb}, rest...))
 	case "maintenance", "maint":
 		return c.maintenance(verb, rest)
+	case "bulk":
+		return c.bulk(verb, rest)
 	case "history":
 		return c.history(verb, rest)
 	case "backup":

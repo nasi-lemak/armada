@@ -173,7 +173,7 @@ const STATUS_TONE = {
   succeeded: 'ok', failed: 'bad', rolled_back: 'warn', pending: '', downloading: 'info', installing: 'info',
   queued: '', sent: 'info', rejected: 'warn', 'no access': 'bad', awaiting_approval: 'warn', live: 'ok', scheduled: 'info', applied: 'ok', removing: 'info', revoked: 'bad', active: 'ok', attested: 'ok', 'attested (unlocked)': 'warn',
   maintenance: 'info', acked: 'info', waiting: '', ended: '',
-  spare: '', repair: 'warn', retired: '',
+  spare: '', repair: 'warn', retired: '', skipped: '', applied: 'ok',
 };
 const LIFECYCLE_TEXT = { active: 'in service', spare: 'spare', repair: 'in repair', retired: 'retired' };
 function lifecycleBadge(d) {
@@ -256,6 +256,7 @@ const routes = [
   [/^#?\/?$/, 'overview', viewOverview],
   [/^#\/devices$/, 'devices', viewDevices],
   [/^#\/devices\/([\w-]+)$/, 'devices', viewDevice],
+  [/^#\/bulk\/([\w-]+)$/, 'devices', viewBulk, 'operator'],
   [/^#\/deployments$/, 'deployments', viewDeployments, 'fleet'],
   [/^#\/deployments\/([\w-]+)$/, 'deployments', viewDeployment, 'fleet'],
   [/^#\/releases$/, 'releases', viewReleases, 'fleet'],
@@ -389,8 +390,11 @@ async function viewDevices(root) {
     ['repair', 'In repair'], ['retired', 'Retired'], ['all', 'All, with retired']].map(([v, l]) => h('option', { value: v }, l)));
   const list = h('div', { class: 'card flush' });
   const count = h('span', {});
+  const selected = new Set();
+  const bulk = bulkBar(selected, () => { render(); guard(refresh); });
+  const recent = h('div', { class: 'need-operator mt' });
   append(root, pageHead('Devices', count, h('a', { class: 'btn primary need-operator', href: '#/enroll' }, 'Enroll devices')),
-    h('div', { class: 'toolbar' }, search, status, healthSel, kindSel, lifeSel), h('div', { class: 'spacer' }), list);
+    h('div', { class: 'toolbar' }, search, status, healthSel, kindSel, lifeSel), bulk.el, h('div', { class: 'spacer' }), list, recent);
   let devices = [];
   function render() {
     const q = search.value.trim().toLowerCase();
@@ -401,8 +405,18 @@ async function viewDevices(root) {
       ...Object.entries(d.labels).map(([k, v]) => k + '=' + v),
     ].some(s => (s || '').toLowerCase().includes(q))));
     replace(count, `${devices.length} ${lifeSel.value === 'retired' ? 'retired' : 'enrolled'} · ${devices.filter(d => d.status === 'online' && d.lifecycle !== 'retired').length} online`);
-    replace(list, table(['Device', 'Status', 'Health', 'Channel', 'Platform', 'Packages', 'Labels', 'Last seen'],
-      shown.map(d => h('tr', { class: 'clickable', onclick: () => { location.hash = '#/devices/' + d.id; } },
+    // Selection survives refreshes and filtering, but not devices that left the list.
+    const present = new Set(devices.map(d => d.id));
+    for (const id of [...selected]) if (!present.has(id)) selected.delete(id);
+    const allBox = h('input', { type: 'checkbox', 'aria-label': 'Select all shown', checked: shown.length > 0 && shown.every(d => selected.has(d.id)),
+      onclick: e => { e.stopPropagation(); for (const d of shown) e.target.checked ? selected.add(d.id) : selected.delete(d.id); render(); } });
+    const pick = d => h('td', { class: 'need-operator pick', onclick: e => e.stopPropagation() },
+      h('input', { type: 'checkbox', 'aria-label': 'Select ' + d.name, checked: selected.has(d.id),
+        onchange: e => { e.target.checked ? selected.add(d.id) : selected.delete(d.id); render(); } }));
+    bulk.update(devices);
+    replace(list, table([h('span', { class: 'need-operator' }, allBox), 'Device', 'Status', 'Health', 'Channel', 'Platform', 'Packages', 'Labels', 'Last seen'],
+      shown.map(d => h('tr', { class: 'clickable' + (selected.has(d.id) ? ' selected' : ''), onclick: () => { location.hash = '#/devices/' + d.id; } },
+        pick(d),
         h('td', {}, h('div', {}, h('strong', {}, d.name)), h('div', { class: 'muted mono' }, d.id),
           d.parent_id ? h('div', { class: 'muted' }, 'via ', names[d.parent_id] || d.parent_id) : null,
           d.agent_status ? h('div', { class: 'muted' }, d.agent_status) : null),
@@ -421,9 +435,122 @@ async function viewDevices(root) {
   search.addEventListener('input', render);
   [status, healthSel, kindSel].forEach(el => el.addEventListener('change', render));
   lifeSel.addEventListener('change', () => guard(refresh));
-  async function refresh() { devices = await api('GET', '/api/v1/devices' + (lifeSel.value ? '?lifecycle=' + lifeSel.value : '')); render(); }
+  async function refresh() {
+    const [devs, ops] = await Promise.all([
+      api('GET', '/api/v1/devices' + (lifeSel.value ? '?lifecycle=' + lifeSel.value : '')),
+      atLeast('operator') ? api('GET', '/api/v1/bulk') : []]);
+    devices = devs;
+    render();
+    replace(recent, ops.length ? [h('h2', {}, 'Recent bulk operations'), h('div', { class: 'card flush' }, bulkTable(ops.slice(0, 5)))] : null);
+  }
   await guard(refresh);
   search.focus();
+  return refresh;
+}
+
+// ---------- bulk operations ----------
+
+function bulkTable(ops) {
+  return table(['Operation', 'Devices', 'Progress', 'By', 'When'], ops.map(b => h('tr', { class: 'clickable', onclick: () => { location.hash = '#/bulk/' + b.id; } },
+    h('td', {}, h('strong', {}, b.summary)),
+    h('td', {}, `${b.applied.length}`, b.skipped.length ? h('span', { class: 'muted' }, ` (${b.skipped.length} skipped)`) : null),
+    h('td', {}, progressText(b.progress) || h('span', { class: 'muted' }, 'done')),
+    h('td', {}, b.created_by || '—'),
+    h('td', { class: 'nowrap' }, ago(b.created_at)))));
+}
+function progressText(p) {
+  if (!p) return '';
+  return Object.entries(p).sort(([a], [b]) => a.localeCompare(b)).map(([k, n]) => `${n} ${k}`).join(' · ');
+}
+
+// bulkBar acts on the selected devices: preview with a dry run, confirm,
+// then apply with the number of devices the preview matched.
+function bulkBar(selected, done) {
+  const fleetOp = !!me && (ROLE_RANK[me.fleet_role] || 0) >= ROLE_RANK.operator;
+  const ops = [
+    ['reboot', 'Reboot'], ['restart-agent', 'Restart agent'], ['wake', 'Check in now'], ['lock', 'Lock screen (Android)'],
+    fleetOp && ['exec', 'Run command…'], ['set_labels', 'Add labels…'], ['remove_labels', 'Remove labels…'], ['set_channel', 'Set channel…'],
+    ['maintenance', 'Start maintenance…'],
+    fleetOp && ['lifecycle:spare', 'Mark as spare'], fleetOp && ['lifecycle:repair', 'Send for repair'],
+    fleetOp && ['lifecycle:active', 'Put in service'], fleetOp && ['lifecycle:retired', 'Retire…'],
+  ].filter(Boolean);
+  const opSel = h('select', { 'aria-label': 'Bulk operation' }, ops.map(([v, l]) => h('option', { value: v }, l)));
+  const arg = h('input', { 'aria-label': 'Bulk operation value' });
+  const dur = h('select', { 'aria-label': 'Maintenance duration' },
+    [['1', '1 hour'], ['2', '2 hours'], ['4', '4 hours'], ['8', '8 hours'], ['24', '1 day'], ['72', '3 days']].map(([v, l]) => h('option', { value: v }, l)));
+  const label = h('strong', {});
+  const placeholders = { exec: 'systemctl restart myapp', set_labels: 'floor=2 zone=east', remove_labels: 'floor zone', set_channel: 'beta', maintenance: 'note (optional)' };
+  const sync = () => {
+    const op = opSel.value;
+    arg.classList.toggle('hidden', !(op in placeholders));
+    arg.placeholder = placeholders[op] || '';
+    dur.classList.toggle('hidden', op !== 'maintenance');
+  };
+  opSel.addEventListener('change', sync);
+  const run = async () => {
+    const ids = [...selected], op = opSel.value, v = arg.value.trim();
+    if (op === 'maintenance') {
+      const ends = new Date(Date.now() + parseInt(dur.value, 10) * 3600e3).toISOString();
+      if (!confirm(`Start maintenance on ${ids.length} devices? Their alerts are held and updates paused.`)) return;
+      if (await guard(() => api('POST', '/api/v1/maintenance', { selector: { device_ids: ids }, ends_at: ends, note: v }), 'Maintenance started')) { arg.value = ''; done(); }
+      return;
+    }
+    const req = { selector: { device_ids: ids } };
+    try {
+      if (op.startsWith('lifecycle:')) Object.assign(req, { operation: 'lifecycle', state: op.slice(10) });
+      else if (op === 'exec') {
+        const argv = v.match(/"[^"]*"|'[^']*'|\S+/g);
+        if (!argv) throw new Error('Type the command to run');
+        Object.assign(req, { operation: 'exec', args: argv.map(a => a.replace(/^(["'])(.*)\1$/, '$2')) });
+      } else if (op === 'set_labels') Object.assign(req, { operation: op, labels: parseLabels(v) });
+      else if (op === 'remove_labels') Object.assign(req, { operation: op, label_keys: v.split(/[\s,]+/).filter(Boolean) });
+      else if (op === 'set_channel') Object.assign(req, { operation: op, channel: v });
+      else req.operation = op;
+    } catch (err) { return toast(err.message, true); }
+    const prev = await guard(() => api('POST', '/api/v1/bulk', { ...req, dry_run: true }));
+    if (!prev) return;
+    const skipped = prev.skipped.slice(0, 6).map(t => `• ${t.name}: ${t.reason}`).join('\n') + (prev.skipped.length > 6 ? `\n• …and ${prev.skipped.length - 6} more` : '');
+    if (!prev.applied.length) return toast(`${prev.summary} applies to none of the ${ids.length} selected devices${prev.skipped.length ? ': ' + prev.skipped[0].reason : ''}`, true);
+    const msg = `${prev.summary} on ${prev.applied.length} of ${ids.length} selected devices.` +
+      (prev.skipped.length ? `\n\nSkipped ${prev.skipped.length}:\n${skipped}` : '');
+    if (req.state === 'retired') {
+      const typed = prompt(msg + `\n\nRetiring is final: their keys are destroyed and licenses revoked. Type ${prev.applied.length} to confirm:`);
+      if (typed === null) return;
+      if (typed.trim() !== String(prev.applied.length)) return toast('The number did not match; nothing changed.', true);
+    } else if (!confirm(msg + '\n\nGo ahead?')) return;
+    const b = await guard(() => api('POST', '/api/v1/bulk', { ...req, expect: prev.matched }));
+    if (!b) return;
+    toast(`${b.summary}: ${b.applied.length} devices${b.skipped.length ? `, ${b.skipped.length} skipped` : ''}`);
+    arg.value = '';
+    selected.clear();
+    if (b.progress) location.hash = '#/bulk/' + b.id;
+    else done();
+  };
+  const el = h('div', { class: 'bulk-bar need-operator hidden' }, label, opSel, arg, dur,
+    h('button', { class: 'btn primary', onclick: run }, 'Apply…'),
+    h('button', { class: 'btn', onclick: () => { selected.clear(); done(); } }, 'Clear selection'));
+  sync();
+  return { el, update: () => {
+    el.classList.toggle('hidden', selected.size === 0);
+    replace(label, `${selected.size} selected`);
+  } };
+}
+
+async function viewBulk(root, id) {
+  const body = h('div', {});
+  append(root, h('div', { class: 'crumb' }, h('a', { href: '#/devices' }, 'Devices'), ' / bulk operation'), body);
+  async function refresh() {
+    const b = await api('GET', '/api/v1/bulk/' + id);
+    const rows = [
+      ...b.applied.map(t => [t, t.status ? badge(t.status) : badge('applied')]),
+      ...b.skipped.map(t => [t, h('span', {}, badge('skipped'), h('div', { class: 'muted' }, t.reason))]),
+    ];
+    replace(body, pageHead(b.summary, `${b.applied.length} devices${b.skipped.length ? ` · ${b.skipped.length} skipped` : ''} · by ${b.created_by || '—'} · ${ago(b.created_at)}` +
+      (b.progress ? ' · ' + progressText(b.progress) : '')),
+      h('div', { class: 'card flush' }, table(['Device', 'Result'], rows.map(([t, res]) => h('tr', {},
+        h('td', {}, h('a', { href: '#/devices/' + t.id }, t.name), h('div', { class: 'muted mono' }, t.id)), h('td', {}, res))))));
+  }
+  await guard(refresh);
   return refresh;
 }
 

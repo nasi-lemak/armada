@@ -51,6 +51,15 @@ CREATE TABLE IF NOT EXISTS maintenance (
 ALTER TABLE devices ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active';
 ALTER TABLE devices ADD COLUMN lifecycle_info TEXT NOT NULL DEFAULT '';
 `},
+	{Version: 5, Name: "bulk operations", SQL: `
+CREATE TABLE IF NOT EXISTS bulk_operations (
+	id TEXT PRIMARY KEY,
+	spec TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+ALTER TABLE actions ADD COLUMN batch_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS actions_batch ON actions(batch_id) WHERE batch_id <> '';
+`},
 	// Append new migrations here.
 }
 

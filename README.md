@@ -55,6 +55,9 @@ It has three parts, all in Go with no external services:
   held and rollouts skip them. Firing alerts can be **acknowledged**, which stops repeat notifications.
 - **Device lifecycle.** Track spares and devices in repair, swap a broken device for a spare in one
   step (RMA), and retire devices for good while keeping their history.
+- **Bulk operations.** Reboot, run a command, relabel, change channel, start maintenance or change
+  lifecycle on many devices at once. You preview first, each device is checked on its own, and
+  progress is tracked per device.
 - **Remote actions, in seconds.** Reboot, restart the agent, run a command, or ask for a check-in.
   Each agent holds a long-poll connection, so actions reach it within a second or two, even behind
   NAT, without opening ports. `exec` is off by default and each device opts in.
@@ -761,6 +764,66 @@ armadactl devices list --lifecycle spare
 Lifecycle changes need a fleet-wide operator, because they move devices between clients and revoke
 credentials. Client accounts see the state of their devices.
 
+## Bulk operations
+
+On the **Devices** page, tick devices (or the header box for everything shown, after filtering), pick
+an operation and choose **Apply…**. The same operations are in the CLI (`armadactl bulk`) and the API
+(`POST /api/v1/bulk`).
+
+| Operation | Who |
+|---|---|
+| `reboot`, `restart-agent`, `wake` (check in now), `lock` (Android) | operators on the devices |
+| `set_labels`, `remove_labels`, `set_channel` | operators on the devices |
+| Start maintenance (dashboard; or `armadactl maintenance start` with several `--device`) | operators on the devices |
+| `exec` (run a command) | fleet-wide operators |
+| `lifecycle` (spare, repair, active, retired) | fleet-wide operators |
+
+`wipe` and `logs` are one device at a time.
+
+**How it works:**
+- **Preview first.** A dry run says how many devices match, which ones the operation applies to, and
+  which are skipped and why. For example, `lock` skips non-Android devices, and a client operator's
+  relabel skips any change that would move a device out of their account. Nothing changes.
+- **The run must match the preview.** The real request carries the number of devices the preview
+  matched (`expect`). If the matching devices have changed since, nothing happens and you preview
+  again. An empty selector needs `all: true`. Together these stop a typo from hitting the whole fleet.
+- **Same rules as one device at a time.** Each device is checked exactly as if you changed it on its
+  own: your role on it, its platform and lifecycle, and client scope. Retired devices are never
+  included.
+- **Progress for actions.** Reboots and commands are tracked per device (queued, sent, succeeded,
+  failed) on the operation's page in the dashboard, or with `armadactl bulk get <id>`.
+- **Paced check-ins.** Devices are woken about 50 a second, so a large batch doesn't hit the server
+  at once.
+- **Audit.** The activity log records each operation (`bulk.<operation>`) and the usual per-device
+  events. Operations are kept for 90 days. Client accounts see their own operations; fleet-wide
+  accounts see all.
+
+```bash
+armadactl bulk reboot --label site=orchard
+```
+
+That only previews. Add `--yes` to apply:
+
+```bash
+armadactl bulk reboot --label site=orchard --yes
+```
+
+```bash
+armadactl bulk exec --label role=kiosk --yes -- systemctl restart myapp
+```
+
+```bash
+armadactl bulk label floor=2 --device dev_a --device dev_b --yes
+```
+
+```bash
+armadactl bulk lifecycle spare --label customer=acme --note "contract ended" --yes
+```
+
+```bash
+armadactl bulk get <id>
+```
+
 ## Peripherals: BLE sensors and other devices
 
 Devices that can't run an agent can be managed through a **gateway**: any Linux agent near them, such as
@@ -1161,6 +1224,8 @@ armadactl deployments create --release <id> [--channel C] [--label K=V] [--devic
 armadactl deployments list|get|approve|pause|resume|advance|retry|complete|abort
 armadactl events [--device ID] [--deployment ID]
 armadactl alerts [--firing] | alerts ack <id> [--note N] | alerts unack <id>
+armadactl bulk reboot|restart-agent|wake|lock|exec|label|unlabel|set-channel|lifecycle <devices> [--yes]
+armadactl bulk list | bulk get <id>
 armadactl maintenance list|start|schedule|end|delete   (start --device ID --for 2h; schedule --windows 02:00-04:00 --days sun)
 armadactl config list|get|apply -f FILE|enable|disable|delete
 armadactl groups [list|map --group G --role R [--scope K=V]...|unmap G]
@@ -1252,6 +1317,8 @@ endpoints use the per-device key issued at enrollment.
 | `GET/PATCH/DELETE /api/v1/devices/{id}` | Device detail (with updates, actions, events), edit name/channel/labels, remove |
 | `GET/POST /api/v1/devices/{id}/actions` | List or queue `reboot`, `restart-agent`, `exec`, `logs`; on Android `lock`, `wipe` |
 | `POST /api/v1/devices/{id}/wake` | Ask a device to check in now |
+| `POST /api/v1/bulk` (`operation`, `selector` or `all`, `dry_run`, `expect`) | Bulk operation: preview, then apply with the previewed count |
+| `GET /api/v1/bulk`, `GET /api/v1/bulk/{id}` | Recent bulk operations; per-device progress |
 | `POST /api/v1/devices/{id}/lifecycle` (`{"state": "spare\|repair\|active\|retired", "note": …}`) | Change a device's lifecycle state (retiring is final) |
 | `POST /api/v1/devices/{id}/replace` (`{"replacement_id": …, "old_state": "repair"}`) | Replace a device (RMA): the replacement takes over name, channel and labels |
 | `GET/POST /api/v1/config-profiles`, `GET/PUT/DELETE /api/v1/config-profiles/{id}` | Configuration profiles (with compliance counts) |

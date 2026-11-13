@@ -428,6 +428,64 @@ type Action struct {
 	Output    string    `json:"output,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// BatchID is set when the action was queued by a bulk operation.
+	BatchID string `json:"batch_id,omitempty"`
+}
+
+// Bulk operations.
+const (
+	BulkWake         = "wake"
+	BulkSetLabels    = "set_labels"
+	BulkRemoveLabels = "remove_labels"
+	BulkSetChannel   = "set_channel"
+	BulkLifecycle    = "lifecycle"
+	// Actions: reboot, restart-agent, exec and lock (the action types).
+)
+
+// BulkRequest applies one operation to many devices. Run it with dry_run
+// first: the answer says how many devices match (and which would be
+// skipped, and why). Then run it with expect set to that number; if the
+// devices matching have changed meanwhile, nothing happens (409).
+type BulkRequest struct {
+	Operation string `json:"operation"`
+	// Selector picks the devices; empty needs all=true (every device you can see).
+	Selector Selector `json:"selector"`
+	All      bool     `json:"all,omitempty"`
+
+	Args      []string          `json:"args,omitempty"`       // exec: the command
+	Labels    map[string]string `json:"labels,omitempty"`     // set_labels
+	LabelKeys []string          `json:"label_keys,omitempty"` // remove_labels
+	Channel   string            `json:"channel,omitempty"`    // set_channel
+	State     string            `json:"state,omitempty"`      // lifecycle
+	Note      string            `json:"note,omitempty"`       // lifecycle (and the record)
+
+	DryRun bool `json:"dry_run,omitempty"`
+	Expect *int `json:"expect,omitempty"`
+}
+
+// BulkTarget is one device in a bulk operation.
+type BulkTarget struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Reason string `json:"reason,omitempty"` // why it was skipped
+	// ActionID and Status follow an action queued on the device.
+	ActionID string `json:"action_id,omitempty"`
+	Status   string `json:"status,omitempty"`
+}
+
+// BulkOperation records a bulk operation (or previews one).
+type BulkOperation struct {
+	ID        string       `json:"id,omitempty"` // empty for a dry run
+	Operation string       `json:"operation"`
+	Summary   string       `json:"summary"`
+	DryRun    bool         `json:"dry_run,omitempty"`
+	Matched   int          `json:"matched"` // devices matching the selector that you can see
+	Applied   []BulkTarget `json:"applied"`
+	Skipped   []BulkTarget `json:"skipped"`
+	CreatedBy string       `json:"created_by,omitempty"`
+	CreatedAt time.Time    `json:"created_at"`
+	// Progress counts the queued actions by status (on read; actions only).
+	Progress map[string]int `json:"progress,omitempty"`
 }
 
 // Action types.

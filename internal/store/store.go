@@ -852,13 +852,13 @@ func (s *Store) FailStaleUpdates(ctx context.Context, cutoff, now time.Time) ([]
 
 // ---- actions ----
 
-const actionCols = `id, device_id, type, args, status, exit_code, output, created_at, updated_at`
+const actionCols = `id, device_id, type, args, status, exit_code, output, created_at, updated_at, batch_id`
 
 func scanAction(sc scanner) (*api.Action, error) {
 	var a api.Action
 	var args string
 	var created, updated int64
-	if err := sc.Scan(&a.ID, &a.DeviceID, &a.Type, &args, &a.Status, &a.ExitCode, &a.Output, &created, &updated); err != nil {
+	if err := sc.Scan(&a.ID, &a.DeviceID, &a.Type, &args, &a.Status, &a.ExitCode, &a.Output, &created, &updated, &a.BatchID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -871,8 +871,65 @@ func scanAction(sc scanner) (*api.Action, error) {
 
 // CreateAction queues an action.
 func (s *Store) CreateAction(ctx context.Context, a *api.Action) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO actions (`+actionCols+`) VALUES (?,?,?,?,?,?,?,?,?)`,
-		a.ID, a.DeviceID, a.Type, mustJSON(a.Args), a.Status, a.ExitCode, a.Output, ts(a.CreatedAt), ts(a.UpdatedAt))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO actions (`+actionCols+`) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		a.ID, a.DeviceID, a.Type, mustJSON(a.Args), a.Status, a.ExitCode, a.Output, ts(a.CreatedAt), ts(a.UpdatedAt), a.BatchID)
+	return err
+}
+
+// BatchActionStatus maps action ID to status for a bulk operation's actions.
+func (s *Store) BatchActionStatus(ctx context.Context, batchID string) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, status FROM actions WHERE batch_id=?`, batchID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, status string
+		if err := rows.Scan(&id, &status); err != nil {
+			return nil, err
+		}
+		out[id] = status
+	}
+	return out, rows.Err()
+}
+
+// PutBulkOperation records a bulk operation.
+func (s *Store) PutBulkOperation(ctx context.Context, b *api.BulkOperation) error {
+	return s.putDoc(ctx, "bulk_operations", b.ID, b.CreatedAt, b)
+}
+
+// GetBulkOperation loads a bulk operation.
+func (s *Store) GetBulkOperation(ctx context.Context, id string) (*api.BulkOperation, error) {
+	var b api.BulkOperation
+	return &b, s.getDoc(ctx, "bulk_operations", id, &b)
+}
+
+// ListBulkOperations returns the most recent bulk operations, newest first.
+func (s *Store) ListBulkOperations(ctx context.Context, limit int) ([]*api.BulkOperation, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT spec FROM bulk_operations ORDER BY created_at DESC, rowid DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*api.BulkOperation
+	for rows.Next() {
+		var spec string
+		if err := rows.Scan(&spec); err != nil {
+			return nil, err
+		}
+		var b api.BulkOperation
+		if err := json.Unmarshal([]byte(spec), &b); err != nil {
+			return nil, err
+		}
+		out = append(out, &b)
+	}
+	return out, rows.Err()
+}
+
+// PruneBulkOperations forgets bulk operations older than before.
+func (s *Store) PruneBulkOperations(ctx context.Context, before time.Time) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM bulk_operations WHERE created_at < ?`, ts(before))
 	return err
 }
 

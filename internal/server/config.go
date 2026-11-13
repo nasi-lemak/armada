@@ -517,21 +517,9 @@ func (s *Server) wakeMatching(ctx context.Context, sel api.Selector) {
 	}
 	var ids []string
 	for _, d := range devs {
-		if d.ParentID == "" && rollout.Matches(sel, d) && s.push.connected(d.ID) {
+		if d.ParentID == "" && rollout.Matches(sel, d) {
 			ids = append(ids, d.ID)
 		}
 	}
-	if len(ids) == 0 {
-		return
-	}
-	go func() {
-		for _, id := range ids {
-			s.push.wake(id)
-			select {
-			case <-s.push.done:
-				return
-			case <-time.After(20 * time.Millisecond): // about 50 devices a second
-			}
-		}
-	}()
+	s.wakeIDs(ids)
 }
