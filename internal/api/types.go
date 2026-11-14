@@ -1629,3 +1629,27 @@ type SearchResult struct {
 	Subtitle string `json:"subtitle,omitempty"`
 	Link     string `json:"link"` // dashboard route
 }
+
+// TimelineEntry is one thing that happened to a device: an activity-log
+// event, an alert (a span), an update, or a maintenance window (a span).
+type TimelineEntry struct {
+	ID   string     `json:"id"`
+	Time time.Time  `json:"time"`
+	End  *time.Time `json:"end,omitempty"` // spans: when it ended
+	// Kind is alert | update | action | lifecycle | cert | health | config | maintenance | other.
+	Kind    string `json:"kind"`
+	Type    string `json:"type"` // event type, alert condition or update status
+	Title   string `json:"title"`
+	Detail  string `json:"detail,omitempty"`
+	Tone    string `json:"tone,omitempty"` // good | warn | bad
+	Actor   string `json:"actor,omitempty"`
+	Link    string `json:"link,omitempty"`
+	Ongoing bool   `json:"ongoing,omitempty"`
+}
+
+// Timeline is a page of a device's timeline, newest first. Pass Next as
+// the cursor to get the page after it.
+type Timeline struct {
+	Entries []TimelineEntry `json:"entries"`
+	Next    string          `json:"next,omitempty"`
+}

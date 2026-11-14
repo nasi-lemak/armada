@@ -740,6 +740,14 @@ client's.
   - It only shows what your account can see: client accounts get their own devices, and users show
     for admins only.
   - The API is `GET /api/v1/search?q=…`.
+- **Timeline:** each device page has one feed of everything that happened to that device, newest
+  first and grouped by day.
+  - **What it covers:** actions, lifecycle changes, certificates, health changes and config.
+  - **Alerts:** shown as spans, with how long they lasted and who acknowledged them.
+  - **Updates:** shown with from and to versions and the error, if any.
+  - **Maintenance:** the windows that cover the device.
+  - **Using it:** filter it by kind and use **Load more** to go back further.
+  - From the CLI: `armadactl devices timeline <id> [--kinds alert,update]`.
 
 ```bash
 armadactl devices set <id> --asset-tag ACME-00417 --location "Orchard store, till 3" --contact "Mei, +65 5550 1234"
@@ -1630,6 +1638,7 @@ endpoints use the per-device key issued at enrollment.
 | `POST /api/v1/deployments/{id}/{approve,pause,resume,advance,retry,complete,abort}` | Control a rollout (`approve`: someone other than its creator) |
 | `GET /api/v1/events` | Activity log. Filters: `type` (comma list; `prefix.*`), `actor` (`system` for none), `q`, `since`/`until` (date or RFC 3339; dates use `tz`), `device_id`, `deployment_id`. Paging: `limit` (up to 1000), `before_id`. `format=csv` exports up to 50,000 entries |
 | `GET /api/v1/events/types` | Event types recorded, for filter menus |
+| `GET /api/v1/devices/{id}/timeline` | A device's timeline. `kinds` (alert, update, action, lifecycle, cert, health, config, maintenance, other), `limit` (up to 200), `cursor` (the previous page's `next`) |
 | `GET /api/v1/signing-key` | Release-signing public key |
 | `POST /api/v1/agent/enroll`, `/heartbeat`, `/updates`, `/actions/{id}/result`, `GET /api/v1/agent/releases/{id}/artifact`, `GET /api/v1/agent/wait`, `GET /api/v1/agent/releases/{id}/chunks` | Agent protocol (`wait` is the push long-poll; `chunks` the delta-update index) |
 | `GET /install.sh`, `GET /api/v1/agent/download?os=&arch=&package=` | Public bootstrap (agent binaries and APK only) |

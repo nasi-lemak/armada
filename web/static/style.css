@@ -388,3 +388,19 @@ table.data-table td, table.data-table th { padding: 4px 12px; font-size: 12px; }
 .palette-hint { font-size: 12px; padding: 8px 16px; border-top: 1px solid var(--border); }
 .toolbar .date-range { display: inline-flex; flex-direction: row; align-items: center; font-weight: 500; gap: 6px; margin: 0; font-size: 13px; }
 .toolbar .w-actor { width: 160px; }
+/* Device timeline */
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 16px 4px; }
+.card-head h2 { margin: 0; }
+.card-head select { width: auto; padding: 4px 8px; font-size: 12.5px; }
+.tl { list-style: none; margin: 0; padding: 0 0 4px; }
+.tl-day { padding: 10px 16px 4px; font-size: 11.5px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.tl-item { display: grid; grid-template-columns: 40px 8px 1fr; gap: 10px; align-items: baseline; padding: 6px 16px; }
+.tl-item + .tl-item { border-top: 1px solid var(--border); }
+.tl-item time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.tl-item .dot { align-self: start; margin-top: 6px; }
+.tl-item .type { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.tl-more { padding: 0 16px 12px; }
+.tl-more:has(.hidden) { display: none; }
+.dot.warn.halo { box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 25%, transparent); }
+.dot.ok.halo, .dot.halo:not(.warn):not(.bad) { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+.dot.bad.halo { box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 25%, transparent); }

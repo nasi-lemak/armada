@@ -474,6 +474,7 @@ func (s *Server) Handler() http.Handler {
 	viewer(scopedOK, "GET /api/v1/bulk/{id}", s.handleGetBulk)
 	viewer(scopedOK, "GET /api/v1/events", s.handleListEvents)
 	viewer(scopedOK, "GET /api/v1/events/types", s.handleEventTypes)
+	viewer(scopedOK, "GET /api/v1/devices/{id}/timeline", s.handleDeviceTimeline)
 	viewer(scopedOK, "GET /api/v1/alerts", s.handleListAlerts)
 	// Reports: anyone, about the devices they can see. Schedules follow
 	// the client-alert rules (admins manage all; client operators theirs).

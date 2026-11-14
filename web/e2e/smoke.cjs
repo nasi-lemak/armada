@@ -153,6 +153,16 @@ async function visit(page, who, hash, expectHeading) {
   const inv = (await api('GET', '/api/v1/devices/' + ids.acme)).device.inventory;
   if (!inv || inv.asset_tag !== 'ACME-00417') fail(`inventory not saved: ${JSON.stringify(inv)}`);
 
+  // Device timeline: enrollment shows as lifecycle, and the kind
+  // filter narrows the feed.
+  await admin.waitForSelector('.timeline .tl-item', { timeout: 5000 }).catch(() => fail('device timeline is empty'));
+  const tlText = await admin.textContent('.timeline');
+  if (!tlText.includes('acme-kiosk enrolled')) fail('timeline does not show the enrollment');
+  await admin.selectOption('.timeline select', 'lifecycle');
+  await admin.waitForTimeout(600);
+  const tlKinds = await admin.$$eval('.timeline .tl-item .type', els => els.map(e => e.textContent.split(' · ')[0]));
+  if (!tlKinds.length || tlKinds.some(k => k !== 'Lifecycle')) fail(`timeline filter: ${tlKinds.join(', ')}`);
+
   // Activity: filtering by type from the address shows only those entries,
   // with device names, and the search box narrows them further.
   await visit(admin, 'admin', '#/activity?type=device.enrolled', 'Activity');

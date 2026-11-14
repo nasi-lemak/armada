@@ -39,6 +39,7 @@ Commands:
   status                                     fleet overview
   devices list [--channel C] [--label K=V] [--status online|offline] [--lifecycle active|spare|repair|retired|all] [--csv]
   devices get <id>                           details, update history, actions
+  devices timeline <id> [--kinds alert,update,...] [--limit N]   history: activity, alerts, updates, maintenance
   devices set <id> [--name N] [--channel C] [--label K=V]... [--unlabel K]...
                  [--asset-tag T] [--location L] [--contact C] [--notes N]
   devices logs <id> [--unit U | --file NAME] [--lines 200] [--since 1h] [--grep TEXT] [--timeout 2m]
@@ -493,6 +494,45 @@ func (c *cli) status() error {
 
 func (c *cli) devices(verb string, args []string) error {
 	switch verb {
+	case "timeline":
+		fs := flag.NewFlagSet("devices timeline", flag.ContinueOnError)
+		kinds := fs.String("kinds", "", "")
+		limit := fs.Int("limit", 50, "")
+		rest, err := parse(fs, args)
+		if err != nil {
+			return err
+		}
+		if len(rest) != 1 {
+			return errors.New("usage: devices timeline <id> [--kinds alert,update,action,lifecycle,cert,health,config,maintenance,other] [--limit N]")
+		}
+		q := url.Values{"limit": {strconv.Itoa(*limit)}}
+		if *kinds != "" {
+			q.Set("kinds", *kinds)
+		}
+		var tl api.Timeline
+		if err := c.do("GET", "/api/v1/devices/"+url.PathEscape(rest[0])+"/timeline?"+q.Encode(), nil, &tl); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(tl)
+		}
+		for _, e := range tl.Entries {
+			extra := ""
+			switch {
+			case e.Ongoing:
+				extra = " (ongoing)"
+			case e.End != nil && e.End.After(e.Time):
+				extra = " (" + e.End.Sub(e.Time).Round(time.Second).String() + ")"
+			}
+			fmt.Fprintf(c.out, "%s  %-11s %s%s\n", e.Time.Local().Format("2006-01-02 15:04"), e.Kind, e.Title, extra)
+			if e.Detail != "" {
+				fmt.Fprintf(c.out, "%29s%s\n", "", e.Detail)
+			}
+		}
+		if tl.Next != "" {
+			fmt.Fprintf(c.out, "(more: raise --limit)\n")
+		}
+		return nil
 	case "", "list", "ls":
 		fs := flag.NewFlagSet("devices list", flag.ContinueOnError)
 		asCSV := fs.Bool("csv", false, "")

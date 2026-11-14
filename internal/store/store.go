@@ -1051,13 +1051,15 @@ type EventFilter struct {
 	// (a client account's view). An empty non-nil slice matches nothing.
 	DeviceIDs []string
 	// Types are exact event types, or prefixes ending in "*" ("alert.*").
-	Types []string
+	// ExcludeTypes, in the same form, drops events.
+	Types, ExcludeTypes []string
 	// Actor is a user's email or token name; "system" matches events with no actor.
 	Actor string
 	// Text matches anywhere in the message (case-insensitive for ASCII).
 	Text         string
 	Since, Until time.Time // [Since, Until)
 	BeforeID     int64     // paging: only events older than this ID
+	ByTime       bool      // order by time, then ID (default: ID), newest first
 }
 
 // likeEscape escapes LIKE wildcards; use with ESCAPE '\'.
@@ -1104,6 +1106,15 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter, limit int) ([]*a
 		}
 		q += ` AND (` + strings.Join(ors, " OR ") + `)`
 	}
+	for _, t := range f.ExcludeTypes {
+		if p, ok := strings.CutSuffix(t, "*"); ok {
+			q += ` AND type NOT LIKE ? ESCAPE '\'`
+			args = append(args, likeEscape(p)+"%")
+		} else {
+			q += ` AND type<>?`
+			args = append(args, t)
+		}
+	}
 	switch {
 	case f.Actor == "system":
 		q += ` AND actor=''`
@@ -1128,7 +1139,11 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter, limit int) ([]*a
 		args = append(args, f.BeforeID)
 	}
 	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, q+` ORDER BY id DESC LIMIT ?`, args...)
+	order := ` ORDER BY id DESC LIMIT ?`
+	if f.ByTime {
+		order = ` ORDER BY time DESC, id DESC LIMIT ?`
+	}
+	rows, err := s.db.QueryContext(ctx, q+order, args...)
 	if err != nil {
 		return nil, err
 	}

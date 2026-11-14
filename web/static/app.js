@@ -631,6 +631,79 @@ async function viewBulk(root, id) {
   return refresh;
 }
 
+// timelineCard is a device's history: activity, alerts, updates and
+// maintenance in one feed, newest first, grouped by day.
+const TIMELINE_KINDS = [['', 'Everything'], ['alert', 'Alerts'], ['update', 'Updates'], ['action', 'Actions'], ['lifecycle', 'Lifecycle'],
+  ['cert', 'Certificates'], ['health', 'Health'], ['config', 'Config'], ['maintenance', 'Maintenance'], ['other', 'Other']];
+function timelineCard(id) {
+  const PAGE = 30;
+  const kindSel = h('select', { 'aria-label': 'Show', class: 'small' }, TIMELINE_KINDS.map(([v, l]) => h('option', { value: v }, l)));
+  const list = h('div', {});
+  const more = h('button', { class: 'btn small hidden', onclick: () => guard(loadMore) }, 'Load more');
+  const el = h('div', { class: 'card flush timeline' },
+    h('div', { class: 'card-head' }, h('h2', {}, 'Timeline'), kindSel), list, h('div', { class: 'tl-more' }, more));
+  let entries = [], next = '', seq = 0;
+  const q = extra => {
+    const p = new URLSearchParams(extra);
+    if (kindSel.value) p.set('kinds', kindSel.value);
+    return `/api/v1/devices/${id}/timeline?` + p;
+  };
+  const dayLabel = d => {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const day = new Date(d); day.setHours(0, 0, 0, 0);
+    const diff = Math.round((today - day) / 86400000);
+    if (diff === 0) return 'Today';
+    if (diff === 1) return 'Yesterday';
+    return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: day.getFullYear() === today.getFullYear() ? undefined : 'numeric' });
+  };
+  const span = e => {
+    if (e.ongoing) return e.kind === 'update' ? 'in progress' : 'ongoing';
+    if (!e.end) return null;
+    const sec = (new Date(e.end) - new Date(e.time)) / 1000;
+    return sec > 0 ? (e.kind === 'maintenance' ? 'for ' : 'lasted ') + duration(sec) : null;
+  };
+  const render = () => {
+    if (!entries.length) {
+      replace(list, h('div', { class: 'empty' }, kindSel.value ? 'Nothing of this kind yet.' : 'Nothing has happened yet.'));
+    } else {
+      const out = [];
+      let lastDay = '';
+      for (const e of entries) {
+        const d = new Date(e.time);
+        const label = dayLabel(d);
+        if (label !== lastDay) { out.push(h('li', { class: 'tl-day' }, label)); lastDay = label; }
+        const meta = [TIMELINE_KINDS.find(([v]) => v === e.kind)?.[1] || e.kind, e.actor, span(e)].filter(Boolean);
+        out.push(h('li', { class: 'tl-item' },
+          h('time', { datetime: e.time, title: d.toLocaleString() }, d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })),
+          h('span', { class: 'dot ' + ({ good: 'ok', warn: 'warn', bad: 'bad' }[e.tone] || '') + (e.ongoing ? ' halo' : '') }),
+          h('div', {}, h('div', {}, e.link ? h('a', { href: e.link }, e.title) : e.title),
+            e.detail ? h('div', { class: 'muted pre-wrap' }, e.detail) : null,
+            h('div', { class: 'type' }, meta.join(' · ')))));
+      }
+      replace(list, h('ul', { class: 'tl' }, out));
+    }
+    more.classList.toggle('hidden', !next);
+  };
+  async function load(limit) {
+    const my = ++seq;
+    const tl = await api('GET', q({ limit: String(limit) }));
+    if (my !== seq) return;
+    entries = tl.entries; next = tl.next || '';
+    render();
+  }
+  async function loadMore() {
+    if (!next) return;
+    const my = seq;
+    const tl = await api('GET', q({ limit: String(PAGE), cursor: next }));
+    if (my !== seq) return;
+    entries = entries.concat(tl.entries); next = tl.next || '';
+    render();
+  }
+  kindSel.addEventListener('change', () => guard(() => load(PAGE)));
+  // A refresh keeps however many entries are shown.
+  return { el, refresh: () => load(Math.min(200, Math.max(PAGE, entries.length))) };
+}
+
 async function viewDevice(root, id) {
   const head = h('div', {});
   const info = h('div', { class: 'card' });
@@ -639,7 +712,7 @@ async function viewDevice(root, id) {
   const lifeCard = h('div', { class: 'card fleet-only need-operator' });
   const updates = h('div', { class: 'card flush' });
   const actionLog = h('div', { class: 'card flush' });
-  const events = h('div', { class: 'card flush' });
+  const timeline = timelineCard(id);
   const healthCard = h('div', { class: 'card flush' });
   const periphCard = h('div', { class: 'card flush hidden' });
   const logs = logsCard(id, () => dev);
@@ -649,7 +722,7 @@ async function viewDevice(root, id) {
   append(root, head,
     h('div', { class: 'grid side' },
       h('div', { class: 'stack' }, info, healthCard, periphCard, configCard, certCard, logs.el, updates, actionLog),
-      h('div', { class: 'stack' }, meta, actions, lifeCard, events)),
+      h('div', { class: 'stack' }, meta, actions, lifeCard, timeline.el)),
     hist.el);
   let dev;
 
@@ -948,7 +1021,7 @@ async function viewDevice(root, id) {
         h('td', { class: 'nowrap' }, ago(a.updated_at)),
         h('td', {}, a.output ? h('pre', { class: 'out' }, a.output) : h('span', { class: 'muted' }, a.status === 'queued' || a.status === 'sent' ? 'waiting for device' : '—')))),
       'No actions yet.'));
-    replace(events, h('h2', {}, 'Activity'), eventFeed(det.events));
+    await timeline.refresh();
   }
   if (await guard(refresh) === undefined && !dev) replace(root, h('div', { class: 'empty' }, 'Device not found. ', h('a', { href: '#/devices' }, 'Back to devices')));
   return refresh;

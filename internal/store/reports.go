@@ -68,6 +68,36 @@ func (s *Store) ListAlertsBetween(ctx context.Context, from, to time.Time) ([]*a
 	return out, rows.Err()
 }
 
+// ListDeviceAlerts returns a device's alerts that started at or before
+// until (zero: any time), newest first.
+func (s *Store) ListDeviceAlerts(ctx context.Context, deviceID string, until time.Time, limit int) ([]*api.Alert, error) {
+	q := `SELECT spec FROM alerts WHERE json_extract(spec, '$.device_id')=?`
+	args := []any{deviceID}
+	if !until.IsZero() {
+		q += ` AND started_at <= ?`
+		args = append(args, ts(until))
+	}
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, q+` ORDER BY started_at DESC, id DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*api.Alert
+	for rows.Next() {
+		var spec string
+		if err := rows.Scan(&spec); err != nil {
+			return nil, err
+		}
+		var a api.Alert
+		if err := json.Unmarshal([]byte(spec), &a); err != nil {
+			return nil, err
+		}
+		out = append(out, &a)
+	}
+	return out, rows.Err()
+}
+
 // ListEventsBetween returns events of the given types in [from, to), oldest first.
 func (s *Store) ListEventsBetween(ctx context.Context, from, to time.Time, types []string, limit int) ([]*api.Event, error) {
 	q := `SELECT id, time, type, device_id, deployment_id, message, actor FROM events WHERE time >= ? AND time < ?`
