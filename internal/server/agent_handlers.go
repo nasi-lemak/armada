@@ -55,7 +55,11 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	msg := fmt.Sprintf("%s enrolled (%s/%s, agent %s)", dev.Name, dev.Info.OS, dev.Info.Arch, dev.Info.AgentVersion)
+	agent := "agent"
+	if v := dev.Info.AgentVersion; v != "" {
+		agent += " " + v
+	}
+	msg := fmt.Sprintf("%s enrolled (%s/%s, %s)", dev.Name, dev.Info.OS, dev.Info.Arch, agent)
 	if att != nil {
 		msg += fmt.Sprintf(", hardware key in %s, boot %s", att.SecurityLevel, att.BootState)
 	}

@@ -153,6 +153,19 @@ async function visit(page, who, hash, expectHeading) {
   const inv = (await api('GET', '/api/v1/devices/' + ids.acme)).device.inventory;
   if (!inv || inv.asset_tag !== 'ACME-00417') fail(`inventory not saved: ${JSON.stringify(inv)}`);
 
+  // Activity: filtering by type from the address shows only those entries,
+  // with device names, and the search box narrows them further.
+  await visit(admin, 'admin', '#/activity?type=device.enrolled', 'Activity');
+  await admin.waitForTimeout(500);
+  const kinds = await admin.$$eval('.feed .type', els => els.map(e => e.textContent));
+  if (!kinds.length || kinds.some(k => !k.startsWith('device.enrolled'))) fail(`activity type filter: ${kinds.join(' | ')}`);
+  if (!kinds.some(k => k.includes('acme-kiosk'))) fail('activity entries do not name their device');
+  await admin.fill('input[aria-label="Search activity"]', 'globex');
+  await admin.waitForTimeout(800);
+  const narrowed = await admin.$$eval('.feed li', els => els.length);
+  if (narrowed < 1 || narrowed >= kinds.length) fail(`activity search: ${narrowed} of ${kinds.length}`);
+  if (!admin.url().includes('q=globex')) fail('activity filters are not kept in the address');
+
   // Client account: only its customer's devices, no fleet pages.
   const client = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   watch(client, 'client');

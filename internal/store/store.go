@@ -1043,17 +1043,89 @@ func (s *Store) AddEvent(ctx context.Context, e api.Event) error {
 	return err
 }
 
-// ListEvents returns recent events, optionally filtered.
+// EventFilter narrows an activity-log query. Empty fields don't filter.
+type EventFilter struct {
+	DeviceID     string
+	DeploymentID string
+	// DeviceIDs, when non-nil, limits results to events about these devices
+	// (a client account's view). An empty non-nil slice matches nothing.
+	DeviceIDs []string
+	// Types are exact event types, or prefixes ending in "*" ("alert.*").
+	Types []string
+	// Actor is a user's email or token name; "system" matches events with no actor.
+	Actor string
+	// Text matches anywhere in the message (case-insensitive for ASCII).
+	Text         string
+	Since, Until time.Time // [Since, Until)
+	BeforeID     int64     // paging: only events older than this ID
+}
+
+// likeEscape escapes LIKE wildcards; use with ESCAPE '\'.
+func likeEscape(v string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(v)
+}
+
+// ListEvents returns recent events, optionally filtered by device or rollout.
 func (s *Store) ListEvents(ctx context.Context, deviceID, deploymentID string, limit int) ([]*api.Event, error) {
+	return s.QueryEvents(ctx, EventFilter{DeviceID: deviceID, DeploymentID: deploymentID}, limit)
+}
+
+// QueryEvents returns events matching f, newest first.
+func (s *Store) QueryEvents(ctx context.Context, f EventFilter, limit int) ([]*api.Event, error) {
+	if f.DeviceIDs != nil && len(f.DeviceIDs) == 0 {
+		return nil, nil
+	}
 	q := `SELECT id, time, type, device_id, deployment_id, message, actor FROM events WHERE 1=1`
 	var args []any
-	if deviceID != "" {
+	if f.DeviceID != "" {
 		q += ` AND device_id=?`
-		args = append(args, deviceID)
+		args = append(args, f.DeviceID)
 	}
-	if deploymentID != "" {
+	if f.DeploymentID != "" {
 		q += ` AND deployment_id=?`
-		args = append(args, deploymentID)
+		args = append(args, f.DeploymentID)
+	}
+	if f.DeviceIDs != nil {
+		q += ` AND device_id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(f.DeviceIDs)), ",") + `)`
+		for _, id := range f.DeviceIDs {
+			args = append(args, id)
+		}
+	}
+	if len(f.Types) > 0 {
+		var ors []string
+		for _, t := range f.Types {
+			if p, ok := strings.CutSuffix(t, "*"); ok {
+				ors = append(ors, `type LIKE ? ESCAPE '\'`)
+				args = append(args, likeEscape(p)+"%")
+			} else {
+				ors = append(ors, `type=?`)
+				args = append(args, t)
+			}
+		}
+		q += ` AND (` + strings.Join(ors, " OR ") + `)`
+	}
+	switch {
+	case f.Actor == "system":
+		q += ` AND actor=''`
+	case f.Actor != "":
+		q += ` AND actor=?`
+		args = append(args, f.Actor)
+	}
+	if f.Text != "" {
+		q += ` AND message LIKE ? ESCAPE '\'`
+		args = append(args, "%"+likeEscape(f.Text)+"%")
+	}
+	if !f.Since.IsZero() {
+		q += ` AND time>=?`
+		args = append(args, ts(f.Since))
+	}
+	if !f.Until.IsZero() {
+		q += ` AND time<?`
+		args = append(args, ts(f.Until))
+	}
+	if f.BeforeID > 0 {
+		q += ` AND id<?`
+		args = append(args, f.BeforeID)
 	}
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, q+` ORDER BY id DESC LIMIT ?`, args...)
@@ -1070,6 +1142,24 @@ func (s *Store) ListEvents(ctx context.Context, deviceID, deploymentID string, l
 		}
 		e.Time = fromTS(t)
 		out = append(out, &e)
+	}
+	return out, rows.Err()
+}
+
+// EventTypes lists the event types recorded, for filter menus.
+func (s *Store) EventTypes(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT type FROM events ORDER BY type`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
 	}
 	return out, rows.Err()
 }

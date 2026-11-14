@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -48,21 +47,7 @@ func (c *cli) report(verb string, args []string) error {
 		q.Add("label", l)
 	}
 	if *format == "csv" || *format == "html" {
-		req, err := http.NewRequest("GET", c.server+"/api/v1/reports?"+q.Encode(), nil)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Authorization", "Bearer "+c.token)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
-		}
-		w := c.out
+		var w io.Writer = c.out
 		if *out != "" {
 			f, err := os.Create(*out)
 			if err != nil {
@@ -71,7 +56,7 @@ func (c *cli) report(verb string, args []string) error {
 			defer f.Close()
 			w = f
 		}
-		_, err = io.Copy(w, resp.Body)
+		err := c.download("/api/v1/reports?"+q.Encode(), w)
 		if err == nil && *out != "" {
 			fmt.Fprintf(os.Stderr, "wrote %s\n", *out)
 		}

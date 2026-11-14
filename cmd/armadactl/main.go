@@ -71,7 +71,8 @@ Commands:
                   [--windows 22:00-05:00] [--days mon,tue,wed,thu,fri] [--tz Asia/Singapore]
   deployments approve <id>                   let a rollout go past its canary (someone other than its creator)
   deployments pause|resume|advance|retry|complete|abort <id>
-  events [--device ID] [--deployment ID] [--limit N]
+  events [--device ID] [--deployment ID] [--type T[,T2|prefix.*]] [--actor WHO|system]
+         [--search TEXT] [--since DATE] [--until DATE] [--limit N] [--csv]
 
 Monitoring and alerts:
   monitors list
@@ -356,6 +357,15 @@ func (c *cli) do(method, path string, in, out any) error {
 	return c.send(req, out)
 }
 
+// download streams a response body (CSV, HTML, ...) to w.
+func (c *cli) download(path string, w io.Writer) error {
+	req, err := http.NewRequest("GET", c.server+path, nil)
+	if err != nil {
+		return err
+	}
+	return c.send(req, w)
+}
+
 func (c *cli) send(req *http.Request, out any) error {
 	if c.token == "" {
 		return errors.New("no admin token: set ARMADA_ADMIN_TOKEN or pass --token")
@@ -376,6 +386,10 @@ func (c *cli) send(req *http.Request, out any) error {
 	}
 	if out == nil {
 		return nil
+	}
+	if w, ok := out.(io.Writer); ok {
+		_, err := io.Copy(w, resp.Body)
+		return err
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
@@ -1134,11 +1148,45 @@ func (c *cli) events(args []string) error {
 	fs := flag.NewFlagSet("events", flag.ContinueOnError)
 	device := fs.String("device", "", "")
 	deployment := fs.String("deployment", "", "")
+	typ := fs.String("type", "", "")
+	actor := fs.String("actor", "", "")
+	search := fs.String("search", "", "")
+	since := fs.String("since", "", "")
+	until := fs.String("until", "", "")
 	limit := fs.Int("limit", 50, "")
+	asCSV := fs.Bool("csv", false, "")
 	if _, err := parse(fs, args); err != nil {
 		return err
 	}
-	q := url.Values{"device_id": {*device}, "deployment_id": {*deployment}, "limit": {strconv.Itoa(*limit)}}
+	q := url.Values{}
+	for k, v := range map[string]string{"device_id": *device, "deployment_id": *deployment, "type": *typ, "actor": *actor,
+		"q": *search, "since": *since, "until": *until} {
+		if v != "" {
+			q.Set(k, v)
+		}
+	}
+	// Dates are local days; send exact times so the server needn't know our zone.
+	for _, d := range []struct {
+		key, v string
+		end    bool
+	}{{"since", *since, false}, {"until", *until, true}} {
+		if t, err := time.ParseInLocation("2006-01-02", d.v, time.Local); err == nil {
+			if d.end {
+				t = t.AddDate(0, 0, 1)
+			}
+			q.Set(d.key, t.Format(time.RFC3339))
+		}
+	}
+	if *asCSV {
+		q.Set("format", "csv")
+		limitSet := false
+		fs.Visit(func(f *flag.Flag) { limitSet = limitSet || f.Name == "limit" })
+		if limitSet { // only an explicit --limit caps the export
+			q.Set("limit", strconv.Itoa(*limit))
+		}
+		return c.download("/api/v1/events?"+q.Encode(), c.out)
+	}
+	q.Set("limit", strconv.Itoa(*limit))
 	var evs []api.Event
 	if err := c.do("GET", "/api/v1/events?"+q.Encode(), nil, &evs); err != nil {
 		return err
@@ -1148,7 +1196,11 @@ func (c *cli) events(args []string) error {
 	}
 	for i := len(evs) - 1; i >= 0; i-- {
 		e := evs[i]
-		fmt.Fprintf(c.out, "%s  %-22s %s\n", e.Time.Local().Format("2006-01-02 15:04:05"), e.Type, e.Message)
+		who := e.Actor
+		if who == "" {
+			who = "system"
+		}
+		fmt.Fprintf(c.out, "%s  %-22s %-18s %s\n", e.Time.Local().Format("2006-01-02 15:04:05"), e.Type, who, e.Message)
 	}
 	return nil
 }

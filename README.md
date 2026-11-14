@@ -74,7 +74,10 @@ It has three parts, all in Go with no external services:
 - **Delta updates.** Devices download only the parts of a release that differ from the version they
   have (content-defined chunks), from any older version, with no diffs to prepare. Resumable full
   downloads for everything else.
-- **Activity log** of enrollments, updates, failures, pauses and actions.
+- **Activity log** of enrollments, updates, failures, pauses and actions, with who did each:
+  - filter by type, who did it, text and dates;
+  - export as CSV;
+  - filters are kept in the address (`#/activity?type=device.*&actor=system`).
 - **Health monitoring** (see [below](#health-monitoring)):
   - Hardware checks run automatically. They cover SSD/HDD SMART data, NVMe wear, eMMC wear, SD-card
     failure signs, RAID, temperature, power and under-voltage, battery, disk space and memory.
@@ -1491,7 +1494,8 @@ armadactl deployments create --release <id> [--channel C] [--label K=V] [--devic
                              [--stages 5,25,100] [--stage-duration 15m] [--max-failure-rate 0.2]
                              [--min-samples 3] [--manual] [--allow-downgrade]
 armadactl deployments list|get|approve|pause|resume|advance|retry|complete|abort
-armadactl events [--device ID] [--deployment ID]
+armadactl events [--device ID] [--deployment ID] [--type T,prefix.*] [--actor WHO|system]
+                 [--search TEXT] [--since 2026-11-01] [--until 2026-11-30] [--limit N] [--csv]
 armadactl alerts [--firing] | alerts ack <id> [--note N] | alerts unack <id>
 armadactl bulk reboot|restart-agent|wake|lock|exec|label|unlabel|set-channel|lifecycle <devices> [--yes]
 armadactl bulk list | bulk get <id>
@@ -1624,7 +1628,8 @@ endpoints use the per-device key issued at enrollment.
 | `GET/POST /api/v1/releases`, `GET/DELETE /api/v1/releases/{id}`, `GET …/artifact` | Releases (upload is `multipart/form-data`) |
 | `GET/POST /api/v1/deployments`, `GET /api/v1/deployments/{id}` | Deployments |
 | `POST /api/v1/deployments/{id}/{approve,pause,resume,advance,retry,complete,abort}` | Control a rollout (`approve`: someone other than its creator) |
-| `GET /api/v1/events` | Activity log |
+| `GET /api/v1/events` | Activity log. Filters: `type` (comma list; `prefix.*`), `actor` (`system` for none), `q`, `since`/`until` (date or RFC 3339; dates use `tz`), `device_id`, `deployment_id`. Paging: `limit` (up to 1000), `before_id`. `format=csv` exports up to 50,000 entries |
+| `GET /api/v1/events/types` | Event types recorded, for filter menus |
 | `GET /api/v1/signing-key` | Release-signing public key |
 | `POST /api/v1/agent/enroll`, `/heartbeat`, `/updates`, `/actions/{id}/result`, `GET /api/v1/agent/releases/{id}/artifact`, `GET /api/v1/agent/wait`, `GET /api/v1/agent/releases/{id}/chunks` | Agent protocol (`wait` is the push long-poll; `chunks` the delta-update index) |
 | `GET /install.sh`, `GET /api/v1/agent/download?os=&arch=&package=` | Public bootstrap (agent binaries and APK only) |

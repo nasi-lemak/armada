@@ -72,16 +72,22 @@ async function downloadArtifact(r) {
 }
 
 // downloadReport saves a report in a file format (csv or html).
-async function downloadReport(query, format) {
-  const res = await fetch(`/api/v1/reports?${query}&format=${format}`, { headers: { Authorization: 'Bearer ' + token } });
+function downloadReport(query, format) {
+  return downloadFile(`/api/v1/reports?${query}&format=${format}`, 'report.' + format,
+    name => format === 'html' ? name.replace(/\.csv$/, '.html') : name);
+}
+
+// downloadFile saves an API response as a file, named as the server suggests.
+async function downloadFile(path, fallbackName, rename = n => n) {
+  const res = await fetch(path, { headers: { Authorization: 'Bearer ' + token } });
   if (!res.ok) {
     let msg = 'download failed (HTTP ' + res.status + ')';
     try { msg = (await res.json()).error || msg; } catch { /* not JSON */ }
     throw new APIError(res.status, msg);
   }
-  const name = (/filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') || '') || [])[1] || 'report.' + format;
+  const name = (/filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') || '') || [])[1] || fallbackName;
   const url = URL.createObjectURL(await res.blob());
-  const a = h('a', { href: url, download: format === 'html' ? name.replace(/\.csv$/, '.html') : name });
+  const a = h('a', { href: url, download: rename(name) });
   document.body.append(a);
   a.click();
   a.remove();
@@ -282,7 +288,7 @@ const routes = [
   [/^#\/apps$/, 'apps', viewApps, 'fleet'],
   [/^#\/monitoring$/, 'monitoring', viewMonitoring],
   [/^#\/config$/, 'config', viewConfig, 'fleet'],
-  [/^#\/activity$/, 'activity', viewActivity],
+  [/^#\/activity(?:\?(.*))?$/, 'activity', viewActivity],
   [/^#\/reports$/, 'reports', viewReports],
   [/^#\/certificates$/, 'certificates', viewCertificates],
   [/^#\/users$/, 'users', viewUsers, 'admin'],
@@ -400,14 +406,16 @@ async function viewOverview(root) {
   return refresh;
 }
 
-function eventFeed(events) {
+// eventFeed lists activity-log entries. names maps device IDs to names.
+function eventFeed(events, names = {}, empty = 'No activity yet.') {
   events = events || [];
-  if (!events.length) return h('div', { class: 'empty' }, 'No activity yet.');
+  if (!events.length) return h('div', { class: 'empty' }, empty);
   return h('ul', { class: 'feed' }, events.map(e => h('li', {},
     h('time', { datetime: e.time, title: new Date(e.time).toLocaleString() }, fmtTime(e.time)),
     h('div', {}, h('div', {}, e.message), h('div', { class: 'type' }, e.type,
-      e.device_id ? [' · ', h('a', { href: '#/devices/' + e.device_id }, 'device')] : null,
-      e.deployment_id ? [' · ', h('a', { href: '#/deployments/' + e.deployment_id }, 'deployment')] : null)))));
+      e.actor ? ' · ' + e.actor : null,
+      e.device_id ? [' · ', h('a', { href: '#/devices/' + e.device_id }, names[e.device_id] || 'device')] : null,
+      e.deployment_id ? [' · ', h('a', { href: '#/deployments/' + e.deployment_id }, 'rollout')] : null)))));
 }
 
 async function viewDevices(root, query) {
@@ -1766,10 +1774,82 @@ function renderReport(out, rep) {
     h('div', { class: 'muted mt' }, rep.notes.map(n => h('p', {}, n))));
 }
 
-async function viewActivity(root) {
+async function viewActivity(root, query) {
+  const PAGE = 100;
+  const search = h('input', { type: 'search', placeholder: 'Search messages…', 'aria-label': 'Search activity' });
+  const typeSel = h('select', { 'aria-label': 'Event type' }, h('option', { value: '' }, 'All activity'));
+  const actor = h('input', { type: 'search', placeholder: 'Who did it', title: 'A user\'s email, a token name, or system', 'aria-label': 'Who did it', class: 'w-actor' });
+  const since = h('input', { type: 'date', 'aria-label': 'From', title: 'From' });
+  const until = h('input', { type: 'date', 'aria-label': 'To', title: 'To (inclusive)' });
   const feed = h('div', { class: 'card flush' });
-  append(root, pageHead('Activity', 'Everything that happened across the fleet'), feed);
-  async function refresh() { replace(feed, eventFeed(await api('GET', '/api/v1/events?limit=200'))); }
+  const more = h('button', { class: 'btn hidden', onclick: () => guard(loadMore) }, 'Load more');
+  const count = h('span', {});
+  const fields = [[search, 'q'], [typeSel, 'type'], [actor, 'actor'], [since, 'since'], [until, 'until']];
+  const params = new URLSearchParams(query || '');
+  for (const [el, key] of fields) el.value = params.get(key) || '';
+  const pendingType = params.get('type') || '';
+  const filterQuery = () => {
+    const p = new URLSearchParams();
+    for (const [el, key] of fields) if (el.value.trim()) p.set(key, el.value.trim());
+    return p;
+  };
+  const syncURL = () => {
+    const p = filterQuery().toString();
+    const hash = '#/activity' + (p ? '?' + p : '');
+    if (location.hash !== hash) history.replaceState(null, '', hash);
+  };
+  const apiQuery = extra => {
+    const p = filterQuery();
+    p.set('tz', Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+    for (const [k, v] of Object.entries(extra)) p.set(k, v);
+    return p.toString();
+  };
+  const exportCSV = () => guard(() => downloadFile('/api/v1/events?' + apiQuery({ format: 'csv' }), 'activity.csv'));
+  append(root, pageHead('Activity', count, h('button', { class: 'btn', onclick: exportCSV, title: 'Everything matching these filters, as a spreadsheet (up to 50,000 entries)' }, 'Export CSV')),
+    h('div', { class: 'toolbar mb' }, search, typeSel, actor, h('label', { class: 'date-range muted' }, 'From', since), h('label', { class: 'date-range muted' }, 'to', until),
+      h('button', { class: 'btn ghost', onclick: () => { for (const [el] of fields) el.value = ''; changed(); } }, 'Clear')),
+    feed, h('div', { class: 'btn-row mt' }, more));
+
+  let events = [], names = {}, exhausted = false, seq = 0;
+  const render = () => {
+    const filtered = [...filterQuery().keys()].length > 0;
+    replace(feed, eventFeed(events, names, filtered ? 'Nothing matches these filters.' : 'No activity yet.'));
+    replace(count, filtered ? `${events.length}${exhausted ? '' : '+'} matching` : 'Everything that happened across the fleet');
+    more.classList.toggle('hidden', exhausted);
+  };
+  async function load(limit) {
+    const my = ++seq;
+    const evs = await api('GET', '/api/v1/events?' + apiQuery({ limit: String(limit) }));
+    if (my !== seq) return; // a newer query won
+    events = evs;
+    exhausted = evs.length < limit;
+    render();
+  }
+  async function loadMore() {
+    if (!events.length) return;
+    const my = seq;
+    const evs = await api('GET', '/api/v1/events?' + apiQuery({ limit: String(PAGE), before_id: String(events[events.length - 1].id) }));
+    if (my !== seq) return;
+    events = events.concat(evs);
+    exhausted = evs.length < PAGE;
+    render();
+  }
+  let timer;
+  const changed = () => { syncURL(); clearTimeout(timer); timer = setTimeout(() => guard(() => load(PAGE)), 250); };
+  for (const [el] of fields) el.addEventListener(el.tagName === 'SELECT' || el.type === 'date' ? 'change' : 'input', changed);
+
+  const [types, devs] = await Promise.all([api('GET', '/api/v1/events/types').catch(() => []), api('GET', '/api/v1/devices?lifecycle=all').catch(() => [])]);
+  names = Object.fromEntries(devs.map(d => [d.id, d.name]));
+  // Group types by prefix: "Devices (all)" then each type.
+  const groups = {};
+  for (const t of types) (groups[t.split('.')[0]] ||= []).push(t);
+  for (const [g, ts] of Object.entries(groups).sort()) {
+    typeSel.append(h('optgroup', { label: g }, ts.length > 1 ? h('option', { value: g + '.*' }, `${g}: all`) : null, ts.map(t => h('option', { value: t }, t))));
+  }
+  if (pendingType && ![...typeSel.options].some(o => o.value === pendingType)) typeSel.append(h('option', { value: pendingType }, pendingType));
+  typeSel.value = pendingType;
+  // Auto-refresh keeps however many entries are loaded.
+  const refresh = () => load(Math.min(1000, Math.max(PAGE, events.length)));
   await guard(refresh);
   return refresh;
 }

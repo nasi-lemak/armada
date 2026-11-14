@@ -386,3 +386,5 @@ table.data-table td, table.data-table th { padding: 4px 12px; font-size: 12px; }
 .palette-sub { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-empty { padding: 12px 10px; }
 .palette-hint { font-size: 12px; padding: 8px 16px; border-top: 1px solid var(--border); }
+.toolbar .date-range { display: inline-flex; flex-direction: row; align-items: center; font-weight: 500; gap: 6px; margin: 0; font-size: 13px; }
+.toolbar .w-actor { width: 160px; }

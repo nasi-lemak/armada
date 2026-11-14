@@ -1228,42 +1228,6 @@ func (s *Server) evaluateDeployment(ctx context.Context, d *api.Deployment, now 
 
 // ---- events ----
 
-func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit <= 0 || limit > 1000 {
-		limit = 100
-	}
-	p := principalFrom(r.Context())
-	fetch := limit
-	if p.scoped() {
-		fetch = limit * 10 // filtered below
-	}
-	evs, err := s.store.ListEvents(r.Context(), q.Get("device_id"), q.Get("deployment_id"), fetch)
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-	if p.scoped() {
-		visible, err := s.visibleDeviceIDs(r.Context(), p)
-		if err != nil {
-			s.internalError(w, err)
-			return
-		}
-		kept := evs[:0]
-		for _, e := range evs {
-			if visible[e.DeviceID] && len(kept) < limit {
-				kept = append(kept, e)
-			}
-		}
-		evs = kept
-	}
-	if evs == nil {
-		evs = []*api.Event{}
-	}
-	writeJSON(w, http.StatusOK, evs)
-}
-
 // event records an activity-log entry and triggers event-based alerts.
 func (s *Server) event(ctx context.Context, typ, deviceID, deploymentID, msg string) {
 	s.logEvent(ctx, typ, deviceID, deploymentID, msg)
