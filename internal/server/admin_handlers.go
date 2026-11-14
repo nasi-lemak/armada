@@ -252,6 +252,16 @@ type patchDeviceRequest struct {
 	Inventory *api.Inventory `json:"inventory"`
 }
 
+// cleanInventory trims inventory fields and checks their lengths.
+func cleanInventory(inv *api.Inventory) error {
+	inv.AssetTag, inv.Location, inv.Contact, inv.Notes = strings.TrimSpace(inv.AssetTag), strings.TrimSpace(inv.Location),
+		strings.TrimSpace(inv.Contact), strings.TrimSpace(inv.Notes)
+	if len(inv.AssetTag) > 64 || len(inv.Location) > 200 || len(inv.Contact) > 200 || len(inv.Notes) > 4000 {
+		return errors.New("asset tag is limited to 64 characters, location and contact to 200, notes to 4000")
+	}
+	return nil
+}
+
 var labelKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,62}$`)
 
 func validLabels(m map[string]string) error {
@@ -290,10 +300,8 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Inventory != nil {
 		inv := *req.Inventory
-		inv.AssetTag, inv.Location, inv.Contact, inv.Notes = strings.TrimSpace(inv.AssetTag), strings.TrimSpace(inv.Location),
-			strings.TrimSpace(inv.Contact), strings.TrimSpace(inv.Notes)
-		if len(inv.AssetTag) > 64 || len(inv.Location) > 200 || len(inv.Contact) > 200 || len(inv.Notes) > 4000 {
-			writeError(w, http.StatusBadRequest, "asset tag is limited to 64 characters, location and contact to 200, notes to 4000")
+		if err := cleanInventory(&inv); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if err := s.store.SetDeviceInventory(r.Context(), d.ID, &inv); err != nil {

@@ -25,6 +25,9 @@ async function api(method, path, body) {
   const opts = { method, headers: { Authorization: 'Bearer ' + token } };
   if (body instanceof FormData) {
     opts.body = body;
+  } else if (body instanceof Blob) {
+    opts.headers['Content-Type'] = body.type || 'application/octet-stream';
+    opts.body = body;
   } else if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
@@ -1461,13 +1464,17 @@ async function viewEnroll(root) {
       h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Create token'))),
       h('div', { class: 'mt' }, created)),
     h('div', { class: 'spacer' }), list);
+  const regs = registrationsCard();
+  append(root, h('div', { class: 'spacer' }), regs.el);
 
   if ((ROLE_RANK[me.fleet_role] || 0) < ROLE_RANK.operator) {
     list.classList.add('hidden');
     created.before(h('p', { class: 'muted' }, 'Devices enrolled with these tokens are added to your account automatically.'));
-    return;
+    await guard(regs.refresh);
+    return regs.refresh;
   }
   async function refresh() {
+    await regs.refresh();
     const toks = await api('GET', '/api/v1/tokens');
     const now = Date.now();
     replace(list, table(['Token', 'State', 'Enrolls as', 'Channel', 'Labels', 'Uses', 'Expires', ''],
@@ -1488,6 +1495,71 @@ async function viewEnroll(root) {
   }
   await guard(refresh);
   return refresh;
+}
+
+// registrationsCard: import a CSV that updates enrolled devices and
+// pre-registers the rest by serial number, and list what's waiting.
+const IMPORT_TEMPLATE = 'serial,name,channel,labels,asset_tag,location,contact,notes\n' +
+  'SN-0001,orchard-till-1,stable,site=sg; role=till,ACME-00417,"Orchard store, till 1","Mei, +65 5550 1234",\n';
+function registrationsCard() {
+  const fileIn = h('input', { type: 'file', accept: '.csv,text/csv', 'aria-label': 'CSV file' });
+  const text = h('textarea', { rows: 5, class: 'mono', placeholder: IMPORT_TEMPLATE, 'aria-label': 'CSV' });
+  const report = h('div', {});
+  const list = h('div', {});
+  const applyBtn = h('button', { class: 'btn primary hidden', type: 'button' }, 'Apply');
+  fileIn.addEventListener('change', async () => {
+    const f = fileIn.files[0];
+    if (f) { text.value = await f.text(); replace(report); applyBtn.classList.add('hidden'); }
+  });
+  text.addEventListener('input', () => { replace(report); applyBtn.classList.add('hidden'); });
+  const send = dry => api('POST', '/api/v1/registrations/import' + (dry ? '?dry_run=1' : ''), new Blob([text.value], { type: 'text/csv' }));
+  const ACTION = { updated: ['ok', 'updates device'], registered: ['info', 'pre-registers'], unchanged: ['', 'no change'], error: ['bad', 'error'] };
+  const showReport = res => {
+    const sum = [res.updated && `${res.updated} device${res.updated === 1 ? '' : 's'} updated`, res.registered && `${res.registered} serial${res.registered === 1 ? '' : 's'} pre-registered`,
+      res.errors && `${res.errors} error${res.errors === 1 ? '' : 's'}`].filter(Boolean).join(' · ') || 'nothing to change';
+    replace(report, h('div', { class: res.errors ? 'callout bad-callout stack' : 'callout stack' },
+      h('div', {}, h('strong', {}, res.applied ? 'Imported: ' : res.errors ? 'Nothing was changed: fix these rows first. ' : 'Preview: '), sum),
+      table(['Line', 'Device', 'Result', 'Changes'], res.rows.map(r => h('tr', {},
+        h('td', { class: 'num' }, r.line),
+        h('td', {}, r.device_id ? h('a', { href: '#/devices/' + r.device_id }, r.device) : h('span', { class: 'mono' }, r.serial || '—')),
+        h('td', {}, h('span', { class: 'badge ' + ACTION[r.action][0] }, ACTION[r.action][1])),
+        h('td', { class: r.error ? 'error' : 'muted' }, r.error || (r.changes || []).join(', ') || '—'))))));
+    applyBtn.classList.toggle('hidden', res.applied || !!res.errors || !(res.updated + res.registered));
+  };
+  applyBtn.onclick = async () => {
+    const res = await guard(() => send(false));
+    if (res) { showReport(res); if (res.applied) { text.value = ''; fileIn.value = ''; refresh(); } }
+  };
+  const el = h('div', { class: 'card stack' },
+    h('h2', {}, 'Pre-register and import devices'),
+    h('p', { class: 'muted' }, 'A spreadsheet with one row per device, by serial number (or a ', h('code', {}, 'device'), ' column with its ID or name). ',
+      'Rows for enrolled devices update them now. Other serials wait: a device that enrolls with that serial gets its name, channel, labels and inventory. ',
+      'The enrollment token\'s labels still win. Empty cells change nothing. Labels go in one ', h('code', {}, 'labels'), ' column (', h('code', {}, 'site=sg; role=till'),
+      ') or in columns named ', h('code', {}, 'label:site'), '.'),
+    h('div', { class: 'btn-row' }, fileIn, h('button', { class: 'btn ghost small', type: 'button', onclick: () => saveText('armada-import-template.csv', IMPORT_TEMPLATE, 'text/csv') }, 'Download template')),
+    text,
+    h('div', { class: 'btn-row' }, h('button', { class: 'btn', type: 'button', onclick: async () => {
+      if (!text.value.trim()) return toast('Choose a CSV file or paste one', true);
+      const res = await guard(() => send(true));
+      if (res) showReport(res);
+    } }, 'Preview'), applyBtn),
+    report,
+    h('h2', { class: 'mt' }, 'Pre-registered serials'), list);
+  async function refresh() {
+    const rs = await api('GET', '/api/v1/registrations');
+    replace(list, table(['Serial', 'Name', 'Channel', 'Labels', 'Inventory', 'Status', ''], rs.map(r => h('tr', {},
+      h('td', { class: 'mono' }, r.serial),
+      h('td', {}, r.name || h('span', { class: 'muted' }, '—')),
+      h('td', {}, r.channel || h('span', { class: 'muted' }, 'from token')),
+      h('td', {}, labelChips(r.labels)),
+      h('td', { class: 'muted' }, r.inventory ? [r.inventory.asset_tag, r.inventory.location].filter(Boolean).join(' · ') : '—'),
+      h('td', {}, r.claimed_by ? ['used by ', h('a', { href: '#/devices/' + r.claimed_by }, 'device'), ' ', h('span', { class: 'muted' }, ago(r.claimed_at))]
+        : h('span', { class: 'badge info' }, 'waiting')),
+      h('td', {}, h('button', { class: 'btn small ghost', onclick: async () => {
+        if (await guard(() => api('DELETE', '/api/v1/registrations/' + encodeURIComponent(r.serial)), 'Removed') !== undefined) refresh();
+      } }, 'Remove')))), 'No serials are pre-registered.'));
+  }
+  return { el, refresh };
 }
 
 // ---------- certificates ----------

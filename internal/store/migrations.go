@@ -91,6 +91,13 @@ CREATE TABLE IF NOT EXISTS cert_policies (
 	{Version: 10, Name: "device inventory", SQL: `
 ALTER TABLE devices ADD COLUMN inventory TEXT NOT NULL DEFAULT '';
 `},
+	{Version: 11, Name: "device pre-registrations", SQL: `
+CREATE TABLE IF NOT EXISTS registrations (
+	id TEXT PRIMARY KEY,
+	spec TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+`},
 	// Append new migrations here.
 }
 

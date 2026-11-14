@@ -28,10 +28,10 @@ async function seed() {
     // Stock devices enroll through a spare token.
     const tok = await api('POST', '/api/v1/tokens', customer === 'stock' ? { lifecycle: 'spare', description: 'warehouse' } : { labels: { customer } });
     const res = await fetch(base + '/api/v1/agent/enroll', { method: 'POST', body: JSON.stringify({
-      token: tok.token, name: customer + '-kiosk', info: { os: 'linux', arch: 'arm64', hostname: customer } }) });
+      token: tok.token, name: customer + '-kiosk', info: { os: 'linux', arch: 'arm64', hostname: customer, serial: 'SN-' + customer.toUpperCase() } }) });
     const er = await res.json();
     await fetch(base + '/api/v1/agent/heartbeat', { method: 'POST', headers: { Authorization: 'Bearer ' + er.device_key },
-      body: JSON.stringify({ info: { os: 'linux', arch: 'arm64' }, packages: { myapp: '1.0.0' }, health: [], config: [] }) });
+      body: JSON.stringify({ info: { os: 'linux', arch: 'arm64', serial: 'SN-' + customer.toUpperCase() }, packages: { myapp: '1.0.0' }, health: [], config: [] }) });
     ids[customer] = er.device_id;
     keys[customer] = er.device_key;
   }
@@ -175,6 +175,23 @@ async function visit(page, who, hash, expectHeading) {
   const narrowed = await admin.$$eval('.feed li', els => els.length);
   if (narrowed < 1 || narrowed >= kinds.length) fail(`activity search: ${narrowed} of ${kinds.length}`);
   if (!admin.url().includes('q=globex')) fail('activity filters are not kept in the address');
+
+  // Import: preview, then apply, a CSV that renames an enrolled device by
+  // serial and pre-registers a new serial.
+  await visit(admin, 'admin', '#/enroll', 'Enrollment');
+  const serial = (await api('GET', '/api/v1/devices/' + ids.globex)).device.info.serial;
+  if (serial) {
+    await admin.fill('textarea[aria-label="CSV"]', `serial,location,labels\n${serial},Lobby,floor=1\nSMOKE-NEW-1,Warehouse,site=sg\n`);
+    await admin.click('#view button:has-text("Preview")');
+    await admin.waitForSelector('#view .callout:has-text("Preview")', { timeout: 5000 }).catch(() => fail('import preview did not show'));
+    await admin.click('#view button:has-text("Apply")');
+    await admin.waitForSelector('#view .callout:has-text("Imported")', { timeout: 5000 }).catch(() => fail('import did not apply'));
+    const g = (await api('GET', '/api/v1/devices/' + ids.globex)).device;
+    if (!g.inventory || g.inventory.location !== 'Lobby' || g.labels.floor !== '1') fail(`import did not update the device: ${JSON.stringify(g.inventory)}`);
+    await admin.waitForSelector('#view td:has-text("SMOKE-NEW-1")', { timeout: 5000 }).catch(() => fail('pre-registered serial not listed'));
+  } else {
+    fail('smoke devices report no serial number');
+  }
 
   // Client account: only its customer's devices, no fleet pages.
   const client = await browser.newPage({ viewport: { width: 1280, height: 900 } });

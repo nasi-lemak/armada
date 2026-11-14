@@ -1653,3 +1653,46 @@ type Timeline struct {
 	Entries []TimelineEntry `json:"entries"`
 	Next    string          `json:"next,omitempty"`
 }
+
+// Registration pre-registers a device by its hardware serial number: when
+// a device reporting that serial enrolls, it takes this name, channel,
+// labels and inventory. The enrollment token's labels win over the
+// registration's, so a registration can't move a device out of the client
+// its token enrolls it for.
+type Registration struct {
+	Serial    string            `json:"serial"`
+	Name      string            `json:"name,omitempty"`
+	Channel   string            `json:"channel,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
+	Inventory *Inventory        `json:"inventory,omitempty"`
+	// ClientScope is set when a client account made it: it only applies
+	// to devices that enroll into that client's devices.
+	ClientScope Selector   `json:"client_scope"`
+	CreatedBy   string     `json:"created_by,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ClaimedBy   string     `json:"claimed_by,omitempty"` // the device that enrolled with it
+	ClaimedAt   *time.Time `json:"claimed_at,omitempty"`
+}
+
+// ImportResult reports what an import did (or, in a dry run, would do).
+type ImportResult struct {
+	DryRun  bool        `json:"dry_run"`
+	Applied bool        `json:"applied"` // false when any row has an error: nothing changed
+	Updated int         `json:"updated"`
+	Created int         `json:"registered"`
+	Errors  int         `json:"errors"`
+	Rows    []ImportRow `json:"rows"`
+}
+
+// ImportRow is the outcome for one line of an import.
+type ImportRow struct {
+	Line     int    `json:"line"`
+	Serial   string `json:"serial,omitempty"`
+	DeviceID string `json:"device_id,omitempty"`
+	Device   string `json:"device,omitempty"` // its name
+	// Action is updated (an enrolled device), registered (waiting for the
+	// device to enroll), unchanged, or error.
+	Action  string   `json:"action"`
+	Changes []string `json:"changes,omitempty"`
+	Error   string   `json:"error,omitempty"`
+}

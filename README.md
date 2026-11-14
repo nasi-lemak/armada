@@ -753,6 +753,43 @@ client's.
 armadactl devices set <id> --asset-tag ACME-00417 --location "Orchard store, till 3" --contact "Mei, +65 5550 1234"
 ```
 
+### Pre-registration and bulk import
+
+Name and label devices from a spreadsheet, before or after they enroll. Use **Enrollment → Pre-register
+and import devices**, or `armadactl import devices.csv`.
+
+```csv
+serial,name,channel,labels,asset_tag,location,contact,notes
+SN-0001,orchard-till-1,stable,site=sg; role=till,ACME-00417,"Orchard store, till 1","Mei, +65 5550 1234",
+```
+
+- **Rows for enrolled devices** update them now. A row finds its device by `serial`, or by a
+  `device` column holding its ID or name.
+- **Other serials are pre-registered:**
+  - when a device reporting that serial enrolls, it takes the name, channel, labels and inventory;
+  - each registration is used once;
+  - serials match regardless of case and surrounding spaces.
+- **Empty cells change nothing.** Labels go in a `labels` column (`site=sg; role=till`) or in columns
+  named `label:site`.
+- **Preview first:** a dry run (`--dry-run`) shows what each row would do. If any row has an error,
+  nothing is changed.
+- **The enrollment token still decides the client:**
+  - its labels win over a registration's, so a registration can't move a device to another customer;
+  - a registration's channel replaces the token's.
+- **Client accounts:**
+  - their operators can import for their own devices;
+  - their registrations only apply to devices that enroll into that client;
+  - another client's devices are invisible to their imports.
+- **Audit:** the activity log records each device an import changed (`device.imported`) and each
+  import (`registration.import`). A device's enrollment entry notes when it used a pre-registration.
+
+```bash
+armadactl import devices.csv --dry-run
+armadactl import devices.csv
+armadactl registrations list
+armadactl registrations delete SN-0001
+```
+
 ## Device lifecycle
 
 Every device has a lifecycle state, shown as a badge in the device list and on its page:
@@ -1638,6 +1675,7 @@ endpoints use the per-device key issued at enrollment.
 | `POST /api/v1/deployments/{id}/{approve,pause,resume,advance,retry,complete,abort}` | Control a rollout (`approve`: someone other than its creator) |
 | `GET /api/v1/events` | Activity log. Filters: `type` (comma list; `prefix.*`), `actor` (`system` for none), `q`, `since`/`until` (date or RFC 3339; dates use `tz`), `device_id`, `deployment_id`. Paging: `limit` (up to 1000), `before_id`. `format=csv` exports up to 50,000 entries |
 | `GET /api/v1/events/types` | Event types recorded, for filter menus |
+| `GET /api/v1/registrations`, `POST /api/v1/registrations/import` (CSV body; `dry_run=1`), `DELETE /api/v1/registrations/{serial}` | Pre-registration and bulk import |
 | `GET /api/v1/devices/{id}/timeline` | A device's timeline. `kinds` (alert, update, action, lifecycle, cert, health, config, maintenance, other), `limit` (up to 200), `cursor` (the previous page's `next`) |
 | `GET /api/v1/signing-key` | Release-signing public key |
 | `POST /api/v1/agent/enroll`, `/heartbeat`, `/updates`, `/actions/{id}/result`, `GET /api/v1/agent/releases/{id}/artifact`, `GET /api/v1/agent/wait`, `GET /api/v1/agent/releases/{id}/chunks` | Agent protocol (`wait` is the push long-poll; `chunks` the delta-update index) |

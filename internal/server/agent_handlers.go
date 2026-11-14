@@ -47,7 +47,16 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		LastSeenAt:  now,
 		Attestation: att,
 	}
-	err = s.store.Enroll(r.Context(), hashSecret(req.Token), dev, hashSecret(key), hwKey, now)
+	var claimed *api.Registration
+	err = s.store.Enroll(r.Context(), hashSecret(req.Token), dev, hashSecret(key), hwKey, now, store.EnrollOptions{
+		ApplyRegistration: func(reg *api.Registration, d *api.Device) bool {
+			if applyRegistration(reg, d) {
+				claimed = reg
+				return true
+			}
+			return false
+		},
+	})
 	if errors.Is(err, store.ErrTokenInvalid) {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
@@ -65,6 +74,9 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 	if dev.Lifecycle == api.LifecycleSpare {
 		msg += ", as a spare"
+	}
+	if claimed != nil {
+		msg += ", set up from the pre-registration of serial " + claimed.Serial
 	}
 	s.event(r.Context(), "device.enrolled", dev.ID, "", msg)
 	writeJSON(w, http.StatusOK, api.EnrollResponse{

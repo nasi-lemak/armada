@@ -502,7 +502,43 @@ var ErrTokenInvalid = errors.New("enrollment token is invalid, expired, revoked 
 // Enroll atomically consumes an enrollment token and creates the device.
 // The device's channel and labels default to the token's.
 // hwKey is the base64 PKIX public key of an attested hardware key, or "".
-func (s *Store) Enroll(ctx context.Context, tokenHash string, d *api.Device, keyHash, hwKey string, now time.Time) error {
+// RegistrationID is how a serial number is stored and looked up.
+func RegistrationID(serial string) string { return strings.ToUpper(strings.TrimSpace(serial)) }
+
+// PutRegistration creates or replaces a pre-registration.
+func (s *Store) PutRegistration(ctx context.Context, r *api.Registration) error {
+	return s.putDoc(ctx, "registrations", RegistrationID(r.Serial), r.CreatedAt, r)
+}
+
+// GetRegistration returns the pre-registration for a serial number.
+func (s *Store) GetRegistration(ctx context.Context, serial string) (*api.Registration, error) {
+	var r api.Registration
+	if err := s.getDoc(ctx, "registrations", RegistrationID(serial), &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// ListRegistrations returns every pre-registration, oldest first.
+func (s *Store) ListRegistrations(ctx context.Context) ([]*api.Registration, error) {
+	return listDocs[api.Registration](ctx, s, "registrations")
+}
+
+// DeleteRegistration removes a pre-registration.
+func (s *Store) DeleteRegistration(ctx context.Context, serial string) error {
+	return s.deleteDoc(ctx, "registrations", RegistrationID(serial))
+}
+
+// EnrollOptions adjusts an enrollment.
+type EnrollOptions struct {
+	// ApplyRegistration, if set, is offered the unclaimed pre-registration
+	// matching the device's serial (after the token's channel and labels
+	// are applied). If it returns true the registration is claimed, in the
+	// same transaction, so each is used once.
+	ApplyRegistration func(*api.Registration, *api.Device) bool
+}
+
+func (s *Store) Enroll(ctx context.Context, tokenHash string, d *api.Device, keyHash, hwKey string, now time.Time, opts ...EnrollOptions) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -542,6 +578,29 @@ func (s *Store) Enroll(ctx context.Context, tokenHash string, d *api.Device, key
 		d.Lifecycle = api.LifecycleSpare
 		d.LifecycleInfo = &api.LifecycleInfo{Note: "enrolled as a spare", ChangedAt: now, ChangedBy: by}
 		lifeInfo = mustJSON(d.LifecycleInfo)
+	}
+	for _, o := range opts {
+		if o.ApplyRegistration == nil || RegistrationID(d.Info.Serial) == "" {
+			continue
+		}
+		var spec string
+		err := tx.QueryRowContext(ctx, `SELECT spec FROM registrations WHERE id=?`, RegistrationID(d.Info.Serial)).Scan(&spec)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		var reg api.Registration
+		if err := json.Unmarshal([]byte(spec), &reg); err != nil {
+			return err
+		}
+		if reg.ClaimedBy != "" || !o.ApplyRegistration(&reg, d) {
+			continue
+		}
+		reg.ClaimedBy, reg.ClaimedAt = d.ID, &now
+		if _, err := tx.ExecContext(ctx, `UPDATE registrations SET spec=? WHERE id=?`, mustJSON(&reg), RegistrationID(reg.Serial)); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash, hw_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		d.ID, d.Name, d.Channel, mustJSON(d.Labels), mustJSON(d.Info), mustJSON(d.Metrics), mustJSON(d.Packages),

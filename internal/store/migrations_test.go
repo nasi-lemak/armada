@@ -200,6 +200,7 @@ func TestMigrationsAreFrozen(t *testing.T) {
 		"8 device certificates 929cea2a3748",
 		"9 certificate renewal policies 8a75ec1dde82",
 		"10 device inventory 69ba2dba18e0",
+		"11 device pre-registrations 229fa22fefea",
 	}
 	var got []string
 	for i, m := range migrations {

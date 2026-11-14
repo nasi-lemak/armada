@@ -135,6 +135,10 @@ Customer reports:
   report schedules send|delete <id>
 
 Maintenance (alerts held and updates paused for the covered devices):
+  import FILE.csv [--dry-run] [--client K=V]   update enrolled devices and pre-register serials from a CSV
+                                             (columns: serial or device, name, channel, labels, label:KEY,
+                                             asset_tag, location, contact, notes; "-" reads stdin)
+  registrations list | registrations delete SERIAL
   maintenance list [--all]
   maintenance start --device ID|--label K=V|--channel C --for 2h [--note N] [--name N]
                     [--alerts-only|--updates-only] [--client K=V]...
@@ -257,6 +261,11 @@ func (c *cli) run(args []string) error {
 		return c.alerts(append([]string{verb}, rest...))
 	case "maintenance", "maint":
 		return c.maintenance(verb, rest)
+	case "registrations", "registration", "import":
+		if noun == "import" { // armadactl import FILE
+			return c.registrations("import", append([]string{verb}, rest...))
+		}
+		return c.registrations(verb, rest)
 	case "bulk":
 		return c.bulk(verb, rest)
 	case "report", "reports":
