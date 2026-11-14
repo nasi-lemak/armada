@@ -1686,6 +1686,10 @@ func (c *cli) backup(args []string) error {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("backup failed: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
+	if *out == "-" { // to stdout, e.g. to encrypt it on the way: armadactl backup -o - | age …
+		_, err := io.Copy(os.Stdout, resp.Body)
+		return err
+	}
 	f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -58,6 +59,8 @@ func run() error {
 		stages      = flag.String("default-stages", env("ARMADA_DEFAULT_STAGES", "5,25,50,100"), "default rollout stages, cumulative percentages")
 		showVersion = flag.Bool("version", false, "print version and exit")
 		migStatus   = flag.Bool("migrate-status", false, "print the database schema version and pending migrations, change nothing, and exit")
+		restoreFrom = flag.String("restore", "", "restore a backup (.tar.gz, or - for stdin) into -data-dir, which must be new or empty, check it, and exit")
+		verifyFile  = flag.String("verify-backup", "", "check that a backup (.tar.gz, or - for stdin) restores and runs, without changing anything, and exit")
 		maxArtifact = flag.Int64("max-artifact-mb", 2048, "maximum release artifact size in MiB")
 		jsonLogs    = flag.Bool("json-logs", os.Getenv("ARMADA_JSON_LOGS") != "", "log as JSON (ARMADA_JSON_LOGS)")
 	)
@@ -67,6 +70,7 @@ func run() error {
 	flag.DurationVar(&cfg.EngineInterval, "engine-interval", envDur("ARMADA_ENGINE_INTERVAL", cfg.EngineInterval), "how often rollouts are evaluated")
 	flag.DurationVar(&cfg.HistoryResolution, "history-resolution", envDur("ARMADA_HISTORY_RESOLUTION", cfg.HistoryResolution), "how often health history is sampled per check (0 disables history)")
 	flag.DurationVar(&cfg.HistoryRawRetention, "history-raw-retention", envDur("ARMADA_HISTORY_RAW_RETENTION", cfg.HistoryRawRetention), "keep full-resolution history this long; older history is kept hourly")
+	flag.DurationVar(&cfg.EventRetention, "event-retention", envDur("ARMADA_EVENT_RETENTION", cfg.EventRetention), "keep the activity log this long (e.g. 8760h for a year)")
 	flag.DurationVar(&cfg.HistoryRetention, "history-retention", envDur("ARMADA_HISTORY_RETENTION", cfg.HistoryRetention), "keep hourly history this long")
 	flag.DurationVar(&cfg.PushHold, "push-hold", envDur("ARMADA_PUSH_HOLD", cfg.PushHold), "how long agents' long-poll connections are held open, so actions reach them instantly (0 disables; keep below proxy idle timeouts)")
 	flag.DurationVar(&cfg.SessionTTL, "session-ttl", envDur("ARMADA_SESSION_TTL", cfg.SessionTTL), "sign users out of the dashboard after this long without activity")
@@ -153,6 +157,10 @@ func run() error {
 	cfg.Android.RequireVerifiedBoot = !*allowUnverified
 	cfg.Android.RequireAttestation = !*allowNoAttest
 	cfg.Android.DisableDebugging = !*allowADB
+
+	if *restoreFrom != "" || *verifyFile != "" {
+		return restoreOrVerify(*restoreFrom, *verifyFile, cfg.DataDir)
+	}
 
 	if *migStatus {
 		path := filepath.Join(cfg.DataDir, "armada.db")
@@ -315,4 +323,35 @@ func resolveAdminToken(flagVal, dataDir string, log *slog.Logger) (string, error
 	log.Info("generated admin token; use it to sign in to the dashboard and CLI", "file", path)
 	fmt.Fprintf(os.Stderr, "\n  Admin token: %s\n\n", tok)
 	return tok, nil
+}
+
+// restoreOrVerify handles -restore and -verify-backup.
+func restoreOrVerify(restoreFrom, verifyFile, dataDir string) error {
+	if restoreFrom != "" && verifyFile != "" {
+		return errors.New("use -restore or -verify-backup, not both")
+	}
+	name := restoreFrom + verifyFile
+	var in io.Reader = os.Stdin
+	if name != "-" {
+		f, err := os.Open(name)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		in = f
+	}
+	if verifyFile != "" {
+		info, err := server.VerifyBackup(in, "")
+		if err != nil {
+			return fmt.Errorf("backup check failed: %w", err)
+		}
+		fmt.Println("backup OK:", info)
+		return nil
+	}
+	info, err := server.RestoreBackup(in, dataDir)
+	if err != nil {
+		return fmt.Errorf("restore failed: %w", err)
+	}
+	fmt.Printf("restored into %s: %s\nStart the server with -data-dir %s. Devices keep their keys and reconnect by themselves.\n", dataDir, info, dataDir)
+	return nil
 }

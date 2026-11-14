@@ -1500,6 +1500,7 @@ Add `--json` to any command for machine-readable output.
 | `-max-artifact-mb` | | `2048` |
 | `-history-resolution` | `ARMADA_HISTORY_RESOLUTION` | `5m` (0 disables history) |
 | `-history-raw-retention` | `ARMADA_HISTORY_RAW_RETENTION` | `72h` |
+| `-event-retention` | `ARMADA_EVENT_RETENTION` | `720h` (30 days of activity log; `8760h` for a year) |
 | `-history-retention` | `ARMADA_HISTORY_RETENTION` | `2160h` (90 days) |
 | `-session-ttl` | `ARMADA_SESSION_TTL` | `12h` (dashboard sign-in, sliding) |
 | `-rollout-approval` | `ARMADA_ROLLOUT_APPROVAL` | `second-person` (or `off`) |
@@ -1526,10 +1527,18 @@ armadactl backup -o /backups/armada-$(date +%F).tar.gz
 ```
 
 The backup is a consistent snapshot taken while the server runs. It contains the database, the signing
-keys and every artifact. It holds private keys, so store it like a password. To restore, stop the
-server, extract the archive into an empty data directory, and start the server with the same admin
-token. Losing `signing.key` means agents that pinned the old key
-reject new releases.
+keys and every artifact. It holds private keys, so store it like a password.
+
+- **Check a backup:** `armada-server -verify-backup FILE` restores it in a temporary directory and
+  checks it, changing nothing. Run it on every nightly backup.
+- **Restore:** stop the server, then run `armada-server -data-dir NEW_DIR -restore FILE`. It refuses
+  a directory that isn't empty, checks the result, and removes it again if the check fails. Then
+  start the server on `NEW_DIR`.
+- **`signing.key`:** every agent remembers this key from enrollment, so losing it means every device
+  rejects new releases until it's enrolled again. Keep an extra copy offline.
+
+See the [operations runbook](docs/operations.md) for backups from cron, restoring with systemd or
+Docker, upgrades, access and incidents.
 
 **Upgrading.** Replace the binary and restart. On start, the server brings the database schema up to
 date:
