@@ -50,7 +50,22 @@ job_go() {
 		# Like CI, this tidies go.mod/go.sum and fails if that changed them
 		# (locally the tidied files are left for you to commit).
 		group "go mod tidy"
-		go mod tidy && git diff --exit-code go.mod go.sum || { fail "go.mod/go.sum are not tidy (run go mod tidy)"; rc=1; }
+		# Compare with the files as they were (not with the last commit), so
+		# uncommitted dependency changes don't count as untidy.
+		local before
+		before=$(mktemp -d)
+		cp go.mod go.sum "$before/"
+		if go mod tidy; then
+			if ! cmp -s go.mod "$before/go.mod" || ! cmp -s go.sum "$before/go.sum"; then
+				diff -u "$before/go.mod" go.mod
+				diff -u "$before/go.sum" go.sum | head -40
+				fail "go.mod/go.sum were not tidy (go mod tidy has fixed them; commit the result)"
+				rc=1
+			fi
+		else
+			rc=1
+		fi
+		rm -rf "$before"
 		endgroup
 	fi
 
