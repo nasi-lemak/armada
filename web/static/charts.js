@@ -161,6 +161,7 @@ const Charts = (() => {
       svg.append(tx);
     }
     const maxGap = (opts.resolution || 300) * 2.5;
+    const endLabels = [];
     for (const s of opts.series) {
       for (const run of runs(s.points, maxGap)) {
         // Min–max band for hourly roll-ups, or a light wash under a single series.
@@ -184,10 +185,22 @@ const Charts = (() => {
       const last = [...s.points].reverse().find(p => p.v !== null && p.v !== undefined);
       if (last && opts.endLabels) {
         svg.append(svgEl('circle', { cx: x(last.t), cy: y(last.v), r: 4, class: 'viz-end ' + s.cls }));
-        const tx = svgEl('text', { x: x(last.t) + 8, y: y(last.v) + 4, class: 'viz-end-label' });
-        tx.textContent = `${s.label || s.name} ${fmtNum(last.v)}`;
-        svg.append(tx);
+        endLabels.push({ x: x(last.t) + 8, y: y(last.v) + 4, text: `${s.label || s.name} ${fmtNum(last.v)}` });
       }
+    }
+    // Spread end labels apart so equal or close values don't overprint.
+    endLabels.sort((a, b) => a.y - b.y);
+    const gap = 14;
+    for (let i = 1; i < endLabels.length; i++) endLabels[i].y = Math.max(endLabels[i].y, endLabels[i - 1].y + gap);
+    const bottom = pad.t + plotH + 4;
+    for (let i = endLabels.length - 1; i >= 0; i--) {
+      const limit = i === endLabels.length - 1 ? bottom : endLabels[i + 1].y - gap;
+      endLabels[i].y = Math.min(endLabels[i].y, limit);
+    }
+    for (const l of endLabels) {
+      const tx = svgEl('text', { x: l.x, y: l.y, class: 'viz-end-label' });
+      tx.textContent = l.text;
+      svg.append(tx);
     }
 
     // Crosshair + tooltip, snapping to the nearest sample time.

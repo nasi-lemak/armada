@@ -136,6 +136,15 @@ async function visit(page, who, hash, expectHeading) {
     }
   }
 
+  // Quick search: Ctrl+K, type, Enter.
+  await visit(admin, 'admin', '#/', 'Fleet overview');
+  await admin.keyboard.press('Control+k');
+  await admin.fill('.palette input', 'globex');
+  await admin.waitForSelector('.palette-item.active:has-text("globex-kiosk")', { timeout: 5000 }).catch(() => fail('search found nothing'));
+  await admin.keyboard.press('Enter');
+  await admin.waitForTimeout(700);
+  if (!(await admin.textContent('h1')).includes('globex-kiosk')) fail('search result did not open the device');
+
   // Inventory: the admin records an asset tag on the device page.
   await visit(admin, 'admin', '#/devices/' + ids.acme, 'acme-kiosk');
   await admin.fill('input[aria-label="Asset tag"]', 'ACME-00417');

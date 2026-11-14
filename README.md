@@ -730,6 +730,13 @@ client's.
 - **Device list:** **Export CSV** saves the devices shown, with their inventory, as a spreadsheet
   (`armadactl devices list --csv`). The list's filters are kept in the address
   (`#/devices?q=acme&status=offline`), so a view can be bookmarked or sent to a colleague.
+- **Quick search:** press **Ctrl+K** (⌘K on a Mac) or **/** anywhere in the dashboard, or click the
+  magnifier.
+  - It finds devices by name, serial, asset tag, IP, hostname, location, label or ID.
+  - It also finds releases, rollouts, users and dashboard pages.
+  - It only shows what your account can see: client accounts get their own devices, and users show
+    for admins only.
+  - The API is `GET /api/v1/search?q=…`.
 
 ```bash
 armadactl devices set <id> --asset-tag ACME-00417 --location "Orchard store, till 3" --contact "Mei, +65 5550 1234"

@@ -1620,3 +1620,12 @@ type ServerCertStatus struct {
 	// Error explains a certificate devices may not trust, or a failed check.
 	Error string `json:"error,omitempty"`
 }
+
+// SearchResult is one hit of the quick search.
+type SearchResult struct {
+	Kind     string `json:"kind"` // device | release | rollout | user
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Subtitle string `json:"subtitle,omitempty"`
+	Link     string `json:"link"` // dashboard route
+}

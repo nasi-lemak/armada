@@ -442,6 +442,7 @@ func (s *Server) Handler() http.Handler {
 	viewer(scopedOK, "DELETE /api/v1/me/tokens/{id}", s.handleDeleteMyToken)
 
 	viewer(scopedOK, "GET /api/v1/summary", s.handleSummary)
+	viewer(scopedOK, "GET /api/v1/search", s.handleSearch)
 	viewer(scopedOK, "GET /api/v1/devices", s.handleListDevices)
 	viewer(scopedOK, "GET /api/v1/devices/{id}", s.handleGetDevice)
 	viewer(scopedOK, "GET /api/v1/devices/{id}/history", s.handleDeviceHistory)
