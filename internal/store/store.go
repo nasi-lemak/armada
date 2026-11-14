@@ -1118,12 +1118,45 @@ func (s *Store) CompleteAction(ctx context.Context, id, deviceID string, r api.A
 
 // AddEvent appends to the activity log.
 func (s *Store) AddEvent(ctx context.Context, e api.Event) error {
+	return s.RecordEvent(ctx, &e)
+}
+
+// RecordEvent adds an activity-log entry and sets its ID (and time, if unset).
+func (s *Store) RecordEvent(ctx context.Context, e *api.Event) error {
 	if e.Time.IsZero() {
 		e.Time = time.Now()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO events (time, type, device_id, deployment_id, message, actor) VALUES (?,?,?,?,?,?)`,
+	res, err := s.db.ExecContext(ctx, `INSERT INTO events (time, type, device_id, deployment_id, message, actor) VALUES (?,?,?,?,?,?)`,
 		ts(e.Time), e.Type, e.DeviceID, e.DeploymentID, e.Message, e.Actor)
+	if err != nil {
+		return err
+	}
+	e.ID, err = res.LastInsertId()
 	return err
+}
+
+// PutEventHook creates or replaces an event webhook.
+func (s *Store) PutEventHook(ctx context.Context, h *api.EventHook) error {
+	return s.putDoc(ctx, "event_hooks", h.ID, h.CreatedAt, h)
+}
+
+// GetEventHook loads an event webhook.
+func (s *Store) GetEventHook(ctx context.Context, id string) (*api.EventHook, error) {
+	var h api.EventHook
+	if err := s.getDoc(ctx, "event_hooks", id, &h); err != nil {
+		return nil, err
+	}
+	return &h, nil
+}
+
+// ListEventHooks returns every event webhook, oldest first.
+func (s *Store) ListEventHooks(ctx context.Context) ([]*api.EventHook, error) {
+	return listDocs[api.EventHook](ctx, s, "event_hooks")
+}
+
+// DeleteEventHook removes an event webhook.
+func (s *Store) DeleteEventHook(ctx context.Context, id string) error {
+	return s.deleteDoc(ctx, "event_hooks", id)
 }
 
 // EventFilter narrows an activity-log query. Empty fields don't filter.

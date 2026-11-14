@@ -286,6 +286,8 @@ const routes = [
   [/^#\/bulk\/([\w-]+)$/, 'devices', viewBulk, 'operator'],
   [/^#\/schedules$/, 'devices', viewSchedules, 'operator'],
   [/^#\/labels\?(.*)$/, 'devices', viewLabels],
+  [/^#\/webhooks$/, 'activity', viewWebhooks, 'operator'],
+  [/^#\/api$/, 'account', viewAPIDocs],
   [/^#\/deployments$/, 'deployments', viewDeployments, 'fleet'],
   [/^#\/deployments\/([\w-]+)$/, 'deployments', viewDeployment, 'fleet'],
   [/^#\/releases$/, 'releases', viewReleases, 'fleet'],
@@ -2136,7 +2138,8 @@ async function viewActivity(root, query) {
     return p.toString();
   };
   const exportCSV = () => guard(() => downloadFile('/api/v1/events?' + apiQuery({ format: 'csv' }), 'activity.csv'));
-  append(root, pageHead('Activity', count, h('button', { class: 'btn', onclick: exportCSV, title: 'Everything matching these filters, as a spreadsheet (up to 50,000 entries)' }, 'Export CSV')),
+  append(root, pageHead('Activity', count, h('a', { class: 'btn need-operator', href: '#/webhooks', title: 'Send events to other systems as they happen' }, 'Webhooks'),
+    h('button', { class: 'btn', onclick: exportCSV, title: 'Everything matching these filters, as a spreadsheet (up to 50,000 entries)' }, 'Export CSV')),
     h('div', { class: 'toolbar mb' }, search, typeSel, actor, h('label', { class: 'date-range muted' }, 'From', since), h('label', { class: 'date-range muted' }, 'to', until),
       h('button', { class: 'btn ghost', onclick: () => { for (const [el] of fields) el.value = ''; changed(); } }, 'Clear')),
     feed, h('div', { class: 'btn-row mt' }, more));
@@ -2183,6 +2186,110 @@ async function viewActivity(root, query) {
   const refresh = () => load(Math.min(1000, Math.max(PAGE, events.length)));
   await guard(refresh);
   return refresh;
+}
+
+// ---------- event webhooks ----------
+
+async function viewWebhooks(root) {
+  const list = h('div', { class: 'card flush' });
+  const shown = h('div', {});
+  const nameIn = h('input', { required: true, placeholder: 'SIEM', 'aria-label': 'Webhook name' });
+  const urlIn = h('input', { required: true, type: 'url', placeholder: 'https://hooks.example.com/armada', 'aria-label': 'Webhook URL' });
+  const typesIn = h('input', { placeholder: 'all events, or e.g. device.* alert.* update.failed', 'aria-label': 'Event types' });
+  const sample = { version: '1', id: 1234, time: new Date().toISOString(), type: 'device.enrolled', message: 'till-7 enrolled (linux/arm64, agent 1.4.2)',
+    actor: '', device: { id: 'dev_…', name: 'till-7', channel: 'stable', labels: { customer: 'acme', site: 'sg' } }, hook: 'SIEM' };
+  const showSecret = (h0, secret) => replace(shown, h('div', { class: 'callout stack' },
+    h('div', {}, h('strong', {}, 'Copy the signing secret now'), ` — it won't be shown again (${h0.name}).`),
+    h('div', { class: 'secret' }, secret),
+    h('div', { class: 'muted' }, 'Each delivery is a POST with X-Armada-Signature: sha256=HMAC-SHA256(secret, X-Armada-Timestamp + "." + body). Check it, and reject old timestamps.')));
+  append(root, pageHead('Event webhooks', 'Send activity-log events to other systems (a SIEM, a ticketing tool, your own service) as they happen.',
+    h('a', { class: 'btn', href: '#/activity' }, 'Activity')),
+    h('div', { class: 'card stack' }, h('h2', {}, 'Add a webhook'),
+      h('form', { class: 'stack', onsubmit: async e => {
+        e.preventDefault();
+        const types = typesIn.value.trim() ? typesIn.value.trim().split(/[\s,]+/) : [];
+        const hk = await guard(() => api('POST', '/api/v1/event-hooks', { name: nameIn.value.trim(), url: urlIn.value.trim(), types, enabled: true }), 'Webhook added');
+        if (!hk) return;
+        showSecret(hk, hk.secret);
+        nameIn.value = urlIn.value = typesIn.value = '';
+        refresh();
+      } },
+      h('div', { class: 'form-grid' }, h('label', {}, 'Name', nameIn), h('label', {}, 'URL', urlIn), h('label', {}, 'Event types', typesIn)),
+      h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Add webhook'))),
+      shown,
+      h('details', {}, h('summary', {}, 'What a delivery looks like'),
+        h('pre', { class: 'out' }, 'POST <your URL>\nContent-Type: application/json\nX-Armada-Event: device.enrolled\nX-Armada-Timestamp: 1767225600\nX-Armada-Signature: sha256=…\n\n' + JSON.stringify(sample, null, 2)),
+        h('p', { class: 'muted' }, 'Deliveries are retried a few times; the event id is unique, so drop duplicates. A client\'s webhook gets only events about its own devices and must use https. After 20 failed deliveries in a row a webhook is turned off.'))),
+    h('div', { class: 'spacer' }), list);
+
+  async function refresh() {
+    const hooks = await api('GET', '/api/v1/event-hooks');
+    replace(list, table(['Webhook', 'Events', 'Last delivery', ''], hooks.map(hk => {
+      const ld = hk.last_delivery;
+      return h('tr', {},
+        h('td', {}, h('strong', {}, hk.name), ' ', hk.enabled ? null : h('span', { class: 'badge' }, 'off'),
+          h('div', { class: 'muted mono' }, hk.url),
+          hk.disabled_reason ? h('div', { class: 'error' }, hk.disabled_reason) : null),
+        h('td', {}, hk.types && hk.types.length ? h('span', { class: 'mono' }, hk.types.join(' ')) : 'all events',
+          hk.client_scope && Object.keys(hk.client_scope.labels || {}).length ? h('div', { class: 'muted' }, 'only ' + scopeText(hk.client_scope)) : null),
+        h('td', {}, ld ? [h('span', { class: 'badge ' + (ld.ok ? 'ok' : 'bad') }, ld.ok ? 'delivered' : 'failed'), ' ',
+          h('span', { class: 'mono' }, ld.event_type), h('span', { class: 'muted' }, ' ' + ago(ld.at)),
+          ld.error ? h('div', { class: 'error' }, ld.error) : null, hk.failures > 1 ? h('div', { class: 'muted' }, `${hk.failures} failures in a row`) : null]
+          : h('span', { class: 'muted' }, 'nothing sent yet')),
+        h('td', { class: 'nowrap' }, h('div', { class: 'btn-row' },
+          h('button', { class: 'btn small', onclick: async () => {
+            const r = await guard(() => api('POST', `/api/v1/event-hooks/${hk.id}/test`));
+            if (r) toast(r.ok ? 'Test delivered' : 'Test failed: ' + r.error, !r.ok);
+          } }, 'Send test'),
+          h('button', { class: 'btn small ghost', onclick: async () => {
+            if (await guard(() => api('PUT', '/api/v1/event-hooks/' + hk.id, { ...hk, enabled: !hk.enabled }), hk.enabled ? 'Turned off' : 'Turned on')) refresh();
+          } }, hk.enabled ? 'Turn off' : 'Turn on'),
+          h('button', { class: 'btn small ghost', onclick: async () => {
+            if (!confirm(`Make a new signing secret for ${hk.name}? The old one stops working at once.`)) return;
+            const r = await guard(() => api('PUT', '/api/v1/event-hooks/' + hk.id, { ...hk, rotate_secret: true }));
+            if (r) { showSecret(r, r.secret); refresh(); }
+          } }, 'New secret'),
+          h('button', { class: 'btn small ghost danger', onclick: async () => {
+            if (!confirm(`Delete the webhook ${hk.name}?`)) return;
+            if (await guard(() => api('DELETE', '/api/v1/event-hooks/' + hk.id), 'Deleted') !== undefined) refresh();
+          } }, 'Delete'))));
+    }), 'No event webhooks yet.'));
+  }
+  await guard(refresh);
+  return refresh;
+}
+
+// ---------- API reference ----------
+
+async function viewAPIDocs(root) {
+  const search = h('input', { type: 'search', placeholder: 'Filter: path, summary or role…', 'aria-label': 'Filter endpoints' });
+  const body = h('div', { class: 'stack' });
+  let doc;
+  const download = () => saveText('armada-openapi.json', JSON.stringify(doc, null, 2), 'application/json');
+  append(root, pageHead('API reference', 'Every endpoint of the admin API, with the role it needs. Use a personal API token: Authorization: Bearer <token>.',
+    h('button', { class: 'btn', onclick: () => doc && download() }, 'Download OpenAPI')),
+  h('div', { class: 'toolbar mb' }, search), body);
+  const render = () => {
+    const q = search.value.trim().toLowerCase();
+    const groups = {};
+    for (const [path, ops] of Object.entries(doc.paths)) {
+      for (const [method, op] of Object.entries(ops)) {
+        const text = `${method} ${path} ${op.summary} ${op['x-armada-min-role']}`.toLowerCase();
+        if (q && !text.includes(q)) continue;
+        (groups[op.tags[0]] ||= []).push({ method: method.toUpperCase(), path, op });
+      }
+    }
+    const order = { GET: 0, POST: 1, PUT: 2, PATCH: 3, DELETE: 4 };
+    replace(body, Object.keys(groups).sort().map(tag => h('div', { class: 'card flush api-ref' }, h('h2', {}, tag),
+      table(['', 'Path', 'What it does', 'Needs'], groups[tag].sort((a, b) => a.path.localeCompare(b.path) || order[a.method] - order[b.method]).map(e => h('tr', {},
+        h('td', {}, h('span', { class: 'method m-' + e.method.toLowerCase() }, e.method)),
+        h('td', { class: 'mono' }, e.path),
+        h('td', {}, e.op.summary),
+        h('td', { class: 'nowrap' }, e.op['x-armada-min-role'], e.op['x-armada-client-accounts'] ? null : h('div', { class: 'muted' }, 'fleet-wide only'))))))));
+    if (!Object.keys(groups).length) replace(body, h('div', { class: 'empty' }, 'No endpoint matches.'));
+  };
+  search.addEventListener('input', render);
+  await guard(async () => { doc = await api('GET', '/api/v1/openapi.json'); render(); });
 }
 
 // ---------- auth ----------
@@ -2739,7 +2846,7 @@ async function viewAccount(root) {
         h('label', {}, 'Current password', cur), h('label', {}, 'New password (10+ characters)', nw),
         h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Change password')))),
       h('div', { class: 'card' }, h('h2', {}, 'Personal API tokens'),
-        h('p', { class: 'muted' }, 'For scripts and armadactl (--token). A token acts as you, with your role and scope.'),
+        h('p', { class: 'muted' }, 'For scripts and armadactl (--token). A token acts as you, with your role and scope. See the ', h('a', { href: '#/api' }, 'API reference'), '.'),
         h('form', { class: 'inline', onsubmit: async e => {
           e.preventDefault();
           const t = await guard(() => api('POST', '/api/v1/me/tokens', { name: tokName.value.trim() }));

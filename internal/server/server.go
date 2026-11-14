@@ -214,6 +214,10 @@ type Server struct {
 	}
 	sso *ssoState
 	bg  sync.WaitGroup // background work Close waits for
+	// hooks delivers events to event webhooks.
+	hooks eventHookState
+	// apiRoutes is the admin API's route table, for the OpenAPI document.
+	apiRoutes []apiRoute
 }
 
 // New opens the data directory (creating the database and signing key if
@@ -320,6 +324,7 @@ func New(cfg Config) (*Server, error) {
 	s.notifyClient = &http.Client{Timeout: 15 * time.Second}
 	s.clientNotifyClient = s.newClientNotifyClient()
 	go s.notifyLoop()
+	s.startEventHooks()
 	return s, nil
 }
 
@@ -331,6 +336,7 @@ func (s *Server) Close() error {
 		s.push.close()
 		s.bg.Wait()
 		close(s.notifyQueue)
+		close(s.hooks.done)
 		err = s.store.Close()
 	})
 	return err
@@ -393,8 +399,10 @@ func (s *Server) Handler() http.Handler {
 	// Admin API. Each route states the least role it needs and whether users
 	// limited to some devices (client accounts) may use it.
 	const scopedOK, fleetOnly = true, false
+	s.apiRoutes = s.apiRoutes[:0]
 	route := func(minRole string, scoped bool, pattern string, h http.HandlerFunc) {
 		mux.Handle(pattern, s.guard(minRole, scoped, h))
+		s.apiRoutes = append(s.apiRoutes, apiRoute{pattern: pattern, minRole: minRole, clients: scoped, handler: handlerName(h)})
 	}
 	viewer := func(scoped bool, pattern string, h http.HandlerFunc) { route(api.RoleViewer, scoped, pattern, h) }
 	operator := func(scoped bool, pattern string, h http.HandlerFunc) { route(api.RoleOperator, scoped, pattern, h) }
@@ -477,6 +485,12 @@ func (s *Server) Handler() http.Handler {
 	viewer(scopedOK, "GET /api/v1/devices/{id}/timeline", s.handleDeviceTimeline)
 	viewer(scopedOK, "GET /api/v1/registrations", s.handleListRegistrations)
 	viewer(scopedOK, "GET /api/v1/labels", s.handleLabels)
+	viewer(scopedOK, "GET /api/v1/openapi.json", s.handleOpenAPI)
+	viewer(scopedOK, "GET /api/v1/event-hooks", s.handleListHooks)
+	operator(scopedOK, "POST /api/v1/event-hooks", s.handleCreateHook)
+	operator(scopedOK, "PUT /api/v1/event-hooks/{id}", s.handleUpdateHook)
+	operator(scopedOK, "DELETE /api/v1/event-hooks/{id}", s.handleDeleteHook)
+	operator(scopedOK, "POST /api/v1/event-hooks/{id}/test", s.handleTestHook)
 	viewer(scopedOK, "GET /api/v1/scheduled-actions", s.handleListSchedules)
 	operator(scopedOK, "POST /api/v1/scheduled-actions", s.handleCreateSchedule)
 	operator(scopedOK, "PUT /api/v1/scheduled-actions/{id}", s.handleUpdateSchedule)

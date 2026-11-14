@@ -277,6 +277,24 @@ async function visit(page, who, hash, expectHeading) {
   const sched = (await api('GET', '/api/v1/scheduled-actions')).find(x => x.name === 'Smoke nightly reboot');
   if (!sched || !sched.next_run_at || !sched.last_run || sched.last_run.applied < 1) fail(`scheduled action: ${JSON.stringify(sched)}`);
 
+  // Event webhooks: add one; its signing secret is shown once.
+  await visit(admin, 'admin', '#/webhooks', 'Event webhooks');
+  await admin.fill('input[aria-label="Webhook name"]', 'Smoke SIEM');
+  await admin.fill('input[aria-label="Webhook URL"]', 'https://hooks.example.invalid/armada');
+  await admin.fill('input[aria-label="Event types"]', 'device.* alert.*');
+  await admin.click('#view button:has-text("Add webhook")');
+  await admin.waitForSelector('#view .secret', { timeout: 5000 }).catch(() => fail('webhook secret not shown'));
+  if (!(await admin.textContent('#view .secret')).startsWith('whsec_')) fail('webhook secret format');
+  await admin.waitForSelector('#view td:has-text("Smoke SIEM")', { timeout: 5000 }).catch(() => fail('webhook not listed'));
+
+  // API reference: generated from the server's routes, filterable.
+  await visit(admin, 'admin', '#/api', 'API reference');
+  const endpoints = await admin.$$eval('#view tbody tr', rows => rows.length);
+  if (endpoints < 80) fail(`API reference lists ${endpoints} endpoints`);
+  await admin.fill('input[aria-label="Filter endpoints"]', 'timeline');
+  const filtered = await admin.$$eval('#view tbody tr', rows => rows.map(r => r.textContent));
+  if (filtered.length !== 1 || !filtered[0].includes('/api/v1/devices/{id}/timeline')) fail(`API filter: ${filtered.join(' | ')}`);
+
   await browser.close();
   if (failures.length) {
     console.error(`${failures.length} failure(s)`);

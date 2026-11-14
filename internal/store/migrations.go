@@ -105,6 +105,13 @@ CREATE TABLE IF NOT EXISTS scheduled_actions (
 	created_at INTEGER NOT NULL
 );
 `},
+	{Version: 13, Name: "event webhooks", SQL: `
+CREATE TABLE IF NOT EXISTS event_hooks (
+	id TEXT PRIMARY KEY,
+	spec TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+`},
 	// Append new migrations here.
 }
 

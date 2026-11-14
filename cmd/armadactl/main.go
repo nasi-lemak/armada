@@ -140,6 +140,9 @@ Maintenance (alerts held and updates paused for the covered devices):
                                              asset_tag, location, contact, notes; "-" reads stdin)
   registrations list | registrations delete SERIAL
   schedules list | schedules run|pause|resume|delete ID
+  webhooks list | webhooks create --name N --url URL [--types device.*,alert.*] [--secret S]
+  webhooks test|enable|disable|rotate-secret|delete ID
+  openapi                                    print the API's OpenAPI document (JSON)
   schedules create --name N --at HH:MM [--op reboot|restart-agent|lock|wake|exec] [--label K=V]... [--channel C]
                    [--all] [--days mon,tue] [--tz Asia/Singapore] [--hold MINUTES] [--command "..."] [--paused]
   maintenance list [--all]
@@ -266,6 +269,10 @@ func (c *cli) run(args []string) error {
 		return c.maintenance(verb, rest)
 	case "schedules", "schedule", "scheduled":
 		return c.schedules(verb, rest)
+	case "webhooks", "webhook", "hooks":
+		return c.webhooks(verb, rest)
+	case "openapi":
+		return c.download("/api/v1/openapi.json", c.out)
 	case "registrations", "registration", "import":
 		if noun == "import" { // armadactl import FILE
 			return c.registrations("import", append([]string{verb}, rest...))

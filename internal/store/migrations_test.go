@@ -202,6 +202,7 @@ func TestMigrationsAreFrozen(t *testing.T) {
 		"10 device inventory 69ba2dba18e0",
 		"11 device pre-registrations 229fa22fefea",
 		"12 scheduled actions 80b9021e4139",
+		"13 event webhooks 53b02f7b8e7c",
 	}
 	var got []string
 	for i, m := range migrations {

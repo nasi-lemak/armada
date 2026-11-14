@@ -439,3 +439,16 @@ table.data-table td, table.data-table th { padding: 4px 12px; font-size: 12px; }
   .labels.roll.s50x25 .asset-label { page: lbl-50x25; }
   .labels.roll.s100x50 .asset-label { page: lbl-100x50; }
 }
+
+/* API reference */
+.method { display: inline-block; min-width: 52px; text-align: center; font: 600 11px/1.6 var(--mono, monospace); border-radius: 4px; padding: 0 4px;
+  background: var(--panel-2); color: var(--muted); }
+.method.m-get { color: var(--accent); }
+.method.m-post { color: var(--ok); }
+.method.m-put, .method.m-patch { color: var(--warn); }
+.method.m-delete { color: var(--bad); }
+.api-ref table { table-layout: fixed; width: 100%; }
+.api-ref th:nth-child(1) { width: 84px; }
+.api-ref th:nth-child(2) { width: 42%; }
+.api-ref th:nth-child(4) { width: 150px; }
+.api-ref td { overflow-wrap: anywhere; }

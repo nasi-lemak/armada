@@ -78,6 +78,14 @@ It has three parts, all in Go with no external services:
   - filter by type, who did it, text and dates;
   - export as CSV;
   - filters are kept in the address (`#/activity?type=device.*&actor=system`).
+- **Day-to-day tools:**
+  - [quick search](#device-inventory) (Ctrl+K);
+  - a timeline on each device;
+  - [CSV import and pre-registration by serial](#pre-registration-and-bulk-import);
+  - [scheduled actions](#scheduled-actions), such as nightly reboots;
+  - printable [QR asset labels](#device-inventory);
+  - [event webhooks](#event-webhooks);
+  - an [OpenAPI reference](#api) generated from the server.
 - **Health monitoring** (see [below](#health-monitoring)):
   - Hardware checks run automatically. They cover SSD/HDD SMART data, NVMe wear, eMMC wear, SD-card
     failure signs, RAID, temperature, power and under-voltage, battery, disk space and memory.
@@ -1703,6 +1711,57 @@ Admin endpoints need `Authorization: Bearer <token>`: the admin token, a dashboa
 client accounts get `403` on fleet-wide endpoints and `404` for devices outside their scope. Agent
 endpoints use the per-device key issued at enrollment.
 
+**API reference:** the server generates an OpenAPI 3.1 document from its own route table, so it
+always matches the running version.
+- **Getting it:** `GET /api/v1/openapi.json`, `armadactl openapi`, or **My account → API reference** in
+  the dashboard (searchable, with a download button).
+- **What it lists:** every admin endpoint with the least role it needs (`x-armada-min-role`) and
+  whether client accounts may use it (`x-armada-client-accounts`).
+- **Bodies:** request and response bodies are the JSON forms of the types in
+  [`internal/api`](internal/api/types.go).
+
+### Event webhooks
+
+Event webhooks send activity-log events to another system as they happen: a SIEM, a ticketing tool,
+or your own service. Set them up under **Activity → Webhooks**, or with `armadactl webhooks`.
+
+- **Which events:** all of them, or chosen types (`device.enrolled`), or prefixes (`alert.*`).
+- **The delivery:** a JSON `POST`:
+  ```json
+  {"version":"1","id":1234,"time":"2026-11-14T09:00:00Z","type":"device.enrolled","message":"till-7 enrolled (linux/arm64, agent 1.4.2)",
+   "actor":"","device":{"id":"dev_…","name":"till-7","channel":"stable","labels":{"customer":"acme"}},"hook":"SIEM"}
+  ```
+- **Signing:**
+  - each delivery carries `X-Armada-Event`, `X-Armada-Timestamp` and
+    `X-Armada-Signature: sha256=<hex HMAC-SHA256(secret, timestamp + "." + body)>`;
+  - the secret is shown once, when the webhook is created or its secret rotated, and is stored
+    encrypted;
+  - check the signature, and reject old timestamps.
+- **Retries:**
+  - each delivery is retried up to 4 times with backoff;
+  - `id` is unique, so drop duplicates;
+  - after 20 failed deliveries in a row the webhook turns itself off, and the activity log says why;
+  - turning it back on resets the count.
+- **Client accounts:**
+  - their operators can add webhooks of their own;
+  - those get only events about that client's devices (the same as their activity log), without
+    rollout IDs;
+  - they must use `https://` to a public address. The address is checked at connect time, so DNS
+    tricks and redirects don't reach internal hosts.
+- **What's not sent:** a webhook's own events (`hook.*`), so a failing endpoint can't cause a loop.
+
+```bash
+armadactl webhooks create --name SIEM --url https://siem.example.com/armada --types "device.*,alert.*"
+```
+
+```bash
+armadactl webhooks test <id>
+```
+
+```bash
+armadactl webhooks list
+```
+
 | Method & path | Purpose |
 |---|---|
 | `GET /api/v1/summary` | Fleet counts and version distribution |
@@ -1721,6 +1780,8 @@ endpoints use the per-device key issued at enrollment.
 | `POST /api/v1/deployments/{id}/{approve,pause,resume,advance,retry,complete,abort}` | Control a rollout (`approve`: someone other than its creator) |
 | `GET /api/v1/events` | Activity log. Filters: `type` (comma list; `prefix.*`), `actor` (`system` for none), `q`, `since`/`until` (date or RFC 3339; dates use `tz`), `device_id`, `deployment_id`. Paging: `limit` (up to 1000), `before_id`. `format=csv` exports up to 50,000 entries |
 | `GET /api/v1/events/types` | Event types recorded, for filter menus |
+| `GET/POST /api/v1/event-hooks`, `PUT/DELETE /api/v1/event-hooks/{id}`, `POST /api/v1/event-hooks/{id}/test` | Event webhooks |
+| `GET /api/v1/openapi.json` | OpenAPI 3.1 document of the admin API |
 | `GET /api/v1/labels?ids=dev_a,dev_b` | Asset label data: name, serial, asset tag, device URL and its QR code as an SVG path |
 | `GET/POST /api/v1/scheduled-actions`, `PUT/DELETE /api/v1/scheduled-actions/{id}`, `POST /api/v1/scheduled-actions/{id}/run` | Scheduled actions |
 | `GET /api/v1/registrations`, `POST /api/v1/registrations/import` (CSV body; `dry_run=1`), `DELETE /api/v1/registrations/{serial}` | Pre-registration and bulk import |

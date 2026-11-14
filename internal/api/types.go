@@ -1754,3 +1754,62 @@ type AssetLabel struct {
 	QR     string `json:"qr"`
 	QRSize int    `json:"qr_size"`
 }
+
+// EventHook sends activity-log events to a URL as they happen, signed
+// like webhook channels (X-Armada-Signature).
+type EventHook struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	URL  string `json:"url"`
+	// Types are event types, or prefixes ending in "*" ("device.*");
+	// empty means every event.
+	Types   []string `json:"types,omitempty"`
+	Enabled bool     `json:"enabled"`
+	// ClientScope is set for a client's webhook: it gets only events about
+	// that client's devices, and may only reach public HTTPS addresses.
+	ClientScope Selector `json:"client_scope"`
+	// Secret signs deliveries. It is shown once, when created or rotated;
+	// stored encrypted.
+	Secret    string `json:"secret,omitempty"`
+	HasSecret bool   `json:"has_secret"`
+	// RotateSecret, on update, makes a new secret (returned once).
+	RotateSecret bool      `json:"rotate_secret,omitempty"`
+	CreatedBy    string    `json:"created_by,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	// LastDelivery is the most recent attempt; Failures counts deliveries
+	// that failed in a row (after retries). Too many disable the webhook.
+	LastDelivery   *HookDelivery `json:"last_delivery,omitempty"`
+	Failures       int           `json:"failures"`
+	DisabledReason string        `json:"disabled_reason,omitempty"`
+}
+
+// HookDelivery is the outcome of delivering one event.
+type HookDelivery struct {
+	At        time.Time `json:"at"`
+	EventID   int64     `json:"event_id"`
+	EventType string    `json:"event_type"`
+	OK        bool      `json:"ok"`
+	Attempts  int       `json:"attempts"`
+	Error     string    `json:"error,omitempty"`
+}
+
+// EventHookPayload is the JSON body an event webhook receives.
+type EventHookPayload struct {
+	Version      string      `json:"version"` // "1"
+	ID           int64       `json:"id"`      // the event's ID (unique; use it to drop duplicates)
+	Time         time.Time   `json:"time"`
+	Type         string      `json:"type"`
+	Message      string      `json:"message"`
+	Actor        string      `json:"actor,omitempty"`
+	Device       *HookDevice `json:"device,omitempty"`
+	DeploymentID string      `json:"deployment_id,omitempty"`
+	Hook         string      `json:"hook"` // the webhook's name
+}
+
+// HookDevice is the device an event is about.
+type HookDevice struct {
+	ID      string            `json:"id"`
+	Name    string            `json:"name"`
+	Channel string            `json:"channel,omitempty"`
+	Labels  map[string]string `json:"labels,omitempty"`
+}

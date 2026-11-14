@@ -1248,9 +1248,12 @@ func (s *Server) logEvent(ctx context.Context, typ, deviceID, deploymentID, msg 
 	if p := principalFrom(ctx); p != nil {
 		actor = p.name
 	}
-	if err := s.store.AddEvent(context.WithoutCancel(ctx), api.Event{Time: s.now(), Type: typ, DeviceID: deviceID, DeploymentID: deploymentID, Message: msg, Actor: actor}); err != nil {
+	e := &api.Event{Time: s.now(), Type: typ, DeviceID: deviceID, DeploymentID: deploymentID, Message: msg, Actor: actor}
+	if err := s.store.RecordEvent(context.WithoutCancel(ctx), e); err != nil {
 		s.log.Error("record event", "err", err)
+		return
 	}
+	s.fanoutEvent(context.WithoutCancel(ctx), e)
 }
 
 // visibleDeviceIDs is the set of devices a principal may see.
