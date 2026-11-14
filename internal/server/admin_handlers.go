@@ -34,6 +34,9 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	sum := api.FleetSummary{PackageVersions: map[string]map[string]int{}, Channels: map[string]int{}}
 	p := principalFrom(ctx)
+	if !p.scoped() {
+		sum.ServerCert = s.serverCertStatus(ctx)
+	}
 	for _, d := range devs {
 		if !p.sees(d) {
 			continue

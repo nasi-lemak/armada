@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"flag"
@@ -93,6 +94,7 @@ func run() error {
 	flag.BoolVar(&cfg.PasswordLogin, "password-login", envBool("ARMADA_PASSWORD_LOGIN", true), "allow email and password sign-in; turn off when everyone uses single sign-on (the admin token still works) (ARMADA_PASSWORD_LOGIN)")
 	flag.BoolVar(&cfg.Require2FA, "require-2fa", envBool("ARMADA_REQUIRE_2FA", false), "make password users set up an authenticator app before using the dashboard or API (ARMADA_REQUIRE_2FA)")
 	flag.StringVar(&cfg.TOTPIssuer, "totp-issuer", env("ARMADA_TOTP_ISSUER", "Armada"), "name shown in authenticator apps")
+	flag.BoolVar(&cfg.CheckPublicCert, "check-public-cert", envBool("ARMADA_CHECK_PUBLIC_CERT", true), "behind a reverse proxy, check hourly the TLS certificate -public-url presents and warn before it expires")
 	flag.StringVar(&cfg.ReportBrand, "report-brand", env("ARMADA_REPORT_BRAND", "Armada"), "name on customer reports and their emails (your company or product)")
 	flag.StringVar(&cfg.OIDC.Issuer, "oidc-issuer", os.Getenv("ARMADA_OIDC_ISSUER"), "OpenID Connect issuer URL for single sign-on, e.g. https://accounts.google.com (ARMADA_OIDC_ISSUER)")
 	flag.StringVar(&cfg.OIDC.ClientID, "oidc-client-id", os.Getenv("ARMADA_OIDC_CLIENT_ID"), "OIDC client ID (ARMADA_OIDC_CLIENT_ID)")
@@ -222,6 +224,15 @@ func run() error {
 		log.Info("admin token disabled; sign in as an admin user")
 	}
 
+	if *tlsCert != "" {
+		// Reloaded when the files change (e.g. after certbot renews) or on SIGHUP.
+		sc, err := server.LoadServingCert(*tlsCert, *tlsKey, log)
+		if err != nil {
+			return err
+		}
+		cfg.ServingCert = sc
+	}
+
 	srv, err := server.New(cfg)
 	if err != nil {
 		return err
@@ -243,11 +254,26 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
+	if sc := cfg.ServingCert; sc != nil {
+		hs.TLSConfig = &tls.Config{GetCertificate: sc.GetCertificate, MinVersion: tls.VersionTLS12}
+		go sc.Watch(ctx, time.Minute)
+		hup := make(chan os.Signal, 1)
+		signal.Notify(hup, syscall.SIGHUP)
+		go func() {
+			for range hup {
+				if err := sc.Reload(); err != nil {
+					log.Warn("SIGHUP: TLS certificate not reloaded; still serving the previous one", "err", err)
+				} else {
+					log.Info("SIGHUP: TLS certificate reloaded")
+				}
+			}
+		}()
+	}
 	errc := make(chan error, 1)
 	go func() {
 		log.Info("armada-server listening", "addr", *listen, "version", version, "data_dir", cfg.DataDir, "tls", *tlsCert != "")
 		if *tlsCert != "" {
-			errc <- hs.ListenAndServeTLS(*tlsCert, *tlsKey)
+			errc <- hs.ListenAndServeTLS("", "") // certificate from cfg.ServingCert
 		} else {
 			errc <- hs.ListenAndServe()
 		}

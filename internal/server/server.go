@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
@@ -71,6 +72,12 @@ type Config struct {
 	SMTPRelay api.EmailConfig
 	// ReportBrand names the sender of customer reports (your company or product).
 	ReportBrand string
+	// ServingCert is the certificate the server serves itself (-tls-cert),
+	// reloaded when its files change. Nil behind a reverse proxy.
+	ServingCert *ServingCert
+	// CheckPublicCert checks the certificate -public-url presents (hourly)
+	// when the server doesn't terminate TLS itself.
+	CheckPublicCert bool
 	// TrustedProxies are reverse proxies whose X-Forwarded-For/-Proto/-Host
 	// headers are believed. Headers from anyone else are ignored.
 	TrustedProxies []*net.IPNet
@@ -193,6 +200,10 @@ type Server struct {
 	mfa                       mfaChallenges
 	passkeys                  passkeyState
 	closeOnce                 sync.Once
+	// serverCert tracks checks of the server's own TLS certificate.
+	serverCert serverCertState
+	// serverCertRoots overrides the system roots for the public-URL check (tests).
+	serverCertRoots *x509.CertPool
 	// Certificate renewal policies: when they last ran, and one run at a time.
 	certPolicyMu      sync.Mutex
 	certPolicyLastRun time.Time
@@ -664,6 +675,7 @@ func (s *Server) Tick(ctx context.Context) error {
 	if err := s.certPolicyTick(ctx, now); err != nil {
 		return err
 	}
+	s.serverCertTick(ctx, now)
 	if err := s.store.PruneSessions(ctx, now); err != nil {
 		return err
 	}

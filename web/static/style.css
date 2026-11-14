@@ -367,3 +367,5 @@ table.data-table td, table.data-table th { padding: 4px 12px; font-size: 12px; }
 .viz-band.c1,.viz-band.c2,.viz-band.c3,.viz-band.c4,.viz-band.c5,.viz-band.c6,.viz-band.c7,.viz-band.c8{fill:none}
 .legend a { color: var(--text); }
 .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+.callout.bad-callout { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 8%, var(--panel)); }

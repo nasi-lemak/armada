@@ -773,6 +773,8 @@ type FleetSummary struct {
 	HealthWarning     int `json:"health_warning"`
 	HealthCritical    int `json:"health_critical"`
 	FiringAlerts      int `json:"firing_alerts"`
+	// ServerCert is the server's own TLS certificate (fleet-wide accounts only).
+	ServerCert *ServerCertStatus `json:"server_cert,omitempty"`
 	// Spare and InRepair count devices out of service; Online and Offline
 	// count active devices only. Retired devices aren't counted.
 	Spare           int                       `json:"spare"`
@@ -836,6 +838,10 @@ const (
 	ConditionHealth           = "health"
 	ConditionUpdateFailed     = "update_failed"
 	ConditionDeploymentPaused = "deployment_paused"
+	// ConditionServerCertExpiry fires when the server's own TLS certificate
+	// is within ExpiryDays of expiring (default 21; critical within 7), or
+	// devices may not trust it. Vendor rules only.
+	ConditionServerCertExpiry = "server_cert_expiry"
 	// ConditionCertExpiry fires when a managed certificate on a device is
 	// within ExpiryDays of expiring (critical within 7 days or expired).
 	ConditionCertExpiry = "cert_expiry"
@@ -1579,4 +1585,17 @@ type ReportCert struct {
 	NotAfter   time.Time `json:"not_after"`
 	DaysLeft   int       `json:"days_left"`
 	Renewal    string    `json:"renewal,omitempty"` // status of a renewal in progress
+}
+
+// ServerCertStatus is the state of the server's own TLS certificate.
+type ServerCertStatus struct {
+	// Source is "tls-cert" (the server's -tls-cert file) or "public-url"
+	// (what -public-url presents, e.g. through a reverse proxy).
+	Source      string    `json:"source"`
+	Certificate *CertInfo `json:"certificate,omitempty"`
+	DaysLeft    *int      `json:"days_left,omitempty"`
+	// Warning means it expires within 21 days.
+	Warning bool `json:"warning"`
+	// Error explains a certificate devices may not trust, or a failed check.
+	Error string `json:"error,omitempty"`
 }

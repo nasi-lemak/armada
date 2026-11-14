@@ -583,6 +583,8 @@ page or with the CLI.
 | `device_offline` | a device hasn't checked in for N minutes | it checks in |
 | `update_failed` | an update fails or rolls back. All failures in one rollout fold into one alert. | after an hour |
 | `deployment_paused` | a rollout auto-paused (or was paused) | it is resumed or aborted |
+| `cert_expiry` | a managed certificate on a device is within N days of expiring (default 30; critical within 7) | it's renewed |
+| `server_cert_expiry` | the server's own TLS certificate is within N days of expiring (default 21; critical within 7), or devices may not trust it | it's renewed |
 
 Alerts notify when they fire and when their severity escalates. They can repeat every N minutes, and
 notify again when they resolve. Delivery is retried, and failures show up in the activity log.
@@ -1505,6 +1507,7 @@ Add `--json` to any command for machine-readable output.
 | `-trusted-proxies` | `ARMADA_TRUSTED_PROXIES` | none (comma-separated IPs/CIDRs) |
 | `-smtp-host`, `-smtp-port`, `-smtp-username`, `-smtp-from` | `ARMADA_SMTP_HOST`, …, `ARMADA_SMTP_PASSWORD` (environment only) | no relay |
 | `-report-brand` | `ARMADA_REPORT_BRAND` | `Armada` (name on customer reports and their emails) |
+| `-check-public-cert` | `ARMADA_CHECK_PUBLIC_CERT` | `true`: behind a reverse proxy, check hourly the certificate `-public-url` presents |
 | `-disable-admin-token` | `ARMADA_DISABLE_ADMIN_TOKEN` | `false` |
 | `-rotate-admin-token` | | replace the generated token at startup |
 | `-password-login` | `ARMADA_PASSWORD_LOGIN` | `true` |
@@ -1544,6 +1547,20 @@ Deployment options: [`deploy/armada-server.service`](deploy/armada-server.servic
 (systemd), [`Dockerfile`](Dockerfile) and
 [`deploy/docker-compose.yml`](deploy/docker-compose.yml). In production, put the server
 behind TLS, either with `-tls-cert`/`-tls-key` or a reverse proxy.
+
+**The server's certificate.** If it expires, every device stops checking in at once, so Armada
+watches it:
+
+- **With `-tls-cert`/`-tls-key`:** the files are re-read when they change, so a renewal (certbot,
+  acme.sh, your CA's tooling) needs no restart. `kill -HUP` reloads them at once. A half-finished
+  renewal (new certificate, old key) is ignored until the pair matches; the current certificate
+  stays in use meanwhile.
+- **Behind a reverse proxy:** the server checks hourly the certificate its `-public-url` presents,
+  which is what devices see (`-check-public-cert=false` turns this off).
+- **Warnings:** from 21 days before expiry, the Overview page shows a warning to fleet-wide accounts
+  and the server logs one daily. Add an alert rule with the condition
+  **Server's own certificate expiring** (`server_cert_expiry`) to be notified. It also fires if the
+  public URL's certificate isn't trusted by standard roots (an incomplete chain, for example).
 
 ## API
 

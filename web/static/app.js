@@ -331,8 +331,10 @@ async function viewOverview(root) {
   const deps = h('div', {});
   const dist = h('div', {});
   const feed = h('div', {});
+  const certWarning = h('div', {});
   append(root,
     pageHead('Fleet overview'),
+    certWarning,
     stats,
     fleetHist.el,
     h('div', { class: 'grid side mt' },
@@ -350,6 +352,13 @@ async function viewOverview(root) {
     ]);
     const tile = (label, value, hint, href) => h(href ? 'a' : 'div', { class: 'card stat', href },
       h('div', { class: 'label' }, label), h('div', { class: 'value' }, value), h('div', { class: 'hint' }, hint));
+    // The server's own certificate: if it lapses, every device drops off.
+    const sc = sum.server_cert;
+    replace(certWarning, sc && (sc.warning || sc.error) ? h('div', { class: 'callout bad-callout mb' },
+      h('strong', {}, sc.certificate && sc.days_left !== undefined && sc.days_left < 0 ? "The server's TLS certificate has expired. "
+        : sc.warning ? `The server's TLS certificate expires in ${sc.days_left} days. ` : "The server's TLS certificate has a problem. "),
+      sc.warning ? 'Renew it before then, or every device stops checking in. ' + (sc.source === 'tls-cert' ? 'Armada picks up the renewed files by itself.' : 'It is served by the proxy in front of Armada (-public-url).') : '',
+      sc.error ? h('div', {}, sc.error) : null) : null);
     const inService = sum.online + sum.offline;
     const pct = inService ? Math.round(100 * sum.online / inService) : 0;
     const outOfService = [sum.spare && `${sum.spare} spare`, sum.in_repair && `${sum.in_repair} in repair`].filter(Boolean).join(' · ');
@@ -2346,7 +2355,7 @@ async function viewMonitoring(root) {
   const rFor = forClient(), cFor = forClient();
   const rName = h('input', { required: true, placeholder: 'Storage failing', 'aria-label': 'Rule name' });
   const rCond = h('select', { 'aria-label': 'Condition' }, [['health', 'Health check failing'], ['device_offline', 'Device offline'], ['cert_expiry', 'Certificate expiring'],
-    ...(isAdmin ? [['update_failed', 'Update failed'], ['deployment_paused', 'Rollout paused']] : [])].map(([v, l]) => h('option', { value: v }, l)));
+    ...(isAdmin ? [['update_failed', 'Update failed'], ['deployment_paused', 'Rollout paused'], ['server_cert_expiry', "Server's own certificate expiring"]] : [])].map(([v, l]) => h('option', { value: v }, l)));
   const rSev = h('select', { 'aria-label': 'Minimum severity' }, ['critical', 'warning'].map(v => h('option', { value: v }, v)));
   const rKinds = h('input', { placeholder: 'any, or storage power temperature', 'aria-label': 'Check kinds' });
   const rOffline = h('input', { type: 'number', min: '1', value: '10', 'aria-label': 'Offline minutes' });
@@ -2359,7 +2368,8 @@ async function viewMonitoring(root) {
     rSev.closest('label').classList.toggle('hidden', rCond.value !== 'health');
     rKinds.closest('label').classList.toggle('hidden', rCond.value !== 'health');
     rOffline.closest('label').classList.toggle('hidden', rCond.value !== 'device_offline');
-    rExpiry.closest('label').classList.toggle('hidden', rCond.value !== 'cert_expiry');
+    rExpiry.closest('label').classList.toggle('hidden', rCond.value !== 'cert_expiry' && rCond.value !== 'server_cert_expiry');
+    if (rCond.value === 'server_cert_expiry' && rExpiry.value === '30') rExpiry.value = '21';
   };
   rCond.addEventListener('change', syncCond);
 
@@ -2475,7 +2485,7 @@ async function viewMonitoring(root) {
       if (!chosen.length) return toast('Pick at least one channel (add one below first).', true);
       const body = { name: rName.value.trim(), enabled: true, condition: rCond.value, selector: { labels }, channels: chosen,
         min_severity: rSev.value, check_kinds: rKinds.value.split(/[\s,]+/).filter(Boolean), offline_minutes: parseInt(rOffline.value || '10', 10),
-        expiry_days: rCond.value === 'cert_expiry' ? parseInt(rExpiry.value || '30', 10) : 0,
+        expiry_days: ['cert_expiry', 'server_cert_expiry'].includes(rCond.value) ? parseInt(rExpiry.value || '30', 10) : 0,
         repeat_minutes: parseInt(rRepeat.value || '0', 10), notify_resolved: rResolved.checked, client_scope: clientScope };
       if (await guard(() => api('POST', '/api/v1/alert-rules', body), 'Rule added')) { rName.value = ''; refresh(); }
     } },
@@ -2590,7 +2600,7 @@ async function viewMonitoring(root) {
           } }, m.enabled ? 'Disable' : 'Enable'),
           h('button', { class: 'btn small danger', onclick: del('/api/v1/monitors/' + m.id, `Delete monitor ${m.name}?`) }, 'Delete'))))),
       'No program monitors yet.'));
-    const condLabel = { health: 'health', device_offline: 'offline', update_failed: 'update failed', deployment_paused: 'rollout paused', cert_expiry: 'certificate expiring' };
+    const condLabel = { health: 'health', device_offline: 'offline', update_failed: 'update failed', deployment_paused: 'rollout paused', cert_expiry: 'certificate expiring', server_cert_expiry: "server's certificate expiring" };
     const forCell = sc => scopeText(sc) ? labelChips(sc.labels) : h('span', { class: 'muted' }, 'vendor-wide');
     replace(rulesBox, table(['Rule', 'For', 'When', 'Devices', 'Notify', ''],
       rules.map(r => h('tr', {},
@@ -2599,7 +2609,8 @@ async function viewMonitoring(root) {
         h('td', {}, condLabel[r.condition] || r.condition,
           r.condition === 'health' ? h('div', { class: 'muted' }, `${r.min_severity || 'critical'}+${(r.check_kinds || []).length ? ' · ' + r.check_kinds.join(', ') : ''}`) : null,
           r.condition === 'device_offline' ? h('div', { class: 'muted' }, `${r.offline_minutes || 10} min`) : null,
-          r.condition === 'cert_expiry' ? h('div', { class: 'muted' }, `${r.expiry_days || 30} days before`) : null),
+          r.condition === 'cert_expiry' ? h('div', { class: 'muted' }, `${r.expiry_days || 30} days before`) : null,
+          r.condition === 'server_cert_expiry' ? h('div', { class: 'muted' }, `${r.expiry_days || 21} days before`) : null),
         h('td', {}, labelChips(r.selector.labels)),
         h('td', {}, r.channels.map(id => chName[id] || id).join(', ')),
         h('td', {}, !canEditScope(r.client_scope) ? null : h('div', { class: 'btn-row' },

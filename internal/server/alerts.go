@@ -169,6 +169,33 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 					want[k] = candidate{rule: r, key: k, severity: sev, device: d, summary: summary}
 				}
 			}
+		case api.ConditionServerCertExpiry:
+			if !scopeEmpty(r.ClientScope) {
+				continue
+			}
+			st := s.serverCertStatus(ctx)
+			if st == nil {
+				continue
+			}
+			within := r.ExpiryDays
+			if within == 0 {
+				within = serverCertWarnDays
+			}
+			k := r.ID + "/server-cert"
+			switch {
+			case st.Certificate != nil && st.DaysLeft != nil && *st.DaysLeft <= within:
+				sev, when := api.HealthWarning, fmt.Sprintf("expires in %d days (%s)", *st.DaysLeft, st.Certificate.NotAfter.Format("2 Jan 2006"))
+				if *st.DaysLeft <= certCriticalDays {
+					sev = api.HealthCritical
+				}
+				if *st.DaysLeft < 0 {
+					when = "has expired"
+				}
+				want[k] = candidate{rule: r, key: k, severity: sev,
+					summary: fmt.Sprintf("The server's TLS certificate (%s) %s: renew it, or devices stop checking in", st.Certificate.CommonName, when)}
+			case strings.HasPrefix(st.Error, "devices may not trust it"):
+				want[k] = candidate{rule: r, key: k, severity: api.HealthCritical, summary: "The server's TLS certificate: " + st.Error}
+			}
 		case api.ConditionDeploymentPaused:
 			if !scopeEmpty(r.ClientScope) {
 				continue // fleet-level: never for client rules
@@ -748,7 +775,7 @@ func (s *Server) handleSaveAlertRule(w http.ResponseWriter, r *http.Request) {
 		rule.ID, rule.CreatedAt, rule.ClientScope, rule.CreatedBy = newID("rul"), now, sc, p.name
 	}
 	if !scopeEmpty(rule.ClientScope) && rule.Condition != api.ConditionDeviceOffline && rule.Condition != api.ConditionHealth && rule.Condition != api.ConditionCertExpiry {
-		writeError(w, http.StatusBadRequest, "client alert rules can watch device_offline, health or cert_expiry; update failures and paused rollouts are vendor-wide")
+		writeError(w, http.StatusBadRequest, "client alert rules can watch device_offline, health or cert_expiry; update failures, paused rollouts and the server's certificate are vendor-wide")
 		return
 	}
 	rule.Name = strings.TrimSpace(rule.Name)
@@ -757,8 +784,9 @@ func (s *Server) handleSaveAlertRule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	case rule.Condition != api.ConditionDeviceOffline && rule.Condition != api.ConditionHealth &&
-		rule.Condition != api.ConditionUpdateFailed && rule.Condition != api.ConditionDeploymentPaused && rule.Condition != api.ConditionCertExpiry:
-		writeError(w, http.StatusBadRequest, "condition must be device_offline, health, cert_expiry, update_failed or deployment_paused")
+		rule.Condition != api.ConditionUpdateFailed && rule.Condition != api.ConditionDeploymentPaused && rule.Condition != api.ConditionCertExpiry &&
+		rule.Condition != api.ConditionServerCertExpiry:
+		writeError(w, http.StatusBadRequest, "condition must be device_offline, health, cert_expiry, server_cert_expiry, update_failed or deployment_paused")
 		return
 	case rule.ExpiryDays < 0 || rule.ExpiryDays > 365:
 		writeError(w, http.StatusBadRequest, "expiry_days must be between 1 and 365")
