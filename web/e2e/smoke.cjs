@@ -1,8 +1,10 @@
 // Dashboard smoke test: signs in, opens every page as an admin and as a
 // client account, and fails on any JavaScript error or a page that doesn't
 // render. Usage: node smoke.cjs http://localhost:8080 <admin-token>
+// ARMADA_PLAYWRIGHT can name an installed Playwright module to use instead
+// of the one in node_modules (e.g. a system-wide install with its browser).
 'use strict';
-const { chromium } = require('playwright');
+const { chromium } = require(process.env.ARMADA_PLAYWRIGHT || 'playwright');
 
 const base = (process.argv[2] || 'http://localhost:8080').replace(/\/$/, '');
 const adminToken = process.argv[3] || process.env.ARMADA_ADMIN_TOKEN;

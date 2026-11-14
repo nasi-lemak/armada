@@ -1686,7 +1686,27 @@ package update, a failed health check with rollback, the auto-pause, remote acti
 self-update with the restart simulated, and crash-loop rollback.
 `internal/server/server_test.go` simulates a 200-device fleet through a staged rollout.
 
-**CI** (`.github/workflows/ci.yml`) runs on every push to `main` and every pull request:
+**CI** (`.github/workflows/ci.yml`) runs on every push to `main` and every pull request, or by hand
+(**Run workflow**). Every job runs `scripts/ci.sh`, so you can run exactly the same checks on your
+own machine, without spending CI minutes:
+
+```bash
+make ci
+```
+
+- **Go toolchains:** it runs the Go job twice, like CI. Once with the Go version `go.mod` names, and
+  once with the newest Go release. Both are fetched automatically through `GOTOOLCHAIN`.
+- **Then:** the vulnerability scan, the dashboard smoke test and the Android build.
+- **Missing tools:** a job whose tools aren't installed (Node.js, a JDK, the Android SDK) is reported
+  as skipped. `CI_STRICT=1` makes that a failure.
+- **One job only:** `scripts/ci.sh go --tidy`, `vulncheck`, `dashboard` or `android`.
+- **Settings:**
+  - `CI_STABLE_GO=go1.x.y` picks the "newest" Go;
+  - `ARMADA_PLAYWRIGHT=$(npm root -g)/playwright` uses an installed Playwright and browser instead
+    of installing one;
+  - `JAVA_HOME` picks the JDK (CI uses 17).
+
+The CI jobs:
 
 | Job | What it checks |
 |---|---|

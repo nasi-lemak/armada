@@ -6,7 +6,7 @@ export CGO_ENABLED = 0
 # Platforms the agent is cross-compiled for by `make agents`.
 AGENT_PLATFORMS := linux/amd64 linux/arm64 linux/arm linux/386 linux/riscv64 darwin/amd64 darwin/arm64 windows/amd64
 
-.PHONY: all build test test-race vet agents android clean run
+.PHONY: all build test test-race vet agents android clean run ci
 
 all: vet test build
 
@@ -22,6 +22,10 @@ test-race:
 vet:
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l .)" || (echo "gofmt needed:"; gofmt -l .; exit 1)
+
+# Everything CI checks, run locally (see scripts/ci.sh for options).
+ci:
+	@scripts/ci.sh
 
 # Cross-compile agent binaries into dist/ (upload these as armada-agent releases).
 agents:

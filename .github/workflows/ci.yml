@@ -14,6 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Each job runs scripts/ci.sh, which `make ci` also runs locally: what
+  # passes there passes here.
   go:
     name: Go (${{ matrix.go }})
     runs-on: ubuntu-latest
@@ -30,27 +32,8 @@ jobs:
           go-version: ${{ matrix.go == 'stable' && 'stable' || '' }}
           go-version-file: ${{ matrix.go == 'go.mod' && 'go.mod' || '' }}
           check-latest: ${{ matrix.go == 'stable' }}
-      - name: gofmt
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then echo "Run gofmt on:"; echo "$unformatted"; exit 1; fi
-      - name: go vet
-        run: go vet ./...
-      - name: go mod tidy
-        if: matrix.go == 'go.mod'
-        run: |
-          go mod tidy
-          git diff --exit-code go.mod go.sum
-      - name: Tests (race detector)
-        run: go test -race -count=1 ./...
-      - name: Cross-compile agents
-        run: make agents
-      - name: Build server and CLI for other platforms
-        run: |
-          for p in linux/arm64 darwin/arm64 windows/amd64 freebsd/amd64; do
-            echo "building cmd/... for $p"
-            GOOS=${p%/*} GOARCH=${p#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/...
-          done
+      - name: gofmt, vet, tidy, race tests, cross-builds
+        run: scripts/ci.sh go ${{ matrix.go == 'go.mod' && '--tidy' || '' }}
 
   vulncheck:
     name: Vulnerability scan
@@ -62,7 +45,7 @@ jobs:
           go-version: stable
           check-latest: true
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+        run: scripts/ci.sh vulncheck
 
   dashboard:
     name: Dashboard (browser)
@@ -77,26 +60,8 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: web/e2e/package-lock.json
-      - name: JavaScript syntax
-        run: for f in web/static/*.js; do node --check "$f"; done
-      - name: Install Playwright
-        working-directory: web/e2e
-        run: |
-          npm ci
-          npx playwright install --with-deps chromium
-      - name: Start server
-        run: |
-          go build -o armada-server ./cmd/armada-server
-          ./armada-server -data-dir "$RUNNER_TEMP/armada" -admin-token ci-admin-token \
-            -listen 127.0.0.1:8080 -public-url http://localhost:8080 > "$RUNNER_TEMP/server.log" 2>&1 &
-          for _ in $(seq 1 30); do curl -fs http://127.0.0.1:8080/healthz && exit 0; sleep 1; done
-          cat "$RUNNER_TEMP/server.log"; exit 1
-      - name: Smoke test
-        working-directory: web/e2e
-        run: node smoke.cjs http://localhost:8080 ci-admin-token
-      - name: Server log
-        if: failure()
-        run: cat "$RUNNER_TEMP/server.log"
+      - name: JavaScript syntax and browser smoke test
+        run: scripts/ci.sh dashboard
 
   android:
     name: Android
@@ -109,8 +74,7 @@ jobs:
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
       - name: Build, unit tests and lint
-        working-directory: android
-        run: ./gradlew --no-daemon assembleDebug testDebugUnitTest lintDebug
+        run: scripts/ci.sh android
       - name: Test reports
         if: failure()
         uses: actions/upload-artifact@v4
