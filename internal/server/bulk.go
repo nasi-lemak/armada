@@ -159,30 +159,41 @@ func fmtSelectorLabels(m map[string]string) string {
 }
 
 func (s *Server) handleBulk(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	p := principalFrom(ctx)
 	var req api.BulkRequest
 	if !readJSON(w, r, &req) {
 		return
 	}
-	req.Note = strings.TrimSpace(req.Note)
-	op, code, err := s.bulkOperation(p, &req)
-	if err != nil {
+	b, code, err := s.runBulk(r.Context(), principalFrom(r.Context()), &req, true)
+	switch {
+	case err != nil && code == http.StatusInternalServerError:
+		s.internalError(w, err)
+	case err != nil:
 		writeError(w, code, err.Error())
-		return
+	case b.DryRun:
+		writeJSON(w, http.StatusOK, b)
+	default:
+		writeJSON(w, http.StatusCreated, b)
+	}
+}
+
+// runBulk previews (dry run) or performs a bulk operation as p. A real
+// run from the API must say how many devices it expects (needExpect);
+// scheduled runs don't.
+func (s *Server) runBulk(ctx context.Context, p *principal, req *api.BulkRequest, needExpect bool) (*api.BulkOperation, int, error) {
+	req.Note = strings.TrimSpace(req.Note)
+	op, code, err := s.bulkOperation(p, req)
+	if err != nil {
+		return nil, code, err
 	}
 	if scopeEmpty(req.Selector) && len(req.Selector.DeviceIDs) == 0 && !req.All {
-		writeError(w, http.StatusBadRequest, "say which devices (device_ids, labels or channel), or all=true for every device you can see")
-		return
+		return nil, http.StatusBadRequest, errors.New("say which devices (device_ids, labels or channel), or all=true for every device you can see")
 	}
-	if !req.DryRun && req.Expect == nil {
-		writeError(w, http.StatusBadRequest, "set expect to the number of devices the dry run matched")
-		return
+	if needExpect && !req.DryRun && req.Expect == nil {
+		return nil, http.StatusBadRequest, errors.New("set expect to the number of devices the dry run matched")
 	}
 	devs, err := s.store.ListDevices(ctx)
 	if err != nil {
-		s.internalError(w, err)
-		return
+		return nil, http.StatusInternalServerError, err
 	}
 	var targets []*api.Device
 	for _, d := range devs {
@@ -191,16 +202,14 @@ func (s *Server) handleBulk(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(targets) > maxBulkDevices {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("%d devices match; bulk operations are limited to %d", len(targets), maxBulkDevices))
-		return
+		return nil, http.StatusBadRequest, fmt.Errorf("%d devices match; bulk operations are limited to %d", len(targets), maxBulkDevices)
 	}
-	if !req.DryRun && *req.Expect != len(targets) {
-		writeError(w, http.StatusConflict, fmt.Sprintf("%d devices match now, not %d: preview it again", len(targets), *req.Expect))
-		return
+	if !req.DryRun && req.Expect != nil && *req.Expect != len(targets) {
+		return nil, http.StatusConflict, fmt.Errorf("%d devices match now, not %d: preview it again", len(targets), *req.Expect)
 	}
 
 	b := &api.BulkOperation{Operation: req.Operation, Summary: op.summary, DryRun: req.DryRun, Matched: len(targets),
-		Applied: []api.BulkTarget{}, Skipped: []api.BulkTarget{}, CreatedBy: p.name, CreatedAt: s.now()}
+		Applied: []api.BulkTarget{}, Skipped: []api.BulkTarget{}, CreatedBy: p.name, CreatedAt: s.now(), ClientScope: req.ClientScope}
 	if !req.DryRun {
 		b.ID = newID("blk")
 	}
@@ -234,21 +243,19 @@ func (s *Server) handleBulk(w http.ResponseWriter, r *http.Request) {
 		b.Applied = append(b.Applied, t)
 	}
 	if req.DryRun {
-		writeJSON(w, http.StatusOK, b)
-		return
+		return b, http.StatusOK, nil
 	}
 	if err := s.store.PutBulkOperation(ctx, b); err != nil {
-		s.internalError(w, err)
-		return
+		return nil, http.StatusInternalServerError, err
 	}
 	msg := fmt.Sprintf("bulk %s on %d devices", op.summary, len(b.Applied))
 	if len(b.Skipped) > 0 {
 		msg += fmt.Sprintf(" (%d skipped)", len(b.Skipped))
 	}
-	s.logEvent(ctx, "bulk."+req.Operation, "", "", msg+" — "+b.ID)
+	s.logEvent(withPrincipal(ctx, p), "bulk."+req.Operation, "", "", msg+" — "+b.ID)
 	s.wakeIDs(wake)
 	s.addBulkProgress(ctx, b)
-	writeJSON(w, http.StatusCreated, b)
+	return b, http.StatusCreated, nil
 }
 
 // wakeIDs wakes connected devices, spread out so a large batch doesn't
@@ -302,7 +309,11 @@ func (s *Server) addBulkProgress(ctx context.Context, b *api.BulkOperation) {
 // bulkVisible: fleet-wide accounts see every bulk operation; client
 // accounts see their own.
 func bulkVisible(p *principal, b *api.BulkOperation) bool {
-	return !p.scoped() || b.CreatedBy == p.name
+	if !p.scoped() || b.CreatedBy == p.name {
+		return true
+	}
+	see, _ := clientObjectAccess(p, b.ClientScope) // e.g. a client's scheduled action ran it
+	return see
 }
 
 func (s *Server) handleListBulk(w http.ResponseWriter, r *http.Request) {

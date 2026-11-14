@@ -476,6 +476,11 @@ func (s *Server) Handler() http.Handler {
 	viewer(scopedOK, "GET /api/v1/events/types", s.handleEventTypes)
 	viewer(scopedOK, "GET /api/v1/devices/{id}/timeline", s.handleDeviceTimeline)
 	viewer(scopedOK, "GET /api/v1/registrations", s.handleListRegistrations)
+	viewer(scopedOK, "GET /api/v1/scheduled-actions", s.handleListSchedules)
+	operator(scopedOK, "POST /api/v1/scheduled-actions", s.handleCreateSchedule)
+	operator(scopedOK, "PUT /api/v1/scheduled-actions/{id}", s.handleUpdateSchedule)
+	operator(scopedOK, "POST /api/v1/scheduled-actions/{id}/run", s.handleRunSchedule)
+	operator(scopedOK, "DELETE /api/v1/scheduled-actions/{id}", s.handleDeleteSchedule)
 	operator(scopedOK, "POST /api/v1/registrations/import", s.handleImportRegistrations)
 	operator(scopedOK, "DELETE /api/v1/registrations/{serial}", s.handleDeleteRegistration)
 	viewer(scopedOK, "GET /api/v1/alerts", s.handleListAlerts)
@@ -671,6 +676,9 @@ func (s *Server) Tick(ctx context.Context) error {
 		if err := s.evaluateDeployment(ctx, d, now); err != nil {
 			return err
 		}
+	}
+	if err := s.scheduleTick(ctx, now); err != nil {
+		return err
 	}
 	if err := s.evaluateAlerts(ctx, now); err != nil {
 		return err

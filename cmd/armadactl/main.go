@@ -139,6 +139,9 @@ Maintenance (alerts held and updates paused for the covered devices):
                                              (columns: serial or device, name, channel, labels, label:KEY,
                                              asset_tag, location, contact, notes; "-" reads stdin)
   registrations list | registrations delete SERIAL
+  schedules list | schedules run|pause|resume|delete ID
+  schedules create --name N --at HH:MM [--op reboot|restart-agent|lock|wake|exec] [--label K=V]... [--channel C]
+                   [--all] [--days mon,tue] [--tz Asia/Singapore] [--hold MINUTES] [--command "..."] [--paused]
   maintenance list [--all]
   maintenance start --device ID|--label K=V|--channel C --for 2h [--note N] [--name N]
                     [--alerts-only|--updates-only] [--client K=V]...
@@ -261,6 +264,8 @@ func (c *cli) run(args []string) error {
 		return c.alerts(append([]string{verb}, rest...))
 	case "maintenance", "maint":
 		return c.maintenance(verb, rest)
+	case "schedules", "schedule", "scheduled":
+		return c.schedules(verb, rest)
 	case "registrations", "registration", "import":
 		if noun == "import" { // armadactl import FILE
 			return c.registrations("import", append([]string{verb}, rest...))

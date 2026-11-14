@@ -33,17 +33,19 @@ const (
 	importMaxBytes = 4 << 20
 )
 
-// registrationAccess: fleet-wide operators manage every registration;
-// client operators manage their client's.
-func registrationAccess(p *principal, reg *api.Registration) (see, edit bool) {
+// clientObjectAccess is who sees and manages an object that belongs to a
+// client (scope) or to the vendor (empty scope): fleet-wide accounts see
+// all and their operators manage all; client accounts see and (as
+// operators) manage their own client's.
+func clientObjectAccess(p *principal, scope api.Selector) (see, edit bool) {
 	if r := p.fleetRole(); r != "" {
 		return true, api.RoleRank(r) >= api.RoleRank(api.RoleOperator)
 	}
-	if scopeEmpty(reg.ClientScope) {
+	if scopeEmpty(scope) {
 		return false, false
 	}
 	for _, g := range p.grants {
-		if sameScope(g.Scope, reg.ClientScope) {
+		if sameScope(g.Scope, scope) {
 			see = true
 			edit = edit || api.RoleRank(g.Role) >= api.RoleRank(api.RoleOperator)
 		}
@@ -54,8 +56,15 @@ func registrationAccess(p *principal, reg *api.Registration) (see, edit bool) {
 // importScope is the client a new registration belongs to: none for
 // fleet-wide operators, else the caller's client (named with ?client=).
 func importScope(p *principal, r *http.Request) (api.Selector, error) {
+	return chooseClientScope(p, r.URL.Query().Get("client"), "pre-registrations")
+}
+
+// chooseClientScope is the client a new object belongs to: none for
+// fleet-wide operators unless they name one ("customer=acme"), else the
+// caller's client (which they must name if they have several).
+func chooseClientScope(p *principal, client, what string) (api.Selector, error) {
 	var sc api.Selector
-	if c := r.URL.Query().Get("client"); c != "" {
+	if c := client; c != "" {
 		labels, err := parseLabelList(c)
 		if err != nil {
 			return sc, err
@@ -65,7 +74,7 @@ func importScope(p *principal, r *http.Request) (api.Selector, error) {
 	if api.RoleRank(p.fleetRole()) >= api.RoleRank(api.RoleOperator) {
 		return sc, nil
 	}
-	return pickClientScope(p, sc, false, "pre-registrations")
+	return pickClientScope(p, sc, false, what)
 }
 
 // applyRegistration fills in an enrolling device from its registration.
@@ -453,7 +462,7 @@ func (s *Server) planRegistrationRow(ctx context.Context, p *principal, scope ap
 		reg.Inventory = &inv
 	}
 	if old, err := s.store.GetRegistration(ctx, rec.serial); err == nil && old.ClaimedBy == "" {
-		if _, edit := registrationAccess(p, old); !edit {
+		if _, edit := clientObjectAccess(p, old.ClientScope); !edit {
 			fail("this serial is already pre-registered by another account")
 			return
 		}
@@ -487,7 +496,7 @@ func (s *Server) handleListRegistrations(w http.ResponseWriter, r *http.Request)
 	p := principalFrom(r.Context())
 	out := []*api.Registration{}
 	for _, reg := range all {
-		if see, _ := registrationAccess(p, reg); see {
+		if see, _ := clientObjectAccess(p, reg.ClientScope); see {
 			out = append(out, reg)
 		}
 	}
@@ -505,7 +514,7 @@ func (s *Server) handleDeleteRegistration(w http.ResponseWriter, r *http.Request
 	reg, err := s.store.GetRegistration(r.Context(), r.PathValue("serial"))
 	p := principalFrom(r.Context())
 	if err == nil {
-		if see, edit := registrationAccess(p, reg); !see {
+		if see, edit := clientObjectAccess(p, reg.ClientScope); !see {
 			err = store.ErrNotFound
 		} else if !edit {
 			writeError(w, http.StatusForbidden, "you can only remove your own client's pre-registrations")

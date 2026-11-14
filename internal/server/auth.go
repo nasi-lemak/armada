@@ -97,6 +97,11 @@ func needDeviceRole(w http.ResponseWriter, r *http.Request, d *api.Device, role 
 
 type principalKey struct{}
 
+// withPrincipal makes p the actor for what's done with ctx.
+func withPrincipal(ctx context.Context, p *principal) context.Context {
+	return context.WithValue(ctx, principalKey{}, p)
+}
+
 func principalFrom(ctx context.Context) *principal {
 	p, _ := ctx.Value(principalKey{}).(*principal)
 	return p

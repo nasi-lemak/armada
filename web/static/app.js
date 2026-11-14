@@ -284,6 +284,7 @@ const routes = [
   [/^#\/devices(?:\?(.*))?$/, 'devices', viewDevices],
   [/^#\/devices\/([\w-]+)$/, 'devices', viewDevice],
   [/^#\/bulk\/([\w-]+)$/, 'devices', viewBulk, 'operator'],
+  [/^#\/schedules$/, 'devices', viewSchedules, 'operator'],
   [/^#\/deployments$/, 'deployments', viewDeployments, 'fleet'],
   [/^#\/deployments\/([\w-]+)$/, 'deployments', viewDeployment, 'fleet'],
   [/^#\/releases$/, 'releases', viewReleases, 'fleet'],
@@ -460,7 +461,8 @@ async function viewDevices(root, query) {
     saveText(`devices-${new Date().toISOString().slice(0, 10)}.csv`, [head, ...rows].map(r => r.map(cell).join(',')).join('\n') + '\n', 'text/csv');
   };
   const recent = h('div', { class: 'need-operator mt' });
-  append(root, pageHead('Devices', count, h('a', { class: 'btn primary need-operator', href: '#/enroll' }, 'Enroll devices')),
+  append(root, pageHead('Devices', count, h('a', { class: 'btn need-operator', href: '#/schedules' }, 'Scheduled actions'),
+    h('a', { class: 'btn primary need-operator', href: '#/enroll' }, 'Enroll devices')),
     h('div', { class: 'toolbar' }, search, status, healthSel, kindSel, lifeSel,
       h('button', { class: 'btn', onclick: exportCSV, title: 'The devices shown, with their inventory, as a spreadsheet' }, 'Export CSV')),
     bulk.el, h('div', { class: 'spacer' }), list, recent);
@@ -541,6 +543,130 @@ function bulkTable(ops) {
 function progressText(p) {
   if (!p) return '';
   return Object.entries(p).sort(([a], [b]) => a.localeCompare(b)).map(([k, n]) => `${n} ${k}`).join(' · ');
+}
+
+// ---------- scheduled actions ----------
+
+const SCHEDULE_OPS = [['reboot', 'Reboot'], ['restart-agent', 'Restart the agent'], ['lock', 'Lock (Android)'], ['wake', 'Check in now'], ['exec', 'Run a command']];
+const WEEKDAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+function scheduleWhen(sa) {
+  const days = !sa.days || !sa.days.length || sa.days.length === 7 ? 'every day' : sa.days.map(d => d[0].toUpperCase() + d.slice(1)).join(', ');
+  return `${days} at ${sa.at} ${sa.time_zone || 'UTC'}`;
+}
+function scheduleTargets(sa) {
+  const sel = sa.selector || {};
+  const parts = [sel.channel && 'channel ' + sel.channel, ...sortedEntries(sel.labels).map(([k, v]) => k + '=' + v),
+    sel.device_ids && sel.device_ids.length && `${sel.device_ids.length} chosen devices`].filter(Boolean);
+  return parts.join(' · ') || (sa.client_scope && Object.keys(sa.client_scope.labels || {}).length ? 'all of this client\'s devices' : 'all devices');
+}
+function lastRunCell(r) {
+  if (!r) return h('span', { class: 'muted' }, 'not yet');
+  const when = h('span', { class: 'muted', title: new Date(r.at).toLocaleString() }, ' ' + ago(r.at));
+  if (r.missed) return [h('span', { class: 'badge warn' }, 'missed'), when];
+  if (r.error) return [h('span', { class: 'badge bad', title: r.error }, 'failed'), when, h('div', { class: 'muted' }, r.error)];
+  return [h('a', { href: '#/bulk/' + r.bulk_id }, `${r.applied} device${r.applied === 1 ? '' : 's'}`),
+    r.skipped ? h('span', { class: 'muted' }, ` (${r.skipped} skipped)`) : null, r.manual ? h('span', { class: 'muted' }, ' · by hand') : null, when];
+}
+
+async function viewSchedules(root) {
+  const fleetOperator = (ROLE_RANK[me.fleet_role] || 0) >= ROLE_RANK.operator;
+  const list = h('div', { class: 'card flush' });
+  const formCard = h('div', { class: 'card hidden' });
+  const nameIn = h('input', { required: true, placeholder: 'Nightly kiosk reboot', 'aria-label': 'Name' });
+  const opSel = h('select', { 'aria-label': 'Action' }, SCHEDULE_OPS.filter(([v]) => v !== 'exec' || fleetOperator).map(([v, l]) => h('option', { value: v }, l)));
+  const cmdIn = h('input', { placeholder: 'systemctl restart kiosk', 'aria-label': 'Command', class: 'mono' });
+  const cmdRow = h('label', { class: 'hidden' }, 'Command (runs as the agent\'s user)', cmdIn);
+  const labelsIn = h('input', { placeholder: 'site=sg role=kiosk', 'aria-label': 'Device labels' });
+  const chanIn = h('input', { placeholder: 'any', 'aria-label': 'Device channel' });
+  const allIn = h('input', { type: 'checkbox' });
+  const atIn = h('input', { type: 'time', value: '03:00', required: true, 'aria-label': 'Time' });
+  const tzIn = h('input', { value: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', 'aria-label': 'Time zone' });
+  const dayBoxes = WEEKDAYS.map(d => h('input', { type: 'checkbox', value: d, 'aria-label': d }));
+  const holdIn = h('input', { type: 'number', min: '0', max: '1440', value: '30', 'aria-label': 'Hold alerts (minutes)' });
+  const enabledIn = h('input', { type: 'checkbox', checked: true });
+  const formTitle = h('h2', {}, 'New scheduled action');
+  let editing = null;
+  opSel.addEventListener('change', () => cmdRow.classList.toggle('hidden', opSel.value !== 'exec'));
+  const openForm = sa => {
+    editing = sa || null;
+    formTitle.textContent = sa ? 'Edit ' + sa.name : 'New scheduled action';
+    nameIn.value = sa ? sa.name : '';
+    opSel.value = sa ? sa.operation : 'reboot';
+    cmdIn.value = sa && sa.args ? sa.args.join(' ') : '';
+    labelsIn.value = sa ? sortedEntries(sa.selector.labels).map(([k, v]) => k + '=' + v).join(' ') : '';
+    chanIn.value = sa ? sa.selector.channel || '' : '';
+    allIn.checked = sa ? !!sa.all : false;
+    atIn.value = sa ? sa.at : '03:00';
+    if (sa) tzIn.value = sa.time_zone || 'UTC';
+    for (const b of dayBoxes) b.checked = !!(sa && sa.days && sa.days.includes(b.value));
+    holdIn.value = sa && sa.hold_alerts_minutes !== undefined ? sa.hold_alerts_minutes : 30;
+    enabledIn.checked = sa ? sa.enabled : true;
+    cmdRow.classList.toggle('hidden', opSel.value !== 'exec');
+    formCard.classList.remove('hidden');
+    nameIn.focus();
+  };
+  const form = h('form', { class: 'stack', onsubmit: async e => {
+    e.preventDefault();
+    let labels;
+    try { labels = parseLabels(labelsIn.value); } catch (err) { return toast(err.message, true); }
+    const body = {
+      name: nameIn.value.trim(), operation: opSel.value, args: opSel.value === 'exec' ? cmdIn.value.trim().split(/\s+/).filter(Boolean) : [],
+      selector: { labels, channel: chanIn.value.trim() || undefined, device_ids: editing ? editing.selector.device_ids : undefined },
+      all: allIn.checked, at: atIn.value, time_zone: tzIn.value.trim(), days: dayBoxes.filter(b => b.checked).map(b => b.value),
+      hold_alerts_minutes: parseInt(holdIn.value || '0', 10), enabled: enabledIn.checked,
+    };
+    const saved = await guard(() => editing ? api('PUT', '/api/v1/scheduled-actions/' + editing.id, body) : api('POST', '/api/v1/scheduled-actions', body),
+      editing ? 'Saved' : 'Scheduled');
+    if (!saved) return;
+    toast(`${saved.name}: ${saved.matches} device${saved.matches === 1 ? '' : 's'} match now` + (saved.next_run_at ? ', next run ' + new Date(saved.next_run_at).toLocaleString() : ''));
+    formCard.classList.add('hidden');
+    refresh();
+  } },
+  h('div', { class: 'form-grid' },
+    h('label', {}, 'Name', nameIn), h('label', {}, 'Action', opSel), cmdRow,
+    h('label', {}, 'Devices with labels', labelsIn), h('label', {}, 'Channel', chanIn),
+    h('label', {}, 'Time', atIn), h('label', {}, 'Time zone', tzIn),
+    h('label', { title: 'A maintenance window on the devices from each run, so a reboot doesn\'t page anyone. 0: none.' }, 'Hold alerts (minutes)', holdIn)),
+  h('label', { class: 'check' }, allIn, 'Every device I can see (when no labels or channel are given)'),
+  h('div', {}, h('div', { class: 'muted small' }, 'Days (none = every day)'),
+    h('div', { class: 'chips' }, dayBoxes.map(b => h('label', { class: 'check chip' }, b, b.value[0].toUpperCase() + b.value.slice(1))))),
+  h('label', { class: 'check' }, enabledIn, 'Enabled'),
+  h('div', { class: 'btn-row' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save'),
+    h('button', { class: 'btn ghost', type: 'button', onclick: () => formCard.classList.add('hidden') }, 'Cancel')));
+  append(formCard, formTitle, form);
+  append(root, pageHead('Scheduled actions', 'Reboots, agent restarts and other actions that run on a schedule. Each run picks its devices afresh and holds their alerts while it runs.',
+    h('button', { class: 'btn primary', onclick: () => openForm() }, 'New scheduled action')),
+  formCard, h('div', { class: 'spacer' }), list);
+
+  async function refresh() {
+    const all = await api('GET', '/api/v1/scheduled-actions');
+    replace(list, table(['Scheduled action', 'When', 'Devices', 'Next run', 'Last run', ''], all.map(sa => h('tr', {},
+      h('td', {}, h('strong', {}, sa.name), h('div', { class: 'muted' }, (SCHEDULE_OPS.find(([v]) => v === sa.operation) || [, sa.operation])[1],
+        sa.args && sa.args.length ? h('span', { class: 'mono' }, ': ' + sa.args.join(' ')) : null,
+        sa.hold_alerts_minutes ? ` · alerts held ${sa.hold_alerts_minutes} min` : '')),
+      h('td', {}, scheduleWhen(sa)),
+      h('td', {}, scheduleTargets(sa), h('div', { class: 'muted' }, `${sa.matches} device${sa.matches === 1 ? '' : 's'} now`)),
+      h('td', { class: 'nowrap' }, sa.enabled && sa.next_run_at ? [h('span', { title: new Date(sa.next_run_at).toLocaleString() },
+        new Date(sa.next_run_at).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false })),
+        h('div', { class: 'muted' }, 'in ' + duration(Math.max(60, (new Date(sa.next_run_at) - Date.now()) / 1000)))] : h('span', { class: 'badge' }, 'paused')),
+      h('td', {}, lastRunCell(sa.last_run)),
+      h('td', { class: 'nowrap' }, h('div', { class: 'btn-row' },
+        h('button', { class: 'btn small', onclick: async () => {
+          if (!confirm(`Run "${sa.name}" now on ${sa.matches} device${sa.matches === 1 ? '' : 's'}?`)) return;
+          const r = await guard(() => api('POST', `/api/v1/scheduled-actions/${sa.id}/run`));
+          if (r) { toast(r.last_run.error ? 'Failed: ' + r.last_run.error : `Queued on ${r.last_run.applied} devices`, !!r.last_run.error); refresh(); }
+        } }, 'Run now'),
+        h('button', { class: 'btn small ghost', onclick: async () => {
+          if (await guard(() => api('PUT', '/api/v1/scheduled-actions/' + sa.id, { ...sa, enabled: !sa.enabled }), sa.enabled ? 'Paused' : 'Resumed')) refresh();
+        } }, sa.enabled ? 'Pause' : 'Resume'),
+        h('button', { class: 'btn small ghost', onclick: () => openForm(sa) }, 'Edit'),
+        h('button', { class: 'btn small ghost danger', onclick: async () => {
+          if (!confirm(`Delete "${sa.name}"?`)) return;
+          if (await guard(() => api('DELETE', '/api/v1/scheduled-actions/' + sa.id), 'Deleted') !== undefined) refresh();
+        } }, 'Delete'))))), 'Nothing is scheduled yet.'));
+  }
+  await guard(refresh);
+  return refresh;
 }
 
 // bulkBar acts on the selected devices: preview with a dry run, confirm,

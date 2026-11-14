@@ -502,6 +502,30 @@ var ErrTokenInvalid = errors.New("enrollment token is invalid, expired, revoked 
 // Enroll atomically consumes an enrollment token and creates the device.
 // The device's channel and labels default to the token's.
 // hwKey is the base64 PKIX public key of an attested hardware key, or "".
+// PutScheduledAction creates or replaces a scheduled action.
+func (s *Store) PutScheduledAction(ctx context.Context, a *api.ScheduledAction) error {
+	return s.putDoc(ctx, "scheduled_actions", a.ID, a.CreatedAt, a)
+}
+
+// GetScheduledAction loads a scheduled action.
+func (s *Store) GetScheduledAction(ctx context.Context, id string) (*api.ScheduledAction, error) {
+	var a api.ScheduledAction
+	if err := s.getDoc(ctx, "scheduled_actions", id, &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// ListScheduledActions returns every scheduled action, oldest first.
+func (s *Store) ListScheduledActions(ctx context.Context) ([]*api.ScheduledAction, error) {
+	return listDocs[api.ScheduledAction](ctx, s, "scheduled_actions")
+}
+
+// DeleteScheduledAction removes a scheduled action.
+func (s *Store) DeleteScheduledAction(ctx context.Context, id string) error {
+	return s.deleteDoc(ctx, "scheduled_actions", id)
+}
+
 // RegistrationID is how a serial number is stored and looked up.
 func RegistrationID(serial string) string { return strings.ToUpper(strings.TrimSpace(serial)) }
 

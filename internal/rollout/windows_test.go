@@ -108,3 +108,31 @@ func TestWindowIntervals(t *testing.T) {
 		}
 	}
 }
+
+func TestNextDailyRun(t *testing.T) {
+	berlin, _ := time.LoadLocation("Europe/Berlin")
+	for _, c := range []struct {
+		at    string
+		days  []string
+		after time.Time
+		want  time.Time
+	}{
+		{"03:00", nil, time.Date(2026, 11, 2, 1, 0, 0, 0, berlin), time.Date(2026, 11, 2, 3, 0, 0, 0, berlin)},
+		{"03:00", nil, time.Date(2026, 11, 2, 3, 0, 0, 0, berlin), time.Date(2026, 11, 3, 3, 0, 0, 0, berlin)}, // strictly after
+		{"03:00", []string{"sun"}, time.Date(2026, 11, 2, 1, 0, 0, 0, berlin), time.Date(2026, 11, 8, 3, 0, 0, 0, berlin)},
+		// Clocks go forward on 29 March: 01:30 local still exists, an hour later in UTC terms.
+		{"01:30", nil, time.Date(2026, 3, 28, 12, 0, 0, 0, berlin), time.Date(2026, 3, 29, 1, 30, 0, 0, berlin)},
+		{"12:00", nil, time.Date(2026, 3, 29, 1, 0, 0, 0, berlin), time.Date(2026, 3, 29, 12, 0, 0, 0, berlin)},
+	} {
+		got, err := NextDailyRun(c.at, c.days, berlin, c.after)
+		if err != nil || !got.Equal(c.want) {
+			t.Errorf("%s %v after %v: got %v %v, want %v", c.at, c.days, c.after, got, err, c.want)
+		}
+	}
+	if _, err := NextDailyRun("24:00", nil, berlin, time.Now()); err == nil {
+		t.Error("24:00 accepted")
+	}
+	if d, err := ParseDays([]string{"Monday", "mon", "SUN"}); err != nil || len(d) != 2 {
+		t.Errorf("ParseDays: %v %v", d, err)
+	}
+}

@@ -98,6 +98,13 @@ CREATE TABLE IF NOT EXISTS registrations (
 	created_at INTEGER NOT NULL
 );
 `},
+	{Version: 12, Name: "scheduled actions", SQL: `
+CREATE TABLE IF NOT EXISTS scheduled_actions (
+	id TEXT PRIMARY KEY,
+	spec TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+`},
 	// Append new migrations here.
 }
 

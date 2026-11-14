@@ -2,6 +2,7 @@ package rollout
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -274,4 +275,42 @@ func MergeIntervals(in []Interval) []Interval {
 		out = append(out, iv)
 	}
 	return out
+}
+
+// ParseDays normalizes weekday names ("Monday", "mon") to three letters.
+func ParseDays(days []string) ([]string, error) {
+	out := make([]string, 0, len(days))
+	for _, d := range days {
+		n := strings.ToLower(strings.TrimSpace(d))
+		if len(n) > 3 {
+			n = n[:3]
+		}
+		if _, ok := weekdays[n]; !ok {
+			return nil, fmt.Errorf("unknown day %q (use mon, tue, wed, thu, fri, sat, sun)", d)
+		}
+		if !slices.Contains(out, n) {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
+
+// NextDailyRun is the first time after `after` that the wall clock in loc
+// reads at (HH:MM) on one of days (none: every day).
+func NextDailyRun(at string, days []string, loc *time.Location, after time.Time) (time.Time, error) {
+	m, err := parseClock(at)
+	if err != nil || m >= 24*60 {
+		return time.Time{}, fmt.Errorf("invalid time %q (use HH:MM)", at)
+	}
+	local := after.In(loc)
+	for i := 0; i <= 8; i++ {
+		c := time.Date(local.Year(), local.Month(), local.Day()+i, m/60, m%60, 0, 0, loc)
+		if !c.After(after) {
+			continue
+		}
+		if len(days) == 0 || slices.ContainsFunc(days, func(d string) bool { return weekdays[d] == c.Weekday() }) {
+			return c, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("no run time found for %s on %v", at, days)
 }

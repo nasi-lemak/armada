@@ -922,6 +922,45 @@ armadactl bulk lifecycle spare --label customer=acme --note "contract ended" --y
 armadactl bulk get <id>
 ```
 
+### Scheduled actions
+
+A scheduled action runs a bulk operation at a set time, such as a nightly kiosk reboot or a weekly agent
+restart. Set them up under **Devices → Scheduled actions**.
+
+- **Operations:** reboot, restart the agent, lock (Android), check in now, or run a command. Commands
+  are for fleet-wide operators only.
+- **When:** a time of day (`HH:MM`) in a time zone, on chosen weekdays (none means every day). Daylight
+  saving changes are handled.
+- **Which devices:** a label selector, a channel, or every device you can see. Each run picks its devices
+  afresh, so new devices are included.
+- **Alerts are held** on the devices for 30 minutes from each run by default, using a maintenance
+  window. A reboot won't page anyone. Set the hold to 0 to turn this off.
+- **Each run is a bulk operation:** its progress shows on the Bulk page, and the activity log records
+  `schedule.ran` (or `schedule.failed`).
+- **Missed runs:** if the server was down more than an hour past a run time, the run is recorded as
+  missed rather than run late.
+- **Run now** tries a schedule immediately. **Pause** keeps it without running.
+- **Client accounts:**
+  - their operators can schedule actions on their own devices;
+  - the schedule acts only on that client's devices, even when set to all devices;
+  - the client sees its runs.
+
+```bash
+armadactl schedules create --name "Nightly kiosk reboot" --op reboot --label role=kiosk --at 03:00 --tz Asia/Singapore
+```
+
+```bash
+armadactl schedules create --name "Weekly restart" --op restart-agent --all --at 23:30 --days sat --hold 0
+```
+
+```bash
+armadactl schedules list
+```
+
+```bash
+armadactl schedules run|pause|resume|delete <id>
+```
+
 ## Certificates on devices
 
 Applications on your devices often have their own TLS certificates: a Mosquitto broker, a local web
@@ -1675,6 +1714,7 @@ endpoints use the per-device key issued at enrollment.
 | `POST /api/v1/deployments/{id}/{approve,pause,resume,advance,retry,complete,abort}` | Control a rollout (`approve`: someone other than its creator) |
 | `GET /api/v1/events` | Activity log. Filters: `type` (comma list; `prefix.*`), `actor` (`system` for none), `q`, `since`/`until` (date or RFC 3339; dates use `tz`), `device_id`, `deployment_id`. Paging: `limit` (up to 1000), `before_id`. `format=csv` exports up to 50,000 entries |
 | `GET /api/v1/events/types` | Event types recorded, for filter menus |
+| `GET/POST /api/v1/scheduled-actions`, `PUT/DELETE /api/v1/scheduled-actions/{id}`, `POST /api/v1/scheduled-actions/{id}/run` | Scheduled actions |
 | `GET /api/v1/registrations`, `POST /api/v1/registrations/import` (CSV body; `dry_run=1`), `DELETE /api/v1/registrations/{serial}` | Pre-registration and bulk import |
 | `GET /api/v1/devices/{id}/timeline` | A device's timeline. `kinds` (alert, update, action, lifecycle, cert, health, config, maintenance, other), `limit` (up to 200), `cursor` (the previous page's `next`) |
 | `GET /api/v1/signing-key` | Release-signing public key |

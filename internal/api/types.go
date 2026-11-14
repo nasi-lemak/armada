@@ -485,6 +485,9 @@ type BulkRequest struct {
 
 	DryRun bool `json:"dry_run,omitempty"`
 	Expect *int `json:"expect,omitempty"`
+	// ClientScope is set by the server for operations a client's scheduled
+	// action runs, so that client's accounts can see them.
+	ClientScope Selector `json:"-"`
 }
 
 // BulkTarget is one device in a bulk operation.
@@ -508,6 +511,8 @@ type BulkOperation struct {
 	Skipped   []BulkTarget `json:"skipped"`
 	CreatedBy string       `json:"created_by,omitempty"`
 	CreatedAt time.Time    `json:"created_at"`
+	// ClientScope: run by a client's scheduled action (visible to that client).
+	ClientScope Selector `json:"client_scope,omitempty"`
 	// Progress counts the queued actions by status (on read; actions only).
 	Progress map[string]int `json:"progress,omitempty"`
 }
@@ -1695,4 +1700,44 @@ type ImportRow struct {
 	Action  string   `json:"action"`
 	Changes []string `json:"changes,omitempty"`
 	Error   string   `json:"error,omitempty"`
+}
+
+// ScheduledAction runs a bulk operation (reboot, restart-agent, lock, wake
+// or exec) at a set time on chosen days, e.g. a nightly reboot.
+type ScheduledAction struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Operation string   `json:"operation"`      // reboot | restart-agent | lock | wake | exec
+	Args      []string `json:"args,omitempty"` // exec: the command
+	// Selector picks the devices when it runs; empty needs all=true.
+	Selector Selector `json:"selector"`
+	All      bool     `json:"all,omitempty"`
+	At       string   `json:"at"`             // HH:MM, local time in TimeZone
+	Days     []string `json:"days,omitempty"` // mon..sun; empty: every day
+	TimeZone string   `json:"time_zone,omitempty"`
+	// HoldAlertsMinutes holds alerts on the devices for this long from each
+	// run (a maintenance window), so a reboot doesn't page anyone. 0: don't.
+	// Defaults to 30 when left out.
+	HoldAlertsMinutes *int `json:"hold_alerts_minutes,omitempty"`
+	Enabled           bool `json:"enabled"`
+	// ClientScope is set for a client's schedule: it only touches that
+	// client's devices.
+	ClientScope Selector      `json:"client_scope"`
+	CreatedBy   string        `json:"created_by,omitempty"`
+	CreatedAt   time.Time     `json:"created_at"`
+	NextRunAt   *time.Time    `json:"next_run_at,omitempty"`
+	LastRun     *ScheduledRun `json:"last_run,omitempty"`
+	// Matches is how many devices it would act on now (on read).
+	Matches int `json:"matches"`
+}
+
+// ScheduledRun is the outcome of one run of a scheduled action.
+type ScheduledRun struct {
+	At      time.Time `json:"at"`
+	BulkID  string    `json:"bulk_id,omitempty"`
+	Applied int       `json:"applied"`
+	Skipped int       `json:"skipped"`
+	Missed  bool      `json:"missed,omitempty"` // the server wasn't running at the time
+	Manual  bool      `json:"manual,omitempty"` // run now, by hand
+	Error   string    `json:"error,omitempty"`
 }

@@ -256,6 +256,19 @@ async function visit(page, who, hash, expectHeading) {
   const rows = (await admin.$$('#view table tbody tr')).length;
   if (rows !== fleet.length) fail(`bulk progress page lists ${rows} devices, expected ${fleet.length}`);
 
+  // Scheduled actions: create a nightly reboot for acme, then run it now.
+  await visit(admin, 'admin', '#/schedules', 'Scheduled actions');
+  await admin.click('#view button:has-text("New scheduled action")');
+  await admin.fill('input[aria-label="Name"]', 'Smoke nightly reboot');
+  await admin.fill('input[aria-label="Device labels"]', 'customer=acme');
+  await admin.fill('input[aria-label="Time zone"]', 'Asia/Singapore');
+  await admin.click('#view form button:has-text("Save")');
+  await admin.waitForSelector('#view td:has-text("Smoke nightly reboot")', { timeout: 5000 }).catch(() => fail('scheduled action not listed'));
+  await admin.click('#view tr:has-text("Smoke nightly reboot") button:has-text("Run now")');
+  await admin.waitForSelector('#view tr:has-text("Smoke nightly reboot") a[href^="#/bulk/"]', { timeout: 5000 }).catch(() => fail('run now did not record a run'));
+  const sched = (await api('GET', '/api/v1/scheduled-actions')).find(x => x.name === 'Smoke nightly reboot');
+  if (!sched || !sched.next_run_at || !sched.last_run || sched.last_run.applied < 1) fail(`scheduled action: ${JSON.stringify(sched)}`);
+
   await browser.close();
   if (failures.length) {
     console.error(`${failures.length} failure(s)`);
