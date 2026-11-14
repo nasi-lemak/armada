@@ -476,6 +476,7 @@ func (s *Server) Handler() http.Handler {
 	viewer(scopedOK, "GET /api/v1/events/types", s.handleEventTypes)
 	viewer(scopedOK, "GET /api/v1/devices/{id}/timeline", s.handleDeviceTimeline)
 	viewer(scopedOK, "GET /api/v1/registrations", s.handleListRegistrations)
+	viewer(scopedOK, "GET /api/v1/labels", s.handleLabels)
 	viewer(scopedOK, "GET /api/v1/scheduled-actions", s.handleListSchedules)
 	operator(scopedOK, "POST /api/v1/scheduled-actions", s.handleCreateSchedule)
 	operator(scopedOK, "PUT /api/v1/scheduled-actions/{id}", s.handleUpdateSchedule)

@@ -404,3 +404,38 @@ table.data-table td, table.data-table th { padding: 4px 12px; font-size: 12px; }
 .dot.warn.halo { box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 25%, transparent); }
 .dot.ok.halo, .dot.halo:not(.warn):not(.bad) { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
 .dot.bad.halo { box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 25%, transparent); }
+
+/* Printable asset labels. Sizes are physical; colors are fixed black on white. */
+.labels { display: flex; flex-wrap: wrap; gap: 4mm; }
+.asset-label { display: flex; align-items: center; gap: 2.5mm; width: 63.5mm; height: 38.1mm; padding: 2.5mm; box-sizing: border-box;
+  background: #fff; color: #000; border: 1px dashed #b8b8b8; border-radius: 2mm; overflow: hidden; break-inside: avoid; font-family: var(--font, system-ui, sans-serif); }
+.asset-label svg { height: 100%; width: auto; aspect-ratio: 1; flex: none; }
+.al-text { min-width: 0; display: flex; flex-direction: column; gap: 0.6mm; font-size: 7.5pt; line-height: 1.2; }
+.al-name { font-size: 10pt; font-weight: 700; overflow-wrap: anywhere; }
+.al-tag { font-size: 9pt; font-weight: 600; }
+.al-mono { font-family: var(--mono, ui-monospace, monospace); overflow-wrap: anywhere; }
+.al-small { font-size: 6.5pt; color: #333; overflow-wrap: anywhere; }
+.labels.s62x29 .asset-label { width: 62mm; height: 29mm; }
+.labels.s50x25 .asset-label { width: 50mm; height: 25mm; padding: 1.5mm; gap: 1.5mm; }
+.labels.s50x25 .al-name { font-size: 8pt; }
+.labels.s50x25 .al-small { display: none; }
+.labels.s100x50 .asset-label { width: 100mm; height: 50mm; padding: 4mm; gap: 4mm; }
+.labels.s100x50 .al-text { font-size: 9pt; }
+.labels.s100x50 .al-name { font-size: 14pt; }
+.labels.s100x50 .al-tag { font-size: 12pt; }
+
+@page lbl-62x29 { size: 62mm 29mm; margin: 0; }
+@page lbl-50x25 { size: 50mm 25mm; margin: 0; }
+@page lbl-100x50 { size: 100mm 50mm; margin: 0; }
+
+@media print {
+  body { background: #fff !important; }
+  .topbar, .toast, .no-print, .palette-backdrop { display: none !important; }
+  #view { padding: 0 !important; margin: 0 !important; max-width: none !important; }
+  .labels.sheet .asset-label { border-color: #ddd; }
+  .labels.roll { display: block; }
+  .labels.roll .asset-label { border: 0; border-radius: 0; break-after: page; }
+  .labels.roll.s62x29 .asset-label { page: lbl-62x29; }
+  .labels.roll.s50x25 .asset-label { page: lbl-50x25; }
+  .labels.roll.s100x50 .asset-label { page: lbl-100x50; }
+}

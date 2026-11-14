@@ -40,7 +40,7 @@ async function seed() {
   // acme's broker reports a Mosquitto certificate expiring in 20 days.
   const day = 24 * 3600e3;
   await fetch(base + '/api/v1/agent/heartbeat', { method: 'POST', headers: { Authorization: 'Bearer ' + keys.acme },
-    body: JSON.stringify({ info: { os: 'linux', arch: 'arm64' }, packages: { myapp: '1.0.0' }, certs: [{ target: 'mosquitto', info: {
+    body: JSON.stringify({ info: { os: 'linux', arch: 'arm64', serial: 'SN-ACME' }, packages: { myapp: '1.0.0' }, certs: [{ target: 'mosquitto', info: {
       subject: 'CN=broker.acme.example,O=Acme', common_name: 'broker.acme.example', subject_fields: { common_name: 'broker.acme.example', organization: 'Acme' },
       dns_names: ['broker.acme.example'], issuer: 'CN=Acme Issuing CA', serial: '1F', key_type: 'ecdsa-p256', fingerprint: 'ab12', key_matches: true,
       not_before: new Date(Date.now() - 345 * day).toISOString(), not_after: new Date(Date.now() + 20 * day).toISOString() } }] }) });
@@ -51,7 +51,7 @@ async function seed() {
   const ch = await api('POST', '/api/v1/channels', { name: 'smoke', type: 'webhook', webhook: { url: 'https://hooks.example.invalid/x' } });
   await api('POST', '/api/v1/alert-rules', { name: 'Disk', enabled: true, condition: 'health', min_severity: 'warning', channels: [ch.id] });
   await fetch(base + '/api/v1/agent/heartbeat', { method: 'POST', headers: { Authorization: 'Bearer ' + keys.acme },
-    body: JSON.stringify({ info: { os: 'linux', arch: 'arm64' }, packages: { myapp: '1.0.0' },
+    body: JSON.stringify({ info: { os: 'linux', arch: 'arm64', serial: 'SN-ACME' }, packages: { myapp: '1.0.0' },
       health: [{ name: 'disk /', kind: 'storage', status: 'critical', message: '99% full' }] }) });
   for (let i = 0; i < 40; i++) { // the engine evaluates alerts every 10 seconds
     if ((await api('GET', '/api/v1/alerts?status=firing')).length) return ids;
@@ -152,6 +152,14 @@ async function visit(page, who, hash, expectHeading) {
   await admin.waitForTimeout(800);
   const inv = (await api('GET', '/api/v1/devices/' + ids.acme)).device.inventory;
   if (!inv || inv.asset_tag !== 'ACME-00417') fail(`inventory not saved: ${JSON.stringify(inv)}`);
+
+  // Asset label: the device page's Print label opens a QR label with its
+  // asset tag and serial.
+  await admin.click('#view a:has-text("Print label")');
+  await admin.waitForSelector('.asset-label svg path', { timeout: 5000 }).catch(() => fail('asset label did not render'));
+  const labelText = await admin.textContent('.asset-label');
+  if (!labelText.includes('ACME-00417') || !labelText.includes('SN-ACME')) fail(`asset label text: ${labelText}`);
+  await visit(admin, 'admin', '#/devices/' + ids.acme, 'acme-kiosk');
 
   // Device timeline: enrollment shows as lifecycle, and the kind
   // filter narrows the feed.

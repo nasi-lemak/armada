@@ -1741,3 +1741,16 @@ type ScheduledRun struct {
 	Manual  bool      `json:"manual,omitempty"` // run now, by hand
 	Error   string    `json:"error,omitempty"`
 }
+
+// AssetLabel is what a printed asset label shows for one device.
+type AssetLabel struct {
+	DeviceID string `json:"device_id"`
+	Name     string `json:"name"`
+	Serial   string `json:"serial,omitempty"`
+	AssetTag string `json:"asset_tag,omitempty"`
+	Location string `json:"location,omitempty"`
+	URL      string `json:"url"` // the device's page, which the QR code opens
+	// QR is the code as an SVG path over a QRSize×QRSize grid (no quiet zone).
+	QR     string `json:"qr"`
+	QRSize int    `json:"qr_size"`
+}

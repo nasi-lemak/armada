@@ -285,6 +285,7 @@ const routes = [
   [/^#\/devices\/([\w-]+)$/, 'devices', viewDevice],
   [/^#\/bulk\/([\w-]+)$/, 'devices', viewBulk, 'operator'],
   [/^#\/schedules$/, 'devices', viewSchedules, 'operator'],
+  [/^#\/labels\?(.*)$/, 'devices', viewLabels],
   [/^#\/deployments$/, 'deployments', viewDeployments, 'fleet'],
   [/^#\/deployments\/([\w-]+)$/, 'deployments', viewDeployment, 'fleet'],
   [/^#\/releases$/, 'releases', viewReleases, 'fleet'],
@@ -669,6 +670,63 @@ async function viewSchedules(root) {
   return refresh;
 }
 
+// ---------- asset labels ----------
+
+// Printable labels: a QR code that opens the device's page, with its name,
+// serial and asset tag. Sheet layout for office printers; one label per
+// page for label printers (the page size comes from style.css).
+const LABEL_LAYOUTS = [['sheet', 'Sheet (A4 or Letter), 63.5 × 38.1 mm'], ['roll-62x29', 'Label printer, 62 × 29 mm'],
+  ['roll-50x25', 'Label printer, 50 × 25 mm'], ['roll-100x50', 'Label printer, 100 × 50 mm']];
+function qrSVG(l) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `-2 -2 ${l.qr_size + 4} ${l.qr_size + 4}`); // with a quiet zone
+  svg.setAttribute('shape-rendering', 'crispEdges');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', 'QR code for ' + l.name);
+  const bg = document.createElementNS(svg.namespaceURI, 'rect');
+  for (const [k, v] of Object.entries({ x: -2, y: -2, width: l.qr_size + 4, height: l.qr_size + 4, fill: '#fff' })) bg.setAttribute(k, v);
+  const path = document.createElementNS(svg.namespaceURI, 'path');
+  path.setAttribute('d', l.qr);
+  path.setAttribute('fill', '#000');
+  svg.append(bg, path);
+  return svg;
+}
+async function viewLabels(root, query) {
+  const params = new URLSearchParams(query || '');
+  const ids = (params.get('ids') || '').split(',').filter(Boolean);
+  const layout = h('select', { 'aria-label': 'Layout' }, LABEL_LAYOUTS.map(([v, l]) => h('option', { value: v }, l)));
+  try { layout.value = localStorage.getItem('armada.labelLayout') || 'sheet'; } catch { /* storage off */ }
+  if (!layout.value) layout.value = 'sheet';
+  const show = Object.fromEntries([['serial', 'Serial'], ['asset_tag', 'Asset tag'], ['location', 'Location']].map(([k, l]) => [k, h('input', { type: 'checkbox', checked: true, 'aria-label': l })]));
+  const sheet = h('div', { class: 'labels' });
+  const count = h('span', {});
+  append(root, h('div', { class: 'no-print' },
+    pageHead('Print labels', count, h('button', { class: 'btn primary', onclick: () => window.print() }, 'Print')),
+    h('div', { class: 'toolbar mb' }, layout, ...Object.entries(show).map(([k, box]) => h('label', { class: 'check' }, box, box.getAttribute('aria-label')))),
+    h('p', { class: 'muted' }, 'Scanning a label with a phone camera opens the device\'s page (after signing in). For a label printer, choose its label size here and "actual size" (100%) in the print dialog.')),
+  sheet);
+  let labels = [];
+  const render = () => {
+    sheet.className = 'labels ' + (layout.value === 'sheet' ? 'sheet' : 'roll s' + layout.value.slice(5));
+    replace(sheet, labels.map(l => h('div', { class: 'asset-label' }, qrSVG(l),
+      h('div', { class: 'al-text' },
+        h('div', { class: 'al-name' }, l.name),
+        show.asset_tag.checked && l.asset_tag ? h('div', { class: 'al-tag' }, l.asset_tag) : null,
+        show.serial.checked && l.serial ? h('div', { class: 'al-mono' }, 'S/N ' + l.serial) : null,
+        show.location.checked && l.location ? h('div', { class: 'al-small' }, l.location) : null,
+        h('div', { class: 'al-small al-mono' }, l.device_id)))));
+  };
+  layout.addEventListener('change', () => { try { localStorage.setItem('armada.labelLayout', layout.value); } catch { /* storage off */ } render(); });
+  for (const box of Object.values(show)) box.addEventListener('change', render);
+  if (!ids.length) { replace(sheet, h('div', { class: 'empty' }, 'Choose devices on the Devices page, then Print QR labels.')); return; }
+  await guard(async () => {
+    labels = [];
+    for (let i = 0; i < ids.length; i += 100) labels = labels.concat(await api('GET', '/api/v1/labels?ids=' + ids.slice(i, i + 100).join(',')));
+    replace(count, `${labels.length} label${labels.length === 1 ? '' : 's'}`);
+    render();
+  });
+}
+
 // bulkBar acts on the selected devices: preview with a dry run, confirm,
 // then apply with the number of devices the preview matched.
 function bulkBar(selected, done) {
@@ -676,7 +734,7 @@ function bulkBar(selected, done) {
   const ops = [
     ['reboot', 'Reboot'], ['restart-agent', 'Restart agent'], ['wake', 'Check in now'], ['lock', 'Lock screen (Android)'],
     fleetOp && ['exec', 'Run command…'], ['set_labels', 'Add labels…'], ['remove_labels', 'Remove labels…'], ['set_channel', 'Set channel…'],
-    ['maintenance', 'Start maintenance…'],
+    ['maintenance', 'Start maintenance…'], ['labels', 'Print QR labels'],
     fleetOp && ['lifecycle:spare', 'Mark as spare'], fleetOp && ['lifecycle:repair', 'Send for repair'],
     fleetOp && ['lifecycle:active', 'Put in service'], fleetOp && ['lifecycle:retired', 'Retire…'],
   ].filter(Boolean);
@@ -695,6 +753,7 @@ function bulkBar(selected, done) {
   opSel.addEventListener('change', sync);
   const run = async () => {
     const ids = [...selected], op = opSel.value, v = arg.value.trim();
+    if (op === 'labels') { location.hash = '#/labels?ids=' + ids.join(','); return; }
     if (op === 'maintenance') {
       const ends = new Date(Date.now() + parseInt(dur.value, 10) * 3600e3).toISOString();
       if (!confirm(`Start maintenance on ${ids.length} devices? Their alerts are held and updates paused.`)) return;
@@ -1067,7 +1126,8 @@ async function viewDevice(root, id) {
         d.connected ? [' ', h('span', { title: 'Holding a live connection: actions reach it within seconds' }, badge('live'))] : null,
         d.license_revoked ? [' ', badge('revoked')] : null,
         d.maintenance ? [' ', maintBadge(d.maintenance), ' ', untilText(d.maintenance.until), ' ·'] : null, ' last seen ', ago(d.last_seen_at),
-        d.agent_status ? ' · ' + d.agent_status : '')));
+        d.agent_status ? ' · ' + d.agent_status : ''),
+        h('a', { class: 'btn small', href: '#/labels?ids=' + d.id, title: 'A QR code that opens this page, with the serial and asset tag' }, 'Print label')));
     const usage = (free, total, usedBytes) => {
       if (!total) return h('span', { class: 'muted' }, '—');
       const u = usedBytes || total - free;

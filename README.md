@@ -740,6 +740,13 @@ client's.
   - It only shows what your account can see: client accounts get their own devices, and users show
     for admins only.
   - The API is `GET /api/v1/search?q=…`.
+- **QR asset labels:** print stickers for devices. Use **Print label** on a device's page, or choose
+  devices on the Devices page and pick **Print QR labels**.
+  - **What a label shows:** a QR code that opens the device's page on a phone (after signing in),
+    plus the name, asset tag, serial number and location.
+  - **Sheet printers:** labels are laid out on A4 or Letter at 63.5 × 38.1 mm.
+  - **Label printers:** one label per page at 62 × 29, 50 × 25 or 100 × 50 mm. Print at actual size.
+  - **The link** uses the server's public URL (`-public-url`).
 - **Timeline:** each device page has one feed of everything that happened to that device, newest
   first and grouped by day.
   - **What it covers:** actions, lifecycle changes, certificates, health changes and config.
@@ -1714,6 +1721,7 @@ endpoints use the per-device key issued at enrollment.
 | `POST /api/v1/deployments/{id}/{approve,pause,resume,advance,retry,complete,abort}` | Control a rollout (`approve`: someone other than its creator) |
 | `GET /api/v1/events` | Activity log. Filters: `type` (comma list; `prefix.*`), `actor` (`system` for none), `q`, `since`/`until` (date or RFC 3339; dates use `tz`), `device_id`, `deployment_id`. Paging: `limit` (up to 1000), `before_id`. `format=csv` exports up to 50,000 entries |
 | `GET /api/v1/events/types` | Event types recorded, for filter menus |
+| `GET /api/v1/labels?ids=dev_a,dev_b` | Asset label data: name, serial, asset tag, device URL and its QR code as an SVG path |
 | `GET/POST /api/v1/scheduled-actions`, `PUT/DELETE /api/v1/scheduled-actions/{id}`, `POST /api/v1/scheduled-actions/{id}/run` | Scheduled actions |
 | `GET /api/v1/registrations`, `POST /api/v1/registrations/import` (CSV body; `dry_run=1`), `DELETE /api/v1/registrations/{serial}` | Pre-registration and bulk import |
 | `GET /api/v1/devices/{id}/timeline` | A device's timeline. `kinds` (alert, update, action, lifecycle, cert, health, config, maintenance, other), `limit` (up to 200), `cursor` (the previous page's `next`) |
