@@ -369,3 +369,4 @@ table.data-table td, table.data-table th { padding: 4px 12px; font-size: 12px; }
 .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
 .callout.bad-callout { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 8%, var(--panel)); }
+.pre-wrap { white-space: pre-wrap; }

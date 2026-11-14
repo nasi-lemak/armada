@@ -248,6 +248,8 @@ type patchDeviceRequest struct {
 	RemoveLabels []string          `json:"remove_labels"` // deleted from labels
 	// LicenseRevoked revokes (true) or reinstates (false) the device's app licenses.
 	LicenseRevoked *bool `json:"license_revoked"`
+	// Inventory replaces what's recorded about the device (asset tag, location, contact, notes).
+	Inventory *api.Inventory `json:"inventory"`
 }
 
 var labelKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,62}$`)
@@ -285,6 +287,23 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 	if code, err := applyPatch(principalFrom(r.Context()), d, req); err != nil {
 		writeError(w, code, err.Error())
 		return
+	}
+	if req.Inventory != nil {
+		inv := *req.Inventory
+		inv.AssetTag, inv.Location, inv.Contact, inv.Notes = strings.TrimSpace(inv.AssetTag), strings.TrimSpace(inv.Location),
+			strings.TrimSpace(inv.Contact), strings.TrimSpace(inv.Notes)
+		if len(inv.AssetTag) > 64 || len(inv.Location) > 200 || len(inv.Contact) > 200 || len(inv.Notes) > 4000 {
+			writeError(w, http.StatusBadRequest, "asset tag is limited to 64 characters, location and contact to 200, notes to 4000")
+			return
+		}
+		if err := s.store.SetDeviceInventory(r.Context(), d.ID, &inv); err != nil {
+			s.internalError(w, err)
+			return
+		}
+		d.Inventory = &inv
+		if inv.Empty() {
+			d.Inventory = nil
+		}
 	}
 	if err := s.store.UpdateDeviceMeta(r.Context(), d.ID, d.Name, d.Channel, d.Labels); err != nil {
 		s.internalError(w, err)

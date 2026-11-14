@@ -100,6 +100,9 @@ class Agent private constructor(private val context: Context) {
             for (pkg in prefs.managedPackages) {
                 if (pkg != context.packageName && isInstalled(pkg)) dpm.setUninstallBlocked(admin, pkg, prefs.blockUninstall)
             }
+            // Lets the agent read the hardware serial for the inventory (a device owner grants it itself).
+            dpm.setPermissionGrantState(admin, context.packageName, android.Manifest.permission.READ_PHONE_STATE,
+                DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED)
             if (Build.VERSION.SDK_INT >= 33) {
                 // Let the foreground-service notification show without asking the user.
                 dpm.setPermissionGrantState(admin, context.packageName, android.Manifest.permission.POST_NOTIFICATIONS,
@@ -237,6 +240,18 @@ class Agent private constructor(private val context: Context) {
         .put("kernel", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}, patch ${Build.VERSION.SECURITY_PATCH})")
         .put("agent_version", BuildConfig.VERSION_NAME)
         .put("ips", JSONArray(localIps()))
+        .put("serial", serial())
+
+    // The hardware serial, for the inventory. Since Android 10 only privileged apps and the device owner
+    // may read it; as device owner the agent grants itself READ_PHONE_STATE (applyPolicy). Without that
+    // (not provisioned as owner), the call throws and no serial is reported.
+    @SuppressLint("MissingPermission", "HardwareIds")
+    private fun serial(): String = try {
+        val s = Build.getSerial()
+        if (s.isNullOrBlank() || s == Build.UNKNOWN) "" else s
+    } catch (e: SecurityException) {
+        ""
+    }
 
     private fun metrics(): JSONObject {
         val mem = ActivityManager.MemoryInfo().also { context.getSystemService(ActivityManager::class.java).getMemoryInfo(it) }

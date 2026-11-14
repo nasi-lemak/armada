@@ -251,8 +251,11 @@ func (s *Server) buildReport(ctx context.Context, p *principal, rr reportRequest
 		if d.ParentID != "" {
 			platform = "ble/" + d.Info.Model
 		}
-		line := api.ReportDevice{ID: d.ID, Name: d.Name, Lifecycle: d.Lifecycle, Platform: platform, Health: d.Health,
+		line := api.ReportDevice{ID: d.ID, Name: d.Name, Serial: d.Info.Serial, Lifecycle: d.Lifecycle, Platform: platform, Health: d.Health,
 			Packages: d.Packages, LastSeenAt: d.LastSeenAt}
+		if d.Inventory != nil {
+			line.AssetTag = d.Inventory.AssetTag
+		}
 		if r, ok := results[d.ID]; ok {
 			if r.maintenance > 0 {
 				m := int(math.Round(r.maintenance))
@@ -520,7 +523,7 @@ func sortedCounts(ok, failed map[string]int) []api.ReportCount {
 func reportCSV(rep *api.Report) []byte {
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
-	w.Write([]string{"device_id", "name", "lifecycle", "platform", "availability_percent", "downtime_minutes", "maintenance_minutes", "alerts",
+	w.Write([]string{"device_id", "name", "serial", "asset_tag", "lifecycle", "platform", "availability_percent", "downtime_minutes", "maintenance_minutes", "alerts",
 		"updates_succeeded", "updates_failed", "health_now", "last_seen", "packages"})
 	for _, d := range rep.Devices {
 		avail, down, maint := "", "", "0"
@@ -540,7 +543,7 @@ func reportCSV(rep *api.Report) []byte {
 		if !d.LastSeenAt.IsZero() {
 			seen = d.LastSeenAt.UTC().Format(time.RFC3339)
 		}
-		w.Write([]string{d.ID, csvSafe(d.Name), d.Lifecycle, d.Platform, avail, down, maint, strconv.Itoa(d.Alerts),
+		w.Write([]string{d.ID, csvSafe(d.Name), csvSafe(d.Serial), csvSafe(d.AssetTag), d.Lifecycle, d.Platform, avail, down, maint, strconv.Itoa(d.Alerts),
 			strconv.Itoa(d.UpdatesSucceeded), strconv.Itoa(d.UpdatesFailed), d.Health, seen, csvSafe(strings.Join(pk, " "))})
 	}
 	w.Flush()

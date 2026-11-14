@@ -18,6 +18,7 @@ func collectInfo() api.DeviceInfo {
 		Arch:         runtime.GOARCH,
 		Kernel:       kernelVersion(),
 		MachineID:    machineID(),
+		Serial:       hardwareSerial(),
 		IPs:          localIPs(),
 		AgentVersion: Version,
 	}

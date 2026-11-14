@@ -37,9 +37,10 @@ Connection (flags or environment):
 
 Commands:
   status                                     fleet overview
-  devices list [--channel C] [--label K=V] [--status online|offline] [--lifecycle active|spare|repair|retired|all]
+  devices list [--channel C] [--label K=V] [--status online|offline] [--lifecycle active|spare|repair|retired|all] [--csv]
   devices get <id>                           details, update history, actions
   devices set <id> [--name N] [--channel C] [--label K=V]... [--unlabel K]...
+                 [--asset-tag T] [--location L] [--contact C] [--notes N]
   devices logs <id> [--unit U | --file NAME] [--lines 200] [--since 1h] [--grep TEXT] [--timeout 2m]
                                              fetch recent journal or log-file lines (waits for the answer)
   devices wake <id>                          ask the device to check in now
@@ -480,6 +481,7 @@ func (c *cli) devices(verb string, args []string) error {
 	switch verb {
 	case "", "list", "ls":
 		fs := flag.NewFlagSet("devices list", flag.ContinueOnError)
+		asCSV := fs.Bool("csv", false, "")
 		channel := fs.String("channel", "", "")
 		status := fs.String("status", "", "")
 		lifecycle := fs.String("lifecycle", "", "")
@@ -507,6 +509,9 @@ func (c *cli) devices(verb string, args []string) error {
 		}
 		if c.json {
 			return c.printJSON(devs)
+		}
+		if *asCSV {
+			return writeDevicesCSV(c.out, devs)
 		}
 		var rows [][]string
 		for _, d := range devs {
@@ -542,8 +547,15 @@ func (c *cli) devices(verb string, args []string) error {
 			return c.printJSON(det)
 		}
 		d := det.Device
-		fmt.Fprintf(c.out, "ID:        %s\nName:      %s\nStatus:    %s (last seen %s)\nChannel:   %s\nLabels:    %s\n",
-			d.ID, d.Name, d.Status, ago(d.LastSeenAt), d.Channel, fmtLabels(d.Labels))
+		fmt.Fprintf(c.out, "ID:        %s\nName:      %s\nStatus:    %s (last seen %s)\nChannel:   %s\nLabels:    %s\nSerial:    %s\n",
+			d.ID, d.Name, d.Status, ago(d.LastSeenAt), d.Channel, fmtLabels(d.Labels), dash(d.Info.Serial))
+		if inv := d.Inventory; inv != nil {
+			for _, kv := range [][2]string{{"Asset tag", inv.AssetTag}, {"Location", inv.Location}, {"Contact", inv.Contact}, {"Notes", inv.Notes}} {
+				if kv[1] != "" {
+					fmt.Fprintf(c.out, "%-10s %s\n", kv[0]+":", kv[1])
+				}
+			}
+		}
 		fmt.Fprintf(c.out, "Host:      %s (%s/%s, kernel %s)\nIPs:       %s\nPackages:  %s\n",
 			d.Info.Hostname, d.Info.OS, d.Info.Arch, dash(d.Info.Kernel), dash(strings.Join(d.Info.IPs, ", ")), fmtPackages(d.Packages))
 		if d.AgentStatus != "" {
@@ -643,6 +655,11 @@ func (c *cli) devices(verb string, args []string) error {
 		fs := flag.NewFlagSet("devices set", flag.ContinueOnError)
 		name := fs.String("name", "", "")
 		channel := fs.String("channel", "", "")
+		// Inventory fields: set any of them (an empty value clears it).
+		inv := map[string]*string{}
+		for _, f := range []string{"asset-tag", "location", "contact", "notes"} {
+			inv[f] = fs.String(f, "\x00", "")
+		}
 		var labels, unlabels multiFlag
 		fs.Var(&labels, "label", "")
 		fs.Var(&unlabels, "unlabel", "")
@@ -673,6 +690,26 @@ func (c *cli) devices(verb string, args []string) error {
 			body["channel"] = *channel
 		}
 		var d api.Device
+		changed := false
+		for _, v := range inv {
+			changed = changed || *v != "\x00"
+		}
+		if changed { // inventory is replaced as a whole: start from what's recorded
+			var cur struct{ Device api.Device }
+			if err := c.do("GET", "/api/v1/devices/"+url.PathEscape(pos[0]), nil, &cur); err != nil {
+				return err
+			}
+			next := api.Inventory{}
+			if cur.Device.Inventory != nil {
+				next = *cur.Device.Inventory
+			}
+			for f, dst := range map[string]*string{"asset-tag": &next.AssetTag, "location": &next.Location, "contact": &next.Contact, "notes": &next.Notes} {
+				if v := *inv[f]; v != "\x00" {
+					*dst = v
+				}
+			}
+			body["inventory"] = next
+		}
 		if err := c.do("PATCH", "/api/v1/devices/"+url.PathEscape(pos[0]), body, &d); err != nil {
 			return err
 		}
@@ -1704,4 +1741,31 @@ func (c *cli) backup(args []string) error {
 	}
 	fmt.Fprintf(c.out, "wrote %s (%s). It contains the signing keys: store it securely.\n", *out, bytesH(uint64(n)))
 	return nil
+}
+
+// writeDevicesCSV writes devices with their inventory as CSV.
+func writeDevicesCSV(w io.Writer, devs []api.Device) error {
+	cw := csv.NewWriter(w)
+	cw.Write([]string{"id", "name", "serial", "asset_tag", "location", "contact", "status", "lifecycle", "health", "channel", "platform", "labels", "packages", "ips", "last_seen", "enrolled"})
+	safe := func(v string) string {
+		if v != "" && strings.ContainsRune("=+-@\t\r", rune(v[0])) {
+			return "'" + v
+		}
+		return v
+	}
+	for _, d := range devs {
+		inv := api.Inventory{}
+		if d.Inventory != nil {
+			inv = *d.Inventory
+		}
+		platform := d.Info.OS + "/" + d.Info.Arch
+		if d.ParentID != "" {
+			platform = "ble/" + d.Info.Model
+		}
+		cw.Write([]string{d.ID, safe(d.Name), safe(d.Info.Serial), safe(inv.AssetTag), safe(inv.Location), safe(inv.Contact), d.Status, d.Lifecycle, d.Health,
+			d.Channel, platform, fmtLabels(d.Labels), fmtPackages(d.Packages), strings.Join(d.Info.IPs, " "),
+			d.LastSeenAt.UTC().Format(time.RFC3339), d.EnrolledAt.UTC().Format(time.RFC3339)})
+	}
+	cw.Flush()
+	return cw.Error()
 }

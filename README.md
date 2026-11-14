@@ -714,6 +714,27 @@ client's.
   - **Email:** goes through your SMTP relay. Clients choose recipients only, not a mail server. Without
     `-smtp-host`, clients can't create email channels.
 
+## Device inventory
+
+- **Serial number:** each device reports its hardware serial number:
+  - Linux: DMI or device tree (so Raspberry Pis too);
+  - macOS;
+  - Windows: BIOS;
+  - Android: the agent grants itself the permission as device owner.
+- **What you record:** on a device's page (or with `armadactl devices set`), its **asset tag**,
+  **location**, **on-site contact** and **notes**. Operators on a device can edit them, including a
+  client's own operators.
+- **Where it shows:** the serial and asset tag appear under each device's name in the list, and in
+  customer reports and their CSV.
+- **Finding devices:** the device search matches them, along with name, IP and labels.
+- **Device list:** **Export CSV** saves the devices shown, with their inventory, as a spreadsheet
+  (`armadactl devices list --csv`). The list's filters are kept in the address
+  (`#/devices?q=acme&status=offline`), so a view can be bookmarked or sent to a colleague.
+
+```bash
+armadactl devices set <id> --asset-tag ACME-00417 --location "Orchard store, till 3" --contact "Mei, +65 5550 1234"
+```
+
 ## Device lifecycle
 
 Every device has a lifecycle state, shown as a badge in the device list and on its page:
@@ -1447,6 +1468,8 @@ armadactl status
 armadactl devices list [--channel C] [--label K=V] [--status online|offline] [--lifecycle spare|repair|retired|all]
 armadactl devices get <id>
 armadactl devices set <id> [--name N] [--channel C] [--label K=V]... [--unlabel K]...
+                         [--asset-tag T] [--location L] [--contact C] [--notes N]
+armadactl devices list --csv                 the devices, with serial and inventory, as CSV
 armadactl devices action <id> reboot|restart-agent
 armadactl devices action <id> exec -- systemctl status myapp
 armadactl devices logs <id> [--unit myapp.service | --file myapp] [--lines 200] [--since 1h] [--grep error]
@@ -1582,7 +1605,7 @@ endpoints use the per-device key issued at enrollment.
 |---|---|
 | `GET /api/v1/summary` | Fleet counts and version distribution |
 | `GET /api/v1/devices` (`?channel=&label=k=v&status=&lifecycle=`) | List devices (retired ones only with `lifecycle=retired` or `all`) |
-| `GET/PATCH/DELETE /api/v1/devices/{id}` | Device detail (with updates, actions, events), edit name/channel/labels, remove |
+| `GET/PATCH/DELETE /api/v1/devices/{id}` | Device detail (with updates, actions, events), edit name/channel/labels/inventory, remove |
 | `GET/POST /api/v1/devices/{id}/actions` | List or queue `reboot`, `restart-agent`, `exec`, `logs`; on Android `lock`, `wipe` |
 | `POST /api/v1/devices/{id}/wake` | Ask a device to check in now |
 | `POST /api/v1/bulk` (`operation`, `selector` or `all`, `dry_run`, `expect`) | Bulk operation: preview, then apply with the previewed count |

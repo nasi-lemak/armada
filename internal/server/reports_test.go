@@ -240,7 +240,7 @@ func TestReportContents(t *testing.T) {
 	// CSV and printable HTML.
 	code, body := e.get(t, ceo, q+"&format=csv")
 	rows, err := csv.NewReader(strings.NewReader(string(body))).ReadAll()
-	if code != 200 || err != nil || len(rows) != 3 || rows[1][4] != "50.00" {
+	if code != 200 || err != nil || len(rows) != 3 || rows[1][6] != "50.00" {
 		t.Fatalf("csv: %d %v %q", code, err, body)
 	}
 	if !strings.HasPrefix(rows[2][1], "'=1+1") {

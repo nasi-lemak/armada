@@ -12,11 +12,13 @@ const AgentPackage = "armada-agent"
 
 // DeviceInfo is static-ish information an agent reports about its host.
 type DeviceInfo struct {
-	Hostname     string   `json:"hostname"`
-	OS           string   `json:"os"`
-	Arch         string   `json:"arch"`
-	Kernel       string   `json:"kernel,omitempty"`
-	MachineID    string   `json:"machine_id,omitempty"`
+	Hostname  string `json:"hostname"`
+	OS        string `json:"os"`
+	Arch      string `json:"arch"`
+	Kernel    string `json:"kernel,omitempty"`
+	MachineID string `json:"machine_id,omitempty"`
+	// Serial is the hardware serial number, when the device reports one.
+	Serial       string   `json:"serial,omitempty"`
 	IPs          []string `json:"ips,omitempty"`
 	AgentVersion string   `json:"agent_version"`
 	// Model and Protocol describe peripherals (hardware model, firmware update method).
@@ -66,9 +68,26 @@ type Device struct {
 	ParentID string `json:"parent_id,omitempty"`
 	// Maintenance is set (on read) while a maintenance window covers the device.
 	Maintenance *MaintenanceInfo `json:"maintenance,omitempty"`
+	// Inventory is what people record about the device (asset tag, where it is…).
+	Inventory *Inventory `json:"inventory,omitempty"`
 	// Lifecycle is where the device is in its life: active | spare | repair | retired.
 	Lifecycle     string         `json:"lifecycle"`
 	LifecycleInfo *LifecycleInfo `json:"lifecycle_info,omitempty"`
+}
+
+// Inventory is what people record about a device, for finding it, RMAs
+// and talking to clients. The hardware serial is reported by the device
+// itself (DeviceInfo.Serial).
+type Inventory struct {
+	AssetTag string `json:"asset_tag,omitempty"`
+	Location string `json:"location,omitempty"` // e.g. "Orchard store, 2nd floor, till 3"
+	Contact  string `json:"contact,omitempty"`  // who to call on site
+	Notes    string `json:"notes,omitempty"`
+}
+
+// Empty reports whether nothing is recorded.
+func (i *Inventory) Empty() bool {
+	return i == nil || (i.AssetTag == "" && i.Location == "" && i.Contact == "" && i.Notes == "")
 }
 
 // Lifecycle states.
@@ -1321,6 +1340,8 @@ type ReportSummary struct {
 type ReportDevice struct {
 	ID              string   `json:"id"`
 	Name            string   `json:"name"`
+	Serial          string   `json:"serial,omitempty"`
+	AssetTag        string   `json:"asset_tag,omitempty"`
 	Lifecycle       string   `json:"lifecycle"`
 	Platform        string   `json:"platform"`
 	Availability    *float64 `json:"availability,omitempty"`

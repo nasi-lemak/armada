@@ -272,7 +272,7 @@ let currentRefresh = null;
 
 const routes = [
   [/^#?\/?$/, 'overview', viewOverview],
-  [/^#\/devices$/, 'devices', viewDevices],
+  [/^#\/devices(?:\?(.*))?$/, 'devices', viewDevices],
   [/^#\/devices\/([\w-]+)$/, 'devices', viewDevice],
   [/^#\/bulk\/([\w-]+)$/, 'devices', viewBulk, 'operator'],
   [/^#\/deployments$/, 'deployments', viewDeployments, 'fleet'],
@@ -410,8 +410,8 @@ function eventFeed(events) {
       e.deployment_id ? [' · ', h('a', { href: '#/deployments/' + e.deployment_id }, 'deployment')] : null)))));
 }
 
-async function viewDevices(root) {
-  const search = h('input', { type: 'search', placeholder: 'Search name, ID, IP, label…', 'aria-label': 'Search devices' });
+async function viewDevices(root, query) {
+  const search = h('input', { type: 'search', placeholder: 'Search name, serial, asset tag, IP, label…', 'aria-label': 'Search devices' });
   const status = h('select', { 'aria-label': 'Status filter' }, h('option', { value: '' }, 'All statuses'), h('option', { value: 'online' }, 'Online'), h('option', { value: 'offline' }, 'Offline'));
   const healthSel = h('select', { 'aria-label': 'Health filter' }, ['', 'critical', 'warning', 'unknown', 'ok'].map(v => h('option', { value: v }, v ? 'Health: ' + v : 'Any health')));
   const kindSel = h('select', { 'aria-label': 'Kind filter' }, [['', 'All kinds'], ['agent', 'Agents'], ['peripheral', 'Peripherals']].map(([v, l]) => h('option', { value: v }, l)));
@@ -421,18 +421,50 @@ async function viewDevices(root) {
   const count = h('span', {});
   const selected = new Set();
   const bulk = bulkBar(selected, () => { render(); guard(refresh); });
+  // Filters live in the URL, so a view can be bookmarked, shared and kept on refresh.
+  const params = new URLSearchParams(query || '');
+  search.value = params.get('q') || '';
+  for (const [el, key] of [[status, 'status'], [healthSel, 'health'], [kindSel, 'kind'], [lifeSel, 'lifecycle']]) {
+    const v = params.get(key);
+    if (v && [...el.options].some(o => o.value === v)) el.value = v;
+  }
+  const syncURL = () => {
+    const p = new URLSearchParams();
+    if (search.value.trim()) p.set('q', search.value.trim());
+    for (const [el, key] of [[status, 'status'], [healthSel, 'health'], [kindSel, 'kind'], [lifeSel, 'lifecycle']]) if (el.value) p.set(key, el.value);
+    const hash = '#/devices' + (p.toString() ? '?' + p : '');
+    if (location.hash !== hash) history.replaceState(null, '', hash);
+  };
+  let shownDevices = [];
+  const exportCSV = () => {
+    const cell = v => {
+      v = String(v ?? '');
+      if (/^[=+\-@\t\r]/.test(v)) v = "'" + v; // not a formula in spreadsheets
+      return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+    };
+    const head = ['id', 'name', 'serial', 'asset_tag', 'location', 'contact', 'status', 'lifecycle', 'health', 'channel', 'platform', 'labels', 'packages', 'ips', 'last_seen', 'enrolled'];
+    const rows = shownDevices.map(d => { const inv = d.inventory || {}; return [d.id, d.name, d.info.serial, inv.asset_tag, inv.location, inv.contact, d.status, d.lifecycle, d.health || 'ok',
+      d.channel, d.parent_id ? 'ble/' + d.info.model : `${d.info.os}/${d.info.arch}`, sortedEntries(d.labels).map(([k, v]) => k + '=' + v).join(' '),
+      sortedEntries(d.packages).map(([k, v]) => k + '=' + v).join(' '), (d.info.ips || []).join(' '), d.last_seen_at, d.enrolled_at]; });
+    saveText(`devices-${new Date().toISOString().slice(0, 10)}.csv`, [head, ...rows].map(r => r.map(cell).join(',')).join('\n') + '\n', 'text/csv');
+  };
   const recent = h('div', { class: 'need-operator mt' });
   append(root, pageHead('Devices', count, h('a', { class: 'btn primary need-operator', href: '#/enroll' }, 'Enroll devices')),
-    h('div', { class: 'toolbar' }, search, status, healthSel, kindSel, lifeSel), bulk.el, h('div', { class: 'spacer' }), list, recent);
+    h('div', { class: 'toolbar' }, search, status, healthSel, kindSel, lifeSel,
+      h('button', { class: 'btn', onclick: exportCSV, title: 'The devices shown, with their inventory, as a spreadsheet' }, 'Export CSV')),
+    bulk.el, h('div', { class: 'spacer' }), list, recent);
   let devices = [];
   function render() {
     const q = search.value.trim().toLowerCase();
     const names = Object.fromEntries(devices.map(d => [d.id, d.name]));
     const shown = devices.filter(d => (!status.value || d.status === status.value) && (!healthSel.value || d.health === healthSel.value) &&
       (!kindSel.value || (kindSel.value === 'peripheral') === !!d.parent_id) && (!q || [
-      d.id, d.name, d.channel, d.info.hostname, d.info.model, d.info.machine_id, ...(d.info.ips || []),
+      d.id, d.name, d.channel, d.info.hostname, d.info.model, d.info.machine_id, d.info.serial, ...(d.info.ips || []),
+      ...Object.values(d.inventory || {}),
       ...Object.entries(d.labels).map(([k, v]) => k + '=' + v),
     ].some(s => (s || '').toLowerCase().includes(q))));
+    shownDevices = shown;
+    syncURL();
     replace(count, `${devices.length} ${lifeSel.value === 'retired' ? 'retired' : 'enrolled'} · ${devices.filter(d => d.status === 'online' && d.lifecycle !== 'retired').length} online`);
     // Selection survives refreshes and filtering, but not devices that left the list.
     const present = new Set(devices.map(d => d.id));
@@ -447,6 +479,8 @@ async function viewDevices(root) {
       shown.map(d => h('tr', { class: 'clickable' + (selected.has(d.id) ? ' selected' : ''), onclick: () => { location.hash = '#/devices/' + d.id; } },
         pick(d),
         h('td', {}, h('div', {}, h('strong', {}, d.name)), h('div', { class: 'muted mono' }, d.id),
+          d.info.serial || (d.inventory && d.inventory.asset_tag) ? h('div', { class: 'muted' },
+            [d.inventory && d.inventory.asset_tag ? 'asset ' + d.inventory.asset_tag : null, d.info.serial ? 'S/N ' + d.info.serial : null].filter(Boolean).join(' · ')) : null,
           d.parent_id ? h('div', { class: 'muted' }, 'via ', names[d.parent_id] || d.parent_id) : null,
           d.agent_status ? h('div', { class: 'muted' }, d.agent_status) : null),
         h('td', {}, d.lifecycle === 'retired' ? lifecycleBadge(d) : badge(d.status),
@@ -475,6 +509,12 @@ async function viewDevices(root) {
   await guard(refresh);
   search.focus();
   return refresh;
+}
+
+function inventoryRows(inv) {
+  if (!inv) return [];
+  return [['Asset tag', inv.asset_tag], ['Location', inv.location], ['On-site contact', inv.contact], ['Notes', inv.notes]]
+    .filter(([, v]) => v).flatMap(([k, v]) => [h('dt', {}, k), h('dd', { class: k === 'Notes' ? 'pre-wrap' : '' }, v)]);
 }
 
 // ---------- bulk operations ----------
@@ -610,6 +650,10 @@ async function viewDevice(root, id) {
   const chanIn = h('input', { 'aria-label': 'Channel' });
   const labelIn = h('input', { placeholder: 'key=value', 'aria-label': 'New label' });
   const labelBox = h('div', {});
+  const invTag = h('input', { placeholder: 'e.g. ACME-00417', 'aria-label': 'Asset tag' });
+  const invLoc = h('input', { placeholder: 'e.g. Orchard store, till 3', 'aria-label': 'Location' });
+  const invContact = h('input', { placeholder: 'name, phone', 'aria-label': 'On-site contact' });
+  const invNotes = h('textarea', { rows: 2, placeholder: 'anything worth knowing on site', 'aria-label': 'Notes' });
   append(meta, h('h2', {}, 'Settings'),
     h('form', { class: 'stack', onsubmit: async e => {
       e.preventDefault();
@@ -617,6 +661,18 @@ async function viewDevice(root, id) {
     } },
     h('div', { class: 'form-grid' }, h('label', {}, 'Name', nameIn), h('label', {}, 'Channel', chanIn)),
     h('button', { class: 'btn', type: 'submit' }, 'Save')),
+    h('h2', { class: 'mt' }, 'Inventory'),
+    h('form', { class: 'stack', onsubmit: async e => {
+      e.preventDefault();
+      const inventory = { asset_tag: invTag.value.trim(), location: invLoc.value.trim(), contact: invContact.value.trim(), notes: invNotes.value.trim() };
+      if (await guard(() => api('PATCH', '/api/v1/devices/' + id, { inventory }), 'Saved')) {
+        for (const el of [invTag, invLoc, invContact, invNotes]) el.dataset.loaded = el.value.trim();
+        refresh();
+      }
+    } },
+    h('div', { class: 'form-grid' }, h('label', {}, 'Asset tag', invTag), h('label', {}, 'Location', invLoc), h('label', {}, 'On-site contact', invContact)),
+    h('label', {}, 'Notes', invNotes),
+    h('button', { class: 'btn', type: 'submit' }, 'Save inventory')),
     h('h2', { class: 'mt' }, 'Labels'), h('div', { class: 'mb' }, labelBox),
     h('form', { class: 'inline', onsubmit: async e => {
       e.preventDefault();
@@ -757,6 +813,13 @@ async function viewDevice(root, id) {
     hist.load();
     const d = dev, m = d.metrics;
     if (document.activeElement !== nameIn) nameIn.value = d.name;
+    const inv = d.inventory || {};
+    // Refresh a field only if nobody has typed in it since it was loaded.
+    for (const [el, v] of [[invTag, inv.asset_tag], [invLoc, inv.location], [invContact, inv.contact], [invNotes, inv.notes]]) {
+      if (document.activeElement !== el && (el.dataset.loaded === undefined || el.value === el.dataset.loaded)) {
+        el.value = el.dataset.loaded = v || '';
+      }
+    }
     if (document.activeElement !== chanIn) chanIn.value = d.channel;
     const android = (d.info.os || '').toLowerCase() === 'android';
     const setRevoked = async revoked => {
@@ -816,6 +879,8 @@ async function viewDevice(root, id) {
       h('div', { class: 'grid cols-2' },
         h('dl', { class: 'kv' },
           h('dt', {}, 'Hostname'), h('dd', {}, d.info.hostname || '—'),
+          h('dt', {}, 'Serial number'), h('dd', { class: 'mono' }, d.info.serial || h('span', { class: 'muted' }, 'not reported')),
+          ...inventoryRows(d.inventory),
           h('dt', {}, 'Platform'), h('dd', {}, `${d.info.os}/${d.info.arch}`, d.info.kernel ? ` · ${d.info.kernel}` : ''),
           h('dt', {}, 'IP addresses'), h('dd', { class: 'mono' }, (d.info.ips || []).join(', ') || '—'),
           h('dt', {}, 'Packages'), h('dd', {}, pkgChips(d.packages)),

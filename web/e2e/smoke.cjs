@@ -99,6 +99,11 @@ async function visit(page, who, hash, expectHeading) {
       if (rows.length !== 3) fail(`admin sees ${rows.length} devices, expected 3`);
       if (!rows.some(r => r.includes('stock-kiosk') && r.includes('spare'))) fail('device list does not mark the spare');
       if (!rows.some(r => r.includes('globex') && r.includes('maintenance'))) fail('device list does not mark the device in maintenance');
+      // Filters come from the URL (shareable links).
+      await admin.goto(base + '/#/devices?q=globex');
+      await admin.waitForTimeout(600);
+      const filtered = await admin.$$eval('#view table tbody tr', r => r.length).catch(() => 0);
+      if (filtered !== 1 || (await admin.inputValue('input[aria-label="Search devices"]')) !== 'globex') fail(`URL filter: ${filtered} rows`);
     }
     if (hash === '#/certificates') {
       const rows = await admin.$$eval('#view table tbody tr', r => r.map(x => x.textContent)).catch(() => []);
@@ -130,6 +135,14 @@ async function visit(page, who, hash, expectHeading) {
       await admin.waitForSelector('#view :text("acked by")', { timeout: 5000 }).catch(() => fail('acknowledgement not shown'));
     }
   }
+
+  // Inventory: the admin records an asset tag on the device page.
+  await visit(admin, 'admin', '#/devices/' + ids.acme, 'acme-kiosk');
+  await admin.fill('input[aria-label="Asset tag"]', 'ACME-00417');
+  await admin.click('#view button:has-text("Save inventory")');
+  await admin.waitForTimeout(800);
+  const inv = (await api('GET', '/api/v1/devices/' + ids.acme)).device.inventory;
+  if (!inv || inv.asset_tag !== 'ACME-00417') fail(`inventory not saved: ${JSON.stringify(inv)}`);
 
   // Client account: only its customer's devices, no fleet pages.
   const client = await browser.newPage({ viewport: { width: 1280, height: 900 } });

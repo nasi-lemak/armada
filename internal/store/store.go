@@ -230,14 +230,14 @@ type scanner interface{ Scan(dest ...any) error }
 
 // ---- devices ----
 
-const deviceCols = `id, name, channel, labels, info, metrics, packages, agent_status, enrolled_at, last_seen_at, attestation, license_revoked, health, parent_id, lifecycle, lifecycle_info`
+const deviceCols = `id, name, channel, labels, info, metrics, packages, agent_status, enrolled_at, last_seen_at, attestation, license_revoked, health, parent_id, lifecycle, lifecycle_info, inventory`
 
 func scanDevice(sc scanner) (*api.Device, error) {
 	var d api.Device
-	var labels, info, metrics, packages, attestation, health, lifeInfo string
+	var labels, info, metrics, packages, attestation, health, lifeInfo, inventory string
 	var enrolled, seen int64
 	var revoked int
-	if err := sc.Scan(&d.ID, &d.Name, &d.Channel, &labels, &info, &metrics, &packages, &d.AgentStatus, &enrolled, &seen, &attestation, &revoked, &health, &d.ParentID, &d.Lifecycle, &lifeInfo); err != nil {
+	if err := sc.Scan(&d.ID, &d.Name, &d.Channel, &labels, &info, &metrics, &packages, &d.AgentStatus, &enrolled, &seen, &attestation, &revoked, &health, &d.ParentID, &d.Lifecycle, &lifeInfo, &inventory); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -267,6 +267,10 @@ func scanDevice(sc scanner) (*api.Device, error) {
 	if lifeInfo != "" {
 		d.LifecycleInfo = &api.LifecycleInfo{}
 		_ = json.Unmarshal([]byte(lifeInfo), d.LifecycleInfo)
+	}
+	if inventory != "" {
+		d.Inventory = &api.Inventory{}
+		_ = json.Unmarshal([]byte(inventory), d.Inventory)
 	}
 	return &d, nil
 }
@@ -378,6 +382,22 @@ func (s *Store) RecordHeartbeat(ctx context.Context, id string, info api.DeviceI
 		return err
 	}
 	return expectOne(res)
+}
+
+// SetDeviceInventory stores what people record about a device.
+func (s *Store) SetDeviceInventory(ctx context.Context, id string, inv *api.Inventory) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE devices SET inventory=? WHERE id=?`, inventoryJSON(inv), id)
+	if err != nil {
+		return err
+	}
+	return expectOne(res)
+}
+
+func inventoryJSON(inv *api.Inventory) string {
+	if inv.Empty() {
+		return ""
+	}
+	return mustJSON(inv)
 }
 
 // UpdateDeviceMeta changes admin-controlled fields.
@@ -523,9 +543,9 @@ func (s *Store) Enroll(ctx context.Context, tokenHash string, d *api.Device, key
 		d.LifecycleInfo = &api.LifecycleInfo{Note: "enrolled as a spare", ChangedAt: now, ChangedBy: by}
 		lifeInfo = mustJSON(d.LifecycleInfo)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash, hw_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash, hw_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		d.ID, d.Name, d.Channel, mustJSON(d.Labels), mustJSON(d.Info), mustJSON(d.Metrics), mustJSON(d.Packages),
-		d.AgentStatus, ts(d.EnrolledAt), ts(d.LastSeenAt), attestation, boolInt(d.LicenseRevoked), "[]", d.ParentID, d.Lifecycle, lifeInfo, keyHash, hwKey); err != nil {
+		d.AgentStatus, ts(d.EnrolledAt), ts(d.LastSeenAt), attestation, boolInt(d.LicenseRevoked), "[]", d.ParentID, d.Lifecycle, lifeInfo, inventoryJSON(d.Inventory), keyHash, hwKey); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1371,9 +1391,9 @@ func (s *Store) UpsertPeripheral(ctx context.Context, d *api.Device) (created bo
 	if n, _ := res.RowsAffected(); n > 0 {
 		return false, nil
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash, hw_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err = s.db.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash, hw_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		d.ID, d.Name, d.Channel, mustJSON(d.Labels), mustJSON(d.Info), mustJSON(d.Metrics), mustJSON(d.Packages),
-		"", ts(d.EnrolledAt), ts(d.LastSeenAt), "", 0, mustJSON(nonNilChecks(d.Checks)), d.ParentID, api.LifecycleActive, "",
+		"", ts(d.EnrolledAt), ts(d.LastSeenAt), "", 0, mustJSON(nonNilChecks(d.Checks)), d.ParentID, api.LifecycleActive, "", "",
 		// Peripherals have no credentials; this placeholder can never match a key hash.
 		"peripheral:"+d.ID, "")
 	return err == nil, err
