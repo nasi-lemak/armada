@@ -122,6 +122,28 @@ docs/               documentation (go test ./docs checks every link)
 ```
 
 
+## Testing on Windows, macOS and Linux
+
+`internal/platformtest` installs the agent the way a customer would and checks that it enrolls,
+restarts when asked from the dashboard (the service manager must bring it back, with a new
+process), updates itself to a new release, and (on Windows) uninstalls with `-uninstall-service`:
+
+- Windows: `install.ps1` and the Windows service;
+- macOS: `install.sh` and launchd;
+- Linux: `install.sh` and systemd.
+
+It changes the machine it runs on, so it only runs when asked. The **Platforms** workflow
+(Actions → Platforms → Run workflow) runs it on GitHub's Windows, macOS and Linux machines; run it
+before a release. On a spare machine of your own, as a user with password-less `sudo` (or as
+Administrator on Windows):
+
+```bash
+ARMADA_PLATFORM_TEST=install go test -v -run TestPlatform ./internal/platformtest
+```
+
+`ARMADA_PLATFORM_TEST=direct` runs the same checks with the agent as a plain process, changing
+nothing (Linux and macOS).
+
 ## Fuzz testing
 
 Everything a device sends, and everything the server accepts before sign-in, has a fuzz test: Go's
