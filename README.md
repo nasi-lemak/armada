@@ -162,8 +162,10 @@ Start an agent (here on the same machine, with local state):
    ```
 
    ```bash
-   ./bin/armadactl releases upload --package armada-agent --version 1.0.0 --os linux --arch amd64 dist/armada-agent_1.0.0_linux_amd64
+   ./bin/armadactl releases upload-agents dist
    ```
+
+   This uploads every `armada-agent_<version>_<os>_<arch>` build in the folder.
 
 2. On the device. Linux or macOS:
 
@@ -176,6 +178,11 @@ Start an agent (here on the same machine, with local state):
    ```powershell
    $env:ARMADA_SERVER_URL='https://fleet.example.com'; $env:ARMADA_ENROLLMENT_TOKEN='et_...'; irm https://fleet.example.com/install.ps1 | iex
    ```
+
+Or install the `.deb` package from a [release](docs/development.md#releasing) (apt, Ansible, an
+image build): `sudo ARMADA_SERVER_URL=… ARMADA_ENROLLMENT_TOKEN=… apt install ./armada-agent_1.0.0_arm64.deb`
+writes the config and starts the agent. Without those variables, write `/etc/armada/agent.json`
+yourself and run `systemctl start armada-agent`.
 
 The script downloads the newest agent for the device's system and architecture (upload a release for
 each: `--os darwin`, `--os windows`), verifies its checksum, writes the config and starts the agent

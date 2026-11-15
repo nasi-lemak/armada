@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -61,6 +62,7 @@ Commands:
                                              --spare: devices join as spares (in stock: updates, no alerts)
   tokens revoke <id>
   releases list [--package P]
+  releases upload-agents DIR [--channel C]   upload every armada-agent_<version>_<os>_<arch> build in DIR
   releases upload --package P --version V [--channel C] [--os O] [--arch A]
                   [--notes N] [--version-code N] [--auto-deploy] <file>
   releases delete <id>
@@ -1052,6 +1054,29 @@ func (c *cli) releases(verb string, args []string) error {
 			return errors.New("--package and --version are required")
 		}
 		return c.upload(fields, *autoDeploy, pos[0])
+	case "upload-agents":
+		fs := flag.NewFlagSet("releases upload-agents", flag.ContinueOnError)
+		channel := fs.String("channel", "", "")
+		pos, err := parse(fs, args)
+		if err != nil {
+			return err
+		}
+		if err := need(pos, 1, "directory with armada-agent builds (from make agents or tools/release)"); err != nil {
+			return err
+		}
+		builds, err := agentBuilds(pos[0])
+		if err != nil {
+			return err
+		}
+		for _, b := range builds {
+			fields := map[string]*string{"package": ptr(api.AgentPackage), "version": &b.version, "channel": channel, "os": &b.os, "arch": &b.arch,
+				"notes": ptr(""), "version-code": ptr("")}
+			fmt.Fprintf(c.out, "%s %s/%s: ", b.version, b.os, b.arch)
+			if err := c.upload(fields, false, b.path); err != nil {
+				return fmt.Errorf("%s: %w", b.path, err)
+			}
+		}
+		return nil
 	case "delete", "rm":
 		if err := need(args, 1, "release id"); err != nil {
 			return err
@@ -1950,4 +1975,36 @@ func writeDevicesCSV(w io.Writer, devs []api.Device) error {
 	}
 	cw.Flush()
 	return cw.Error()
+}
+
+func ptr(s string) *string { return &s }
+
+type agentBuild struct{ path, version, os, arch string }
+
+// agentBuildName matches armada-agent_<version>_<os>_<arch>[.exe], as
+// make agents and tools/release name them.
+var agentBuildName = regexp.MustCompile(`^armada-agent_(.+)_(linux|darwin|windows|freebsd|openbsd|netbsd)_([a-z0-9]+)(\.exe)?$`)
+
+func agentBuilds(dir string) ([]agentBuild, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []agentBuild
+	versions := map[string]bool{}
+	for _, e := range entries {
+		m := agentBuildName.FindStringSubmatch(e.Name())
+		if m == nil || e.IsDir() {
+			continue
+		}
+		out = append(out, agentBuild{path: filepath.Join(dir, e.Name()), version: m[1], os: m[2], arch: m[3]})
+		versions[m[1]] = true
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no armada-agent_<version>_<os>_<arch> files in %s", dir)
+	}
+	if len(versions) > 1 {
+		return nil, fmt.Errorf("%s holds builds of %d versions; give a directory with one", dir, len(versions))
+	}
+	return out, nil
 }

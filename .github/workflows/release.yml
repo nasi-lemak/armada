@@ -1,0 +1,29 @@
+name: Release
+
+# Builds and publishes a release when a version tag (v1.4.0, v1.4.0-rc1) is
+# pushed. It runs for tags only.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # to create the release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable # releases get the latest standard-library fixes
+          check-latest: true
+      - name: gofmt, vet, race tests, cross-builds
+        run: scripts/ci.sh go
+      - name: Build binaries and packages
+        run: go run ./tools/release -version "$GITHUB_REF_NAME" -out dist/release
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ contains(github.ref_name, '-') && '--prerelease' || '' }}
+        run: gh release create "$GITHUB_REF_NAME" dist/release/* --title "Armada $GITHUB_REF_NAME" --generate-notes $PRERELEASE

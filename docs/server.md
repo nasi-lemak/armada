@@ -126,6 +126,13 @@ Deployment options: [`deploy/armada-server.service`](../deploy/armada-server.ser
 [`deploy/docker-compose.yml`](../deploy/docker-compose.yml). In production, put the server
 behind TLS, either with `-tls-cert`/`-tls-key` or a reverse proxy.
 
+On Debian or Ubuntu, the `armada-server` package from a [release](development.md#releasing)
+installs the server, `armadactl` and the systemd service. Set `ARMADA_PUBLIC_URL` and other
+settings in `/etc/default/armada-server`, then `systemctl start armada-server`. The service runs as
+a throwaway system user and can only write to `/var/lib/armada-server`: for `-backup-dir` elsewhere,
+or TLS files only root can read, add `ReadWritePaths=` or `LoadCredential=` with
+`systemctl edit armada-server`.
+
 **The server's certificate.** If it expires, every device stops checking in at once, so Armada
 watches it:
 

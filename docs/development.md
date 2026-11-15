@@ -50,6 +50,34 @@ cd web/e2e && npm ci && npx playwright install chromium
 node smoke.cjs http://localhost:8080 "$(cat ../../data/admin-token)"
 ```
 
+## Releasing
+
+```bash
+make release VERSION=1.4.0
+```
+
+`tools/release` builds everything into `dist/1.4.0/` with the Go toolchain alone:
+
+- `armada-agent` for Linux (amd64, arm64, armv7, 386, riscv64), macOS (Intel, Apple silicon) and
+  Windows (amd64, arm64); `armada-server` and `armadactl` for Linux, macOS and Windows;
+- `.deb` packages: `armada-agent` for each Linux architecture and `armada-server` (with `armadactl`)
+  for amd64 and arm64. They install systemd services; the agent package writes its config from
+  `ARMADA_SERVER_URL` and `ARMADA_ENROLLMENT_TOKEN` if they are set, and the server reads its
+  settings from `/etc/default/armada-server` (kept across upgrades). Purging the agent removes its
+  config and state; purging the server keeps its database;
+- `dependencies.txt`, the Go modules in each program, and `SHA256SUMS`.
+
+Pre-releases (`1.4.0-rc1`) become Debian versions that sort before the release (`1.4.0~rc1`).
+Package timestamps come from the last commit, so the same commit builds the same packages.
+
+Then upload the agents to your server with `armadactl releases upload-agents dist/1.4.0`.
+
+Pushing a tag such as `v1.4.0` runs `.github/workflows/release.yml`: the Go checks, then this build,
+published as a GitHub release with all the files (marked a pre-release when the version has a `-`).
+It runs only for tags.
+
+There are no `.rpm` packages yet.
+
 Build releases with the **current Go release** rather than the minimum in `go.mod`. Many security
 fixes land in the standard library, and the vulnerability scan uses the latest Go for that reason.
 
