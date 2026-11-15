@@ -47,6 +47,19 @@ jobs:
       - name: govulncheck
         run: scripts/ci.sh vulncheck
 
+  upgrade:
+    name: Upgrade from older releases
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # builds old releases from history
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Old releases' data, opened by this build
+        run: scripts/ci.sh upgrade
+
   dashboard:
     name: Dashboard (browser)
     runs-on: ubuntu-latest

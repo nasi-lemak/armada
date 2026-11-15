@@ -2244,6 +2244,12 @@ the `schema_migrations` table.
 - `TestLegacyDatabaseUpgrades` upgrades a real database written by the first release
   (`internal/store/testdata`) and checks it ends up with exactly the same tables, columns and indexes as
   a new one.
+- `make upgrade-test` (also part of `make ci`) builds older releases from git, fills each with data
+  through its API (devices, releases, a rollout, a client account, alert rules, events), then starts
+  this build on the same data directory. It checks that everything is still there, that device keys,
+  enrollment tokens and passwords still work, that newer features work on the upgraded data, that a
+  second start changes nothing, and that the old release refuses the upgraded database. Add each
+  release's tag to `DEFAULT_REFS` in `scripts/upgrade-test.sh`.
 
 Layout:
 
@@ -2255,6 +2261,7 @@ internal/api        wire types shared by everything
 internal/rollout    pure rollout logic: targeting, staging, version ordering, health evaluation
 internal/chunk      content-defined chunking for delta updates
 internal/store      SQLite persistence and numbered schema migrations
+internal/upgradetest  upgrade test from older releases (scripts/upgrade-test.sh)
 web/e2e             dashboard browser smoke test (run by CI)
 internal/server     HTTP API, agent protocol, rollout engine
 internal/agent      agent: enrollment, heartbeat, updates, self-update, actions

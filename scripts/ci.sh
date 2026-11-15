@@ -8,6 +8,7 @@
 #   scripts/ci.sh vulncheck        govulncheck
 #   scripts/ci.sh dashboard        JavaScript syntax and the browser smoke test
 #   scripts/ci.sh android          APK and library build, unit tests, lint
+#   scripts/ci.sh upgrade          upgrade from older releases (scripts/upgrade-test.sh)
 #
 # Locally (scripts/ci.sh with no job), the Go job runs twice, like CI's
 # matrix: with the Go version go.mod names (with --tidy) and with the newest
@@ -144,6 +145,14 @@ job_dashboard() {
 	return $rc
 }
 
+job_upgrade() {
+	group "Upgrade from older releases"
+	scripts/upgrade-test.sh
+	local rc=$?
+	endgroup
+	return $rc
+}
+
 job_android() {
 	group "Build, unit tests and lint"
 	java -version 2>&1 | grep -i version
@@ -192,6 +201,12 @@ run_all() {
 		attempt "Vulnerability scan" env GOTOOLCHAIN="$stable" "$0" vulncheck
 	fi
 
+	if git rev-parse --verify --quiet 07b1162^{commit} >/dev/null; then
+		attempt "Upgrade" env GOTOOLCHAIN="$gomod" "$0" upgrade
+	else
+		record "Upgrade" "SKIPPED (needs the git history; a shallow clone?)"
+	fi
+
 	if command -v node >/dev/null && command -v npm >/dev/null; then
 		attempt "Dashboard" env GOTOOLCHAIN="$gomod" "$0" dashboard
 	else
@@ -219,5 +234,6 @@ go) shift; job_go "$@" ;;
 vulncheck) job_vulncheck ;;
 dashboard) job_dashboard ;;
 android) job_android ;;
-*) echo "usage: $0 [all|go [--tidy]|vulncheck|dashboard|android]" >&2; exit 2 ;;
+upgrade) job_upgrade ;;
+*) echo "usage: $0 [all|go [--tidy]|vulncheck|dashboard|android|upgrade]" >&2; exit 2 ;;
 esac
