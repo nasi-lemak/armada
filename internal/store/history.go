@@ -326,3 +326,33 @@ func (s *Store) Snapshot(ctx context.Context, path string) error {
 }
 
 func round4(v float64) float64 { return math.Round(v*1e4) / 1e4 }
+
+// AddLateSamples records samples that arrive late (a device's backlog
+// from while it was offline) and re-rolls the hours they fall in that were
+// already summarized, so charts over long ranges include them.
+func (s *Store) AddLateSamples(ctx context.Context, deviceID string, samples []Sample) error {
+	if len(samples) == 0 {
+		return nil
+	}
+	if err := s.AddSamples(ctx, samples); err != nil {
+		return err
+	}
+	until, err := s.rolledUntil(ctx)
+	if err != nil {
+		return err
+	}
+	first := samples[0].At.Unix()
+	for _, sm := range samples {
+		first = min(first, sm.At.Unix())
+	}
+	from := first / 3600 * 3600
+	if from >= until {
+		return nil // not rolled up yet; the next roll-up takes them
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO samples_hourly (series_id, hour, vmin, vavg, vmax, worst, n, ok)
+		SELECT series_id, (ts/3600)*3600 AS h, MIN(value), AVG(value), MAX(value), MAX(status), COUNT(*), SUM(status = 0)
+		FROM samples WHERE ts >= ? AND ts < ? AND series_id IN (SELECT id FROM series WHERE device_id = ?) GROUP BY series_id, h
+		ON CONFLICT(series_id, hour) DO UPDATE SET vmin=excluded.vmin, vavg=excluded.vavg, vmax=excluded.vmax,
+			worst=excluded.worst, n=excluded.n, ok=excluded.ok`, from, until, deviceID)
+	return err
+}

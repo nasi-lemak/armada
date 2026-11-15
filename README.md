@@ -874,6 +874,20 @@ and ended, and why.
   - at `GET /api/v1/devices/{id}/outages`;
   - in the overview.
 - **Retention:** outages are kept as long as health history (90 days by default).
+- **When an outage starts:** with the agent's report, it starts at the agent's first failed attempt,
+  which is the next heartbeat after the connection went. Without one, it starts at the last check-in.
+
+### Health data during outages
+
+While an agent can't reach the server, it keeps one reading every 5 minutes: its check results,
+load, memory and disk.
+- **Where readings are kept:** they're saved on the device, so a restart doesn't lose them. The
+  Linux/macOS/Windows agents keep up to a week of readings; Android keeps a day.
+- **When the server is back:** the agent uploads them, 100 per heartbeat, and the server stores them
+  at their original times. The device's charts then show what happened during the outage, at full
+  resolution and in the hourly roll-ups.
+- **What isn't filled in:** the `online` series. Availability still shows the device as unreachable,
+  because it was.
 
 ### Network check
 

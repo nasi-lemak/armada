@@ -33,6 +33,7 @@ const maxSelfUpdateStarts = 3
 // Agent is the on-device fleet agent.
 type Agent struct {
 	conn    connTracker // failed attempts to reach the server, for the next heartbeat
+	backlog *backlog    // readings taken while cut off, uploaded when back
 	cfg     *Config
 	log     *slog.Logger
 	state   *stateFile
@@ -72,7 +73,8 @@ func New(cfg *Config, log *slog.Logger) (*Agent, error) {
 	}
 	windows, _ := ParseWindows(cfg.MaintenanceWindow)
 	a := &Agent{cfg: cfg, log: log, state: st, windows: windows, Reexec: reexec, Now: time.Now, interval: 30 * time.Second,
-		health: newHealthRunner(cfg.Health), wake: make(chan struct{}, 1)}
+		backlog: loadBacklog(filepath.Join(cfg.StateDir, "backlog.json"), log),
+		health:  newHealthRunner(cfg.Health), wake: make(chan struct{}, 1)}
 	a.health.allowCommands = cfg.AllowExec
 	if cfg.Peripherals != nil {
 		a.gw = newGateway(a, cfg.Peripherals)
@@ -152,6 +154,9 @@ func (a *Agent) Run(ctx context.Context) error {
 			backoff = min(backoff*2, 5*time.Minute)
 		} else {
 			backoff = time.Second
+			if a.backlog.pending() > 0 {
+				wait = 2 * time.Second // more of the backlog to send
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -283,12 +288,17 @@ func (a *Agent) CheckIn(ctx context.Context) error {
 		req.Peripherals = a.gw.reports()
 	}
 	req.Connectivity = a.conn.report()
+	req.Backlog = a.backlog.batch(api.MaxBacklogPerHeartbeat)
 	var resp api.HeartbeatResponse
 	if err := a.client.do(ctx, "POST", "/api/v1/agent/heartbeat", req, &resp); err != nil {
-		a.conn.failed(err)
+		if a.conn.failed(err) {
+			// Cut off: keep this reading for when the server is back.
+			a.backlog.add(api.BacklogSample{At: time.Now().UTC(), Health: req.Health, Metrics: req.Metrics})
+		}
 		return err
 	}
 	a.conn.reached()
+	a.backlog.sent(len(req.Backlog))
 	if resp.HeartbeatIntervalSeconds > 0 {
 		a.mu.Lock()
 		a.interval = time.Duration(resp.HeartbeatIntervalSeconds) * time.Second
@@ -999,12 +1009,13 @@ type connTracker struct {
 	lastErr  string
 }
 
-// failed records a heartbeat that didn't reach the server. An HTTP error
-// means the network worked (the server answered), so it doesn't count.
-func (c *connTracker) failed(err error) {
+// failed records a heartbeat that didn't reach the server, and reports
+// whether it was a connection failure. An HTTP error means the network
+// worked (the server answered), so it doesn't count.
+func (c *connTracker) failed(err error) bool {
 	var he *HTTPError
 	if errors.As(err, &he) || errors.Is(err, context.Canceled) {
-		return
+		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1016,6 +1027,7 @@ func (c *connTracker) failed(err error) {
 	if len(c.lastErr) > 300 {
 		c.lastErr = c.lastErr[:300]
 	}
+	return true
 }
 
 func (c *connTracker) report() *api.ConnectivityReport {

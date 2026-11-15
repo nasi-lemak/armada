@@ -702,6 +702,19 @@ type HeartbeatRequest struct {
 	// Connectivity is set on the first heartbeat that gets through after
 	// the agent failed to reach the server: since when, and why.
 	Connectivity *ConnectivityReport `json:"connectivity,omitempty"`
+	// Backlog holds readings the agent took while it couldn't reach the
+	// server, oldest first (at most MaxBacklogPerHeartbeat per heartbeat).
+	Backlog []BacklogSample `json:"backlog,omitempty"`
+}
+
+// MaxBacklogPerHeartbeat bounds the readings one heartbeat carries.
+const MaxBacklogPerHeartbeat = 100
+
+// BacklogSample is a reading taken while the device was cut off.
+type BacklogSample struct {
+	At      time.Time     `json:"at"`
+	Health  []CheckResult `json:"health,omitempty"`
+	Metrics Metrics       `json:"metrics"`
 }
 
 // ConnectivityReport describes the agent's failed attempts to reach the

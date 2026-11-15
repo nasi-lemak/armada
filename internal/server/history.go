@@ -27,6 +27,53 @@ type historyState struct {
 // recordHistory samples a device's checks and metrics. Called on every
 // heartbeat (and for peripherals on every gateway report); it stores at most
 // one sample per series per HistoryResolution.
+// recordBacklog stores the readings an agent took while cut off, at their
+// own times. They fill in its checks and metrics, but not "online": the
+// device wasn't reachable, and availability should say so.
+func (s *Server) recordBacklog(ctx context.Context, dev *api.Device, now time.Time, backlog []api.BacklogSample) {
+	if s.cfg.HistoryResolution <= 0 || len(backlog) == 0 {
+		return
+	}
+	oldest := now.Add(-s.cfg.HistoryRetention)
+	if dev.EnrolledAt.After(oldest) {
+		oldest = dev.EnrolledAt
+	}
+	var samples []store.Sample
+	for _, b := range backlog {
+		at := b.At.UTC()
+		// Device clocks can be off: keep only what's plausible. A backlog
+		// can span several heartbeats, so the last check-in isn't a bound;
+		// a sample already stored for that moment is ignored.
+		if at.Before(oldest) || at.After(now) {
+			continue
+		}
+		kinds := map[string]bool{}
+		for _, c := range b.Health {
+			if c.Name == "" {
+				continue
+			}
+			kinds[c.Kind] = true
+			samples = append(samples, store.Sample{DeviceID: dev.ID, Name: c.Name, Kind: c.Kind, Unit: c.Unit, At: at, Value: c.Value, Status: c.Status})
+		}
+		m := b.Metrics
+		if m.NumCPU > 0 {
+			samples = append(samples, store.Sample{DeviceID: dev.ID, Name: "load", Kind: "cpu", Unit: "load avg", At: at, Value: fptr(round2(m.Load1)), Status: api.HealthOK})
+		}
+		reportsOwn := dev.Info.OS == "linux" || dev.Info.OS == "android"
+		if !reportsOwn && !kinds["memory"] && m.MemTotalBytes > 0 {
+			samples = append(samples, store.Sample{DeviceID: dev.ID, Name: "memory used", Kind: "memory", Unit: "%", At: at,
+				Value: fptr(round2(100 * float64(m.MemTotalBytes-m.MemAvailableBytes) / float64(m.MemTotalBytes))), Status: api.HealthOK})
+		}
+		if !reportsOwn && !kinds["disk_space"] && m.DiskTotalBytes > 0 {
+			samples = append(samples, store.Sample{DeviceID: dev.ID, Name: "disk used", Kind: "disk_space", Unit: "%", At: at,
+				Value: fptr(round2(100 * float64(m.DiskTotalBytes-m.DiskFreeBytes) / float64(m.DiskTotalBytes))), Status: api.HealthOK})
+		}
+	}
+	if err := s.store.AddLateSamples(ctx, dev.ID, samples); err != nil {
+		s.log.Error("record backlog", "device", dev.ID, "err", err)
+	}
+}
+
 func (s *Server) recordHistory(ctx context.Context, dev *api.Device, now time.Time) {
 	res := s.cfg.HistoryResolution
 	if res <= 0 {

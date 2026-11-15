@@ -49,6 +49,11 @@ class Prefs(context: Context) {
         get() = sp.getInt("conn_failed_attempts", 0)
         set(v) = sp.edit().putInt("conn_failed_attempts", v).apply()
 
+    /** Readings taken while the server couldn't be reached (a JSON array), oldest first. */
+    var backlog: String
+        get() = sp.getString("backlog", "[]") ?: "[]"
+        set(v) = sp.edit().putString("backlog", v).apply()
+
     var connLastError: String
         get() = sp.getString("conn_last_error", "") ?: ""
         set(v) = sp.edit().putString("conn_last_error", v).apply()

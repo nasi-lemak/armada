@@ -86,6 +86,10 @@ class Agent private constructor(private val context: Context) {
                 .put("failed_attempts", prefs.connFailedAttempts)
                 .put("last_error", prefs.connLastError))
         }
+        // Readings from while the server was out of reach, a batch at a time.
+        val backlog = JSONArray(prefs.backlog)
+        val sending = minOf(backlog.length(), MAX_BACKLOG_PER_HEARTBEAT)
+        if (sending > 0) body.put("backlog", JSONArray().apply { for (i in 0 until sending) put(backlog.get(i)) })
         val r = try {
             api().post("/api/v1/agent/heartbeat", body)
         } catch (e: java.io.IOException) {
@@ -93,11 +97,17 @@ class Agent private constructor(private val context: Context) {
             if (prefs.connFailedAttempts == 0) prefs.connFailedSince = System.currentTimeMillis()
             prefs.connFailedAttempts = prefs.connFailedAttempts + 1
             prefs.connLastError = (e.message ?: e.javaClass.simpleName).take(300)
+            keepReading(backlog, body)
             throw e
         }
         if (prefs.connFailedAttempts > 0) {
             prefs.connFailedAttempts = 0
             prefs.connLastError = ""
+        }
+        if (sending > 0) {
+            val rest = JSONArray()
+            for (i in sending until backlog.length()) rest.put(backlog.get(i))
+            prefs.backlog = rest.toString()
         }
         prefs.heartbeatSeconds = r.optInt("heartbeat_interval_seconds", prefs.heartbeatSeconds)
         r.optJSONArray("managed_packages")?.let { a -> prefs.managedPackages = List(a.length()) { a.getString(it) } }
@@ -168,6 +178,22 @@ class Agent private constructor(private val context: Context) {
                 .put("status", if (ok) "succeeded" else "failed")
                 .put("message", if (ok) "agent updated" else "agent still running ${BuildConfig.VERSION_NAME}")
         )
+    }
+
+    /** Keeps one reading per 5 minutes while cut off, up to a day of them. */
+    private fun keepReading(backlog: JSONArray, body: JSONObject) {
+        val now = System.currentTimeMillis()
+        if (backlog.length() > 0) {
+            val last = backlog.getJSONObject(backlog.length() - 1).optLong("at_ms", 0L)
+            if (now - last < 5 * 60_000L) return
+        }
+        backlog.put(JSONObject().put("at", isoTime(now)).put("at_ms", now)
+            .put("health", body.optJSONArray("health") ?: JSONArray())
+            .put("metrics", body.optJSONObject("metrics") ?: JSONObject()))
+        val keep = JSONArray()
+        val from = maxOf(0, backlog.length() - MAX_BACKLOG)
+        for (i in from until backlog.length()) keep.put(backlog.get(i))
+        prefs.backlog = keep.toString()
     }
 
     // ---- actions ----
@@ -335,3 +361,6 @@ internal fun isoTime(ms: Long): String {
     f.timeZone = java.util.TimeZone.getTimeZone("UTC")
     return f.format(java.util.Date(ms))
 }
+
+private const val MAX_BACKLOG_PER_HEARTBEAT = 100
+private const val MAX_BACKLOG = 24 * 12 // a day: SharedPreferences is no place for more

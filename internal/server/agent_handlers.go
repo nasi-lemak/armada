@@ -107,6 +107,10 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, dev *ap
 		s.internalError(w, err)
 		return
 	}
+	if len(req.Backlog) > api.MaxBacklogPerHeartbeat {
+		req.Backlog = req.Backlog[:api.MaxBacklogPerHeartbeat]
+	}
+	s.recordBacklog(ctx, dev, now, req.Backlog)
 	if o := s.outageFrom(dev, &req, now, wasOffline); o != nil {
 		if err := s.store.AddOutage(ctx, o); err != nil {
 			s.log.Error("record outage", "device", dev.ID, "err", err)

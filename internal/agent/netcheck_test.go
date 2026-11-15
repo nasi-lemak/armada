@@ -44,7 +44,6 @@ func TestNetCheck(t *testing.T) {
 		t.Fatalf("not ok:\n%s", report)
 	}
 
-
 	// Untrusted certificate: it stops at TLS and says what to do.
 	report, ok = netCheckAgent(t, srv.URL, "").netCheck(t.Context())
 	if ok || !strings.Contains(report, "TLS         FAILED") || !strings.Contains(report, "ca_cert") {
