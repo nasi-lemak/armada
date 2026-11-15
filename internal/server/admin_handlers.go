@@ -905,6 +905,24 @@ func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
+	if p := principalFrom(r.Context()); p.viewing() {
+		// The picker: rollouts that target at least one device in view.
+		devs, err := s.store.ListDevices(r.Context())
+		if err != nil {
+			s.internalError(w, err)
+			return
+		}
+		kept := deps[:0]
+		for _, d := range deps {
+			for _, dev := range devs {
+				if p.inView(dev) && rollout.Matches(d.Selector, dev) {
+					kept = append(kept, d)
+					break
+				}
+			}
+		}
+		deps = kept
+	}
 	if deps == nil {
 		deps = []*api.Deployment{}
 	}

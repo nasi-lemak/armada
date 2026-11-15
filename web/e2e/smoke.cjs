@@ -303,6 +303,19 @@ async function visit(page, who, hash, expectHeading) {
   await admin.waitForSelector('#view h1:has-text("acme")', { timeout: 5000 }).catch(() => fail('overview did not switch to acme'));
   if (!admin.url().includes('customer=acme')) fail('picker choice is not in the address');
   await admin.waitForSelector('.insight[data-insight="connectivity"]', { timeout: 5000 }).catch(() => fail('needs-attention section missing'));
+  // A newer myapp: acme's devices are behind, and one click rolls it out to them.
+  const form = new FormData();
+  form.append('package', 'myapp');
+  form.append('version', '1.1.0');
+  form.append('file', new Blob(['smoke myapp 1.1.0']), 'myapp.bin');
+  const up = await fetch(base + '/api/v1/releases', { method: 'POST', headers: { Authorization: 'Bearer ' + adminToken }, body: form });
+  if (up.status !== 201) fail(`release upload: ${up.status}`);
+  await admin.reload();
+  await admin.waitForSelector('.insight[data-insight="software"] button:has-text("Update these")', { timeout: 8000 }).catch(() => fail('no Update these button'));
+  await admin.click('.insight[data-insight="software"] button:has-text("Update these")');
+  await admin.waitForFunction(() => location.hash.startsWith('#/deployments'), null, { timeout: 5000 }).catch(() => fail('Update these did not start a rollout'));
+  const catchUp = (await api('GET', '/api/v1/deployments')).find(d => d.name.startsWith('Catch up myapp 1.1.0'));
+  if (!catchUp || !catchUp.selector.device_ids || catchUp.selector.device_ids.length < 1) fail(`catch-up rollout: ${JSON.stringify(catchUp)}`);
   await admin.goto(base + '/?customer=acme#/devices');
   await admin.waitForTimeout(1200);
   const pickedRows = await admin.$$eval('#view table tbody tr', rows => rows.map(r => r.textContent));

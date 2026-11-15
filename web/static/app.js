@@ -408,6 +408,28 @@ function insightsSection() {
   const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
   const more = (n, href, what) => n > 0 ? h('li', { class: 'muted' }, href ? h('a', { href }, `and ${n} more ${what}`) : `and ${n} more ${what}`) : null;
   const devLink = (id, name) => h('a', { href: '#/devices/' + id }, name);
+  // Update these: a staged rollout per target release, to just the devices
+  // that are behind (and not already updating).
+  const catchUpButton = s => {
+    const todo = s.behind.filter(b => !b.updating && b.release_id);
+    if (!todo.length || (ROLE_RANK[me.fleet_role] || 0) < ROLE_RANK.operator) return null;
+    return h('div', { class: 'btn-row mt' }, h('button', { class: 'btn small primary', onclick: async () => {
+      const byRel = {};
+      for (const b of todo) (byRel[b.release_id] ||= []).push(b);
+      const versions = [...new Set(todo.map(b => b.latest))].join(', ');
+      if (!confirm(`Start a staged rollout of ${s.package} ${versions} to the ${todo.length} device${todo.length === 1 ? '' : 's'} not on it?` +
+        '\n\nIt uses the default stages and safety checks; you can pause it on the Deployments page.')) return;
+      const where = Object.keys(view).length ? ' (' + Object.values(view).join(' · ') + ')' : '';
+      const made = [];
+      for (const [rel, devs] of Object.entries(byRel)) {
+        const d = await guard(() => api('POST', '/api/v1/deployments', { name: `Catch up ${s.package} ${devs[0].latest}${where}`,
+          release_id: rel, selector: { device_ids: devs.map(b => b.device_id) } }));
+        if (d) made.push(d);
+      }
+      if (made.length === 1) location.hash = '#/deployments/' + made[0].id;
+      else if (made.length) { toast(`Started ${made.length} rollouts`); location.hash = '#/deployments'; }
+    } }, `Update these ${todo.length}`));
+  };
   let seq = 0;
   async function load() {
     const my = ++seq;
@@ -425,7 +447,8 @@ function insightsSection() {
           s.behind.length ? h('span', { class: 'warn-text' }, ` · ${s.behind.length} behind`) : null),
         s.behind.length ? h('ul', { class: 'mini-list' }, s.behind.slice(0, 8).map(b => h('li', {}, devLink(b.device_id, b.name),
           h('span', { class: 'muted mono' }, ` ${b.installed} → ${b.latest}`), b.updating ? [' ', badge(b.updating)] : null,
-          b.channel !== 'stable' ? h('span', { class: 'muted' }, ' · ' + b.channel) : null)), more(s.behind.length - 8, null, 'devices')) : null)));
+          b.channel !== 'stable' ? h('span', { class: 'muted' }, ' · ' + b.channel) : null)), more(s.behind.length - 8, null, 'devices')) : null,
+        catchUpButton(s))));
 
     // Certificates.
     const c = ins.certificates;

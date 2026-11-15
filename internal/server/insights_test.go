@@ -55,7 +55,7 @@ func TestViewAndInsights(t *testing.T) {
 	a3 := enroll("acme-kiosk", map[string]string{"customer": "acme", "project": "kiosks"})
 	g1 := enroll("globex-1", map[string]string{"customer": "globex"})
 	upload(t, ts, "kiosk", "1.0.0")
-	upload(t, ts, "kiosk", "2.0.0")
+	rel2 := upload(t, ts, "kiosk", "2.0.0")
 	day := 24 * time.Hour
 	expiring := []api.CertReport{{Target: "mosquitto", Info: &api.CertInfo{Subject: "CN=broker", NotBefore: clock.Add(-300 * day), NotAfter: clock.Add(10 * day)}}}
 	beat(a1, "2.0.0", 86400, nil, expiring)
@@ -122,6 +122,23 @@ func TestViewAndInsights(t *testing.T) {
 	callView(t, ts, admin, "", "GET", "/api/v1/insights", &in)
 	if in.Devices != 4 || in.Connectivity.Restart != 2 || len(in.Software[0].Behind) != 3 {
 		t.Fatalf("fleet insights: %+v", in)
+	}
+
+	// Each straggler names the release that would bring it up to date, and
+	// a rollout to just those devices shows under the project's view.
+	if b := in.Software[0].Behind[0]; b.ReleaseID != rel2.ID {
+		t.Fatalf("behind release: %+v", b)
+	}
+	call(t, ts, admin, "POST", "/api/v1/deployments", api.CreateDeploymentRequest{ReleaseID: rel2.ID, Selector: api.Selector{DeviceIDs: []string{a3.id}}}, nil)
+	var deps []api.Deployment
+	callView(t, ts, admin, "project=kiosks", "GET", "/api/v1/deployments", &deps)
+	if len(deps) != 1 {
+		t.Fatalf("rollouts in view: %d", len(deps))
+	}
+	deps = nil
+	callView(t, ts, admin, "customer=globex", "GET", "/api/v1/deployments", &deps)
+	if len(deps) != 0 {
+		t.Fatalf("rollouts outside view: %d", len(deps))
 	}
 
 	// The view narrows lists and totals everywhere, but a device link still opens.

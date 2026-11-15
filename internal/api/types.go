@@ -1896,6 +1896,7 @@ type SoftwareBehind struct {
 	Channel   string `json:"channel"`
 	Installed string `json:"installed"`
 	Latest    string `json:"latest"`
+	ReleaseID string `json:"release_id"` // the release that would bring it up to date
 	// Updating is the status of an update in progress to a newer version, if any.
 	Updating string `json:"updating,omitempty"`
 }

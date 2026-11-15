@@ -821,6 +821,7 @@ counts.
 - **Choosing one filters every page** to those devices:
   - the overview tiles and the *Needs attention* section;
   - the device list, search and bulk actions;
+  - the rollouts list (rollouts that target any of those devices);
   - the activity log, alerts, certificates and reports.
 - **It stays in the address** (`/?customer=acme&project=tills#/devices`), so a view can be bookmarked
   or sent to a colleague.
@@ -839,7 +840,9 @@ The overview shows, for the devices in view:
 
 - **Software not on the latest version:**
   - per package, how many devices run the newest release for their channel and platform;
-  - which don't, with installed → latest versions and any update already in progress.
+  - which don't, with installed → latest versions and any update already in progress;
+  - **Update these** (fleet-wide operators) starts a staged rollout of the newest release to just
+    those devices, one rollout per release, with the usual stages and safety checks.
 - **Certificates to renew:**
   - expired;
   - expiring within 30 days;

@@ -107,11 +107,11 @@ func (s *Server) softwareInsights(r *http.Request, devs map[string]*api.Device) 
 			if !ok || installed == "" || d.ParentID != "" {
 				continue
 			}
-			latest := ""
+			latest, latestID := "", ""
 			for _, rel := range list {
 				if (rel.Channel == "" || rel.Channel == d.Channel) && rollout.PlatformMatches(rel, d) &&
 					(latest == "" || rollout.Compare(rel.Version, latest) > 0) {
-					latest = rel.Version
+					latest, latestID = rel.Version, rel.ID
 				}
 			}
 			if latest == "" {
@@ -123,7 +123,7 @@ func (s *Server) softwareInsights(r *http.Request, devs map[string]*api.Device) 
 				continue
 			}
 			st.Behind = append(st.Behind, api.SoftwareBehind{DeviceID: d.ID, Name: d.Name, Channel: d.Channel,
-				Installed: installed, Latest: latest, Updating: updating[d.ID][pkg]})
+				Installed: installed, Latest: latest, ReleaseID: latestID, Updating: updating[d.ID][pkg]})
 		}
 		if !counted {
 			continue
