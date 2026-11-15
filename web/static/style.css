@@ -477,3 +477,14 @@ table.data-table td, table.data-table th { padding: 4px 12px; font-size: 12px; }
 .mini-list { list-style: none; margin: 6px 0 0; padding: 0; font-size: 13px; }
 .mini-list li { padding: 3px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
 .mini-list li:first-child { border-top: 0; }
+
+/* Sites */
+.site-card h2 { margin: 0; }
+.site-card h3 { font-size: 12.5px; margin: 12px 0 4px; color: var(--muted); text-transform: capitalize; }
+.site-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; margin: 12px 0 4px; }
+.site-stat .v { font-size: 20px; font-weight: 650; }
+.site-stat .v.ok { color: var(--ok); }
+.site-stat .v.warn { color: var(--warn); }
+.site-stat .v.bad { color: var(--bad); }
+.site-stat .l { font-size: 12px; color: var(--muted); }
+.stat .hint.bad { color: var(--bad); }

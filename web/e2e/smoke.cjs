@@ -87,7 +87,7 @@ async function visit(page, who, hash, expectHeading) {
   await admin.waitForSelector('#app:not(.hidden)', { timeout: 10000 });
   const pages = [['#/', 'Fleet overview'], ['#/devices', 'Devices'], ['#/devices/' + ids.acme, 'acme-kiosk'],
     ['#/deployments', 'Deployments'], ['#/releases', 'Releases'], ['#/monitoring', 'Monitoring'], ['#/config', 'Configuration'],
-    ['#/apps', 'Apps'], ['#/enroll', 'Enrollment'], ['#/activity', 'Activity'], ['#/certificates', 'Certificates'], ['#/reports', 'Reports'], ['#/users', 'Users'], ['#/account', 'My account']];
+    ['#/apps', 'Apps'], ['#/enroll', 'Enrollment'], ['#/activity', 'Activity'], ['#/certificates', 'Certificates'], ['#/reports', 'Reports'], ['#/users', 'Users'], ['#/sites', 'Sites'], ['#/account', 'My account']];
   for (const [hash, heading] of pages) {
     await visit(admin, 'admin', hash, heading);
     if (hash === '#/users') {

@@ -125,6 +125,13 @@ CREATE TABLE IF NOT EXISTS outages (
 CREATE INDEX IF NOT EXISTS outages_device ON outages(device_id, started_at);
 CREATE INDEX IF NOT EXISTS outages_time ON outages(ended_at);
 `},
+	{Version: 15, Name: "sites", SQL: `
+CREATE TABLE IF NOT EXISTS sites (
+	id TEXT PRIMARY KEY,
+	spec TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+`},
 	// Append new migrations here.
 }
 

@@ -51,6 +51,7 @@ func envDur(key string, def time.Duration) time.Duration {
 
 func run() error {
 	cfg := server.DefaultConfig()
+	cfg.Version = version
 	var (
 		listen      = flag.String("listen", env("ARMADA_LISTEN", ":8080"), "address to listen on (ARMADA_LISTEN)")
 		adminToken  = flag.String("admin-token", os.Getenv("ARMADA_ADMIN_TOKEN"), "admin API token; generated into <data-dir>/admin-token if unset (ARMADA_ADMIN_TOKEN)")
@@ -106,6 +107,8 @@ func run() error {
 	flag.IntVar(&cfg.Backup.Keep, "backup-keep", 14, "how many automatic backups to keep in each place")
 	flag.StringVar(&cfg.Backup.S3URL, "backup-s3-url", env("ARMADA_BACKUP_S3_URL", ""), "also upload automatic backups to S3-compatible storage: https://host/bucket/prefix/ (keys in ARMADA_BACKUP_S3_ACCESS_KEY and ARMADA_BACKUP_S3_SECRET_KEY)")
 	flag.StringVar(&cfg.Backup.S3Region, "backup-s3-region", env("ARMADA_BACKUP_S3_REGION", "us-east-1"), "region for -backup-s3-url")
+	flag.StringVar(&cfg.Central.URL, "central-url", env("ARMADA_CENTRAL_URL", ""), "report this server's overview to a central Armada server (its URL); the site token goes in ARMADA_CENTRAL_TOKEN")
+	flag.DurationVar(&cfg.Central.Every, "central-every", envDur("ARMADA_CENTRAL_EVERY", 5*time.Minute), "how often to report to the central server")
 	groupLabels := flag.String("group-labels", env("ARMADA_GROUP_LABELS", "customer,project"), "label keys the dashboard's customer/project picker offers, comma-separated")
 	flag.StringVar(&cfg.OIDC.Issuer, "oidc-issuer", os.Getenv("ARMADA_OIDC_ISSUER"), "OpenID Connect issuer URL for single sign-on, e.g. https://accounts.google.com (ARMADA_OIDC_ISSUER)")
 	flag.StringVar(&cfg.OIDC.ClientID, "oidc-client-id", os.Getenv("ARMADA_OIDC_CLIENT_ID"), "OIDC client ID (ARMADA_OIDC_CLIENT_ID)")
@@ -132,6 +135,10 @@ func run() error {
 		if k = strings.TrimSpace(k); k != "" {
 			cfg.GroupLabels = append(cfg.GroupLabels, k)
 		}
+	}
+	cfg.Central.Token = os.Getenv("ARMADA_CENTRAL_TOKEN") // environment only, never argv
+	if cfg.Central.URL != "" && cfg.Central.Token == "" {
+		return errors.New("-central-url needs the site token in ARMADA_CENTRAL_TOKEN (add the site on the central server's Sites page)")
 	}
 	cfg.Backup.S3AccessKey = os.Getenv("ARMADA_BACKUP_S3_ACCESS_KEY") // environment only, never argv
 	cfg.Backup.S3SecretKey = os.Getenv("ARMADA_BACKUP_S3_SECRET_KEY")

@@ -26,14 +26,21 @@ import (
 // ---- summary ----
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	devs, err := s.store.ListAllDevices(ctx)
+	sum, err := s.fleetSummary(r.Context(), principalFrom(r.Context()))
 	if err != nil {
 		s.internalError(w, err)
 		return
 	}
-	sum := api.FleetSummary{PackageVersions: map[string]map[string]int{}, Channels: map[string]int{}}
-	p := principalFrom(ctx)
+	writeJSON(w, http.StatusOK, sum)
+}
+
+// fleetSummary is the overview's headline numbers for what p sees.
+func (s *Server) fleetSummary(ctx context.Context, p *principal) (*api.FleetSummary, error) {
+	devs, err := s.store.ListAllDevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sum := &api.FleetSummary{PackageVersions: map[string]map[string]int{}, Channels: map[string]int{}}
 	if !p.scoped() {
 		sum.ServerCert = s.serverCertStatus(ctx)
 	}
@@ -80,26 +87,23 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	deps, err := s.store.ListDeployments(ctx, api.DeploymentRunning, api.DeploymentPaused)
 	if err != nil {
-		s.internalError(w, err)
-		return
+		return nil, err
 	}
 	sum.ActiveDeployments = len(deps)
 	rels, err := s.store.ListReleases(ctx, "")
 	if err != nil {
-		s.internalError(w, err)
-		return
+		return nil, err
 	}
 	sum.Releases = len(rels)
 	firing, err := s.store.ListAlerts(ctx, true, 10000)
 	if err != nil {
-		s.internalError(w, err)
-		return
+		return nil, err
 	}
 	sum.FiringAlerts = len(s.visibleAlerts(ctx, p, firing))
 	if p.scoped() {
 		sum.ActiveDeployments, sum.Releases = 0, 0 // fleet-wide; not shown to client accounts
 	}
-	writeJSON(w, http.StatusOK, sum)
+	return sum, nil
 }
 
 func (s *Server) handleSigningKey(w http.ResponseWriter, r *http.Request) {

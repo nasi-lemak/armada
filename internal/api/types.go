@@ -906,6 +906,9 @@ const (
 	// project or customer) are offline at once, which usually means the
 	// site's internet or proxy is down.
 	ConditionSiteOutage = "site_outage"
+	// ConditionSiteSilent: a site server (see Sites) hasn't reported for
+	// OfflineMinutes (default 30).
+	ConditionSiteSilent = "site_silent"
 )
 
 // AlertRule decides when to notify whom.
@@ -1995,4 +1998,57 @@ type BackupStatus struct {
 	LastError   string     `json:"last_error,omitempty"`
 	// Warning is set when the last backup failed or one is overdue.
 	Warning string `json:"warning,omitempty"`
+}
+
+// Site is another Armada server (an on-prem install, a region) that reports
+// to this central one, so all of them can be watched in one place.
+type Site struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Note      string    `json:"note,omitempty"`
+	CreatedBy string    `json:"created_by,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	// Token authenticates the site's reports; it's shown once, when made.
+	Token     string `json:"token,omitempty"`
+	TokenHash string `json:"token_hash,omitempty"` // stored; never returned
+	// KeyFingerprint identifies the site server (its release-signing key),
+	// recorded from its first report: a different server can't take over.
+	KeyFingerprint string        `json:"key_fingerprint,omitempty"`
+	LastReportAt   *time.Time    `json:"last_report_at,omitempty"`
+	Source         string        `json:"source,omitempty"` // push or file
+	Snapshot       *SiteSnapshot `json:"snapshot,omitempty"`
+	// State is computed on read: fresh, stale (no report for 3 intervals)
+	// or never.
+	State string `json:"state,omitempty"`
+}
+
+// SiteSnapshot is what a site reports: its overview and what needs
+// attention, without per-device detail beyond the attention lists.
+type SiteSnapshot struct {
+	GeneratedAt    time.Time    `json:"generated_at"`
+	ServerVersion  string       `json:"server_version,omitempty"`
+	PublicURL      string       `json:"public_url,omitempty"` // its dashboard
+	KeyFingerprint string       `json:"key_fingerprint"`
+	EverySeconds   int          `json:"every_seconds,omitempty"` // how often it reports
+	Summary        FleetSummary `json:"summary"`
+	Insights       Insights     `json:"insights"`
+	Groupings      []Grouping   `json:"groupings,omitempty"`
+	FiringAlerts   []SiteAlert  `json:"firing_alerts,omitempty"`
+}
+
+// SiteAlert is a firing alert at a site.
+type SiteAlert struct {
+	Rule       string    `json:"rule"`
+	Severity   string    `json:"severity"`
+	Summary    string    `json:"summary"`
+	DeviceName string    `json:"device_name,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+}
+
+// CentralStatus is how this server's reports to its central server are doing.
+type CentralStatus struct {
+	URL        string     `json:"url"`
+	LastPushAt *time.Time `json:"last_push_at,omitempty"`
+	LastOKAt   *time.Time `json:"last_ok_at,omitempty"`
+	LastError  string     `json:"last_error,omitempty"`
 }

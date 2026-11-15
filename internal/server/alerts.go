@@ -117,6 +117,10 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 			s.flakyCandidates(r, devices, outages, held, now, want)
 		case api.ConditionSiteOutage:
 			s.siteOutageCandidates(r, devices, held, now, want)
+		case api.ConditionSiteSilent:
+			if err := s.siteSilentCandidates(ctx, r, now, want); err != nil {
+				return err
+			}
 		case api.ConditionDeviceOffline:
 			limit := time.Duration(max(r.OfflineMinutes, 1)) * time.Minute
 			if r.OfflineMinutes == 0 {
@@ -965,7 +969,7 @@ func (s *Server) validateClientChannel(c *api.NotificationChannel) error {
 
 var (
 	allConditions = []string{api.ConditionDeviceOffline, api.ConditionHealth, api.ConditionCertExpiry, api.ConditionFlakyConnectivity,
-		api.ConditionSiteOutage, api.ConditionServerCertExpiry, api.ConditionUpdateFailed, api.ConditionDeploymentPaused}
+		api.ConditionSiteOutage, api.ConditionServerCertExpiry, api.ConditionUpdateFailed, api.ConditionDeploymentPaused, api.ConditionSiteSilent}
 	// clientConditions are about a client's own devices.
 	clientConditions = []string{api.ConditionDeviceOffline, api.ConditionHealth, api.ConditionCertExpiry, api.ConditionFlakyConnectivity, api.ConditionSiteOutage}
 )

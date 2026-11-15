@@ -75,6 +75,10 @@ type Config struct {
 	// Backups: automatic backups go to BackupDir and/or S3-compatible
 	// storage every BackupEvery, keeping the newest BackupKeep.
 	Backup BackupConfig
+	// Version is this server's version, reported to a central server.
+	Version string
+	// Central, if set, is a central Armada server this one reports to as a site.
+	Central CentralConfig
 	// GroupLabels are the label keys the dashboard's picker offers, e.g.
 	// customer and project.
 	GroupLabels []string
@@ -231,6 +235,8 @@ type Server struct {
 	apiRoutes []apiRoute
 	// backupMu allows one automatic backup at a time.
 	backupMu sync.Mutex
+	// central is how pushes to the central server (-central-url) are doing.
+	central centralState
 }
 
 // New opens the data directory (creating the database and signing key if
@@ -421,6 +427,7 @@ func (s *Server) Handler() http.Handler {
 	operator := func(scoped bool, pattern string, h http.HandlerFunc) { route(api.RoleOperator, scoped, pattern, h) }
 	admin := func(pattern string, h http.HandlerFunc) { route(api.RoleAdmin, fleetOnly, pattern, h) }
 
+	mux.HandleFunc("POST /api/v1/sites/report", s.handleSiteReport) // site servers, with a site token
 	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/v1/auth/2fa", s.handleTwoFactorLogin)
 	mux.HandleFunc("GET /api/v1/auth/config", s.handleAuthConfig)
@@ -563,6 +570,13 @@ func (s *Server) Handler() http.Handler {
 	admin("GET /api/v1/signing-key", s.handleSigningKey)
 	admin("GET /api/v1/backup", s.handleBackup)
 	admin("GET /api/v1/backup/status", s.handleBackupStatus)
+	admin("GET /api/v1/sites", s.handleListSites)
+	admin("POST /api/v1/sites", s.handleCreateSite)
+	admin("DELETE /api/v1/sites/{id}", s.handleDeleteSite)
+	admin("POST /api/v1/sites/{id}/token", s.handleRotateSiteToken)
+	admin("POST /api/v1/sites/{id}/import", s.handleImportSnapshot)
+	admin("GET /api/v1/site/snapshot", s.handleSiteSnapshot)
+	admin("GET /api/v1/site/central", s.handleCentralStatus)
 	admin("POST /api/v1/backup/run", s.handleRunBackup)
 	// Rules and channels: admins manage all; client operators manage their
 	// client's (checked per object in the handlers).
@@ -742,6 +756,7 @@ func (s *Server) Tick(ctx context.Context) error {
 	}
 	s.serverCertTick(ctx, now)
 	s.backupTick(ctx, now)
+	s.centralTick(ctx, now)
 	if err := s.store.PruneSessions(ctx, now); err != nil {
 		return err
 	}

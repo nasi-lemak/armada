@@ -596,6 +596,7 @@ page or with the CLI.
 | `health` | a matching device has a check at `warning` or `critical`. You can limit it to some kinds of check, such as `storage` or `power`. | the checks recover |
 | `device_offline` | a device hasn't checked in for N minutes | it checks in |
 | `flaky_connectivity` | a device lost its connection at least N times (default 5) within H hours (default 24). The alert says how many were network drops or restarts, and gives the last error. | the drops age out of the window |
+| `site_silent` | (central servers) a site server hasn't reported for M minutes (default 30) | it reports again |
 | `site_outage` | at least N devices (default 3) **and** P% (default 50) of the devices sharing a label value (`group_by`, default `site`) have been offline for M minutes (default 5). One alert per site: usually its internet, power or proxy is down. | enough of them are back |
 | `update_failed` | an update fails or rolls back. All failures in one rollout fold into one alert. | after an hour |
 | `deployment_paused` | a rollout auto-paused (or was paused) | it is resumed or aborted |
@@ -948,8 +949,49 @@ other internet host. So the server can run wherever your devices can reach it:
   - **Linux, macOS and Windows agents:** set `HTTPS_PROXY` for the agent's service. `NO_PROXY` is
     honoured too.
   - **Android:** set a global HTTP proxy, as device owner or through your MDM.
-- **A fully air-gapped site** (nothing leaves the network): run a separate Armada server there. One
-  dashboard across several servers isn't supported yet.
+- **A fully air-gapped site** (nothing leaves the network): run a separate Armada server there, and
+  watch it from your central one with snapshot files (below).
+
+### One view of several servers (Sites)
+
+When customers have their own on-prem Armada servers, or you run one per region, a **central** Armada
+server can watch them all.
+
+**Setting it up:**
+1. On the central server, go to **Sites → Add a site**, or run `armadactl sites add "Orchard store"`.
+   You get a site token (shown once).
+2. Start the site's server with `-central-url https://central.example.com` and
+   `ARMADA_CENTRAL_TOKEN=<token>`.
+
+**What the site sends:**
+- **The snapshot:** every 5 minutes (`-central-every`) it pushes its devices online, health issues,
+  firing alerts, software behind, certificates due, disconnections, customers and projects, backup
+  status and its own dashboard's address.
+- **How it connects:** outbound HTTPS only, so it works behind NAT and through `HTTPS_PROXY`. If the
+  central server can't be reached, the site just tries again later.
+- **Checking it:** `armadactl site status` on the site.
+
+**The Sites page** on the central server shows every site side by side:
+- the totals across them;
+- each site's numbers and details;
+- a link to open its own dashboard;
+- **reporting** or **not reporting** (no report for three intervals).
+
+**Alerts:** a `site_silent` alert rule (default 30 minutes) notifies you when a site stops reporting.
+Its server may be down, or cut off.
+
+**Security:**
+- the token only lets a server send reports, and nothing else;
+- the central server records the reporting server's key fingerprint, so another machine can't take
+  over a site with a copied token;
+- after rebuilding a site server, make a **New token**.
+
+**Air-gapped sites:**
+1. On the site, run `armadactl site export -o snapshot.json`.
+2. Carry the file over, and run `armadactl sites import <id> snapshot.json`, or use **Import
+   snapshot** on the Sites page. Imported sites show as *imported by hand* and never alert as silent.
+
+**What a site sends is a summary.** Devices are still managed on each site's own server.
 
 **Devices keep working while offline:**
 - the agent keeps running its health checks;
@@ -1813,6 +1855,8 @@ Add `--json` to any command for machine-readable output.
 | `-oidc-name`, `-oidc-allowed-domains`, `-oidc-create-role`, `-oidc-group-roles`, `-oidc-groups-claim`, `-oidc-scopes`, `-oidc-redirect-url` | `ARMADA_OIDC_…` | see [Single sign-on](#single-sign-on) |
 | `-scim-default-role` | `ARMADA_SCIM_DEFAULT_ROLE` | `viewer`, used only while no group mappings exist (see [SCIM provisioning](#scim-provisioning)) |
 | `-push-hold` | `ARMADA_PUSH_HOLD` | `50s` (agent long-poll; keep below your proxy's idle timeout; `0` disables) |
+| `-central-url`, `-central-every` | `ARMADA_CENTRAL_URL`, `ARMADA_CENTRAL_EVERY` | — (report to a central Armada server as a site), `5m` |
+| | `ARMADA_CENTRAL_TOKEN` | (environment only) the site token from the central server |
 | `-backup-dir` | `ARMADA_BACKUP_DIR` | — (automatic backups into this folder; ideally another disk) |
 | `-backup-every`, `-backup-keep` | `ARMADA_BACKUP_EVERY` | `24h`, `14` (how often, and how many to keep in each place) |
 | `-backup-s3-url`, `-backup-s3-region` | `ARMADA_BACKUP_S3_URL`, `ARMADA_BACKUP_S3_REGION` | — (also upload to S3-compatible storage: `https://host/bucket/prefix/`), `us-east-1` |
@@ -1971,6 +2015,9 @@ armadactl webhooks list
 | `GET /api/v1/events/types` | Event types recorded, for filter menus |
 | `GET/POST /api/v1/event-hooks`, `PUT/DELETE /api/v1/event-hooks/{id}`, `POST /api/v1/event-hooks/{id}/test` | Event webhooks |
 | `GET /api/v1/backup`, `GET /api/v1/backup/status`, `POST /api/v1/backup/run` | Download a backup; automatic backups' status; make one now (admins) |
+| `GET/POST /api/v1/sites`, `DELETE /api/v1/sites/{id}`, `POST /api/v1/sites/{id}/token`, `POST /api/v1/sites/{id}/import` | Sites reporting to this central server (admins) |
+| `POST /api/v1/sites/report` | A site server's report (site token) |
+| `GET /api/v1/site/snapshot`, `GET /api/v1/site/central` | This server's snapshot (for export), and how its reports to the central one are doing |
 | `GET /api/v1/groupings` | Customers and projects (the `-group-labels` keys) among your devices, for the picker |
 | `GET /api/v1/insights?range=7d` | What needs attention among the devices in view: software behind, certificates, disconnections |
 | `GET /api/v1/devices/{id}/outages` | A device's outages, with cause (network or restart) and the agent's last error |

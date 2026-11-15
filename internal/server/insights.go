@@ -27,13 +27,23 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	now := s.now()
-	devs, err := s.store.ListDevices(ctx)
+	in, err := s.computeInsights(ctx, p, rng)
 	if err != nil {
 		s.internalError(w, err)
 		return
 	}
-	in := api.Insights{OfflineNow: []api.InsightDevice{}, Software: []api.SoftwareStatus{}}
+	writeJSON(w, http.StatusOK, in)
+}
+
+// computeInsights is the Needs attention view of what p sees, with
+// disconnections over the last rng.
+func (s *Server) computeInsights(ctx context.Context, p *principal, rng time.Duration) (*api.Insights, error) {
+	now := s.now()
+	devs, err := s.store.ListDevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	in := &api.Insights{OfflineNow: []api.InsightDevice{}, Software: []api.SoftwareStatus{}}
 	byID := map[string]*api.Device{}
 	for _, d := range devs {
 		if !p.inView(d) || d.Lifecycle == api.LifecycleRetired {
@@ -55,18 +65,15 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(in.OfflineNow, func(i, j int) bool { return in.OfflineNow[i].Since.Before(*in.OfflineNow[j].Since) })
 
 	if in.Software, err = s.softwareInsights(ctx, byID); err != nil {
-		s.internalError(w, err)
-		return
+		return nil, err
 	}
 	if in.Certificates, err = s.certInsights(ctx, byID); err != nil {
-		s.internalError(w, err)
-		return
+		return nil, err
 	}
 	if in.Connectivity, err = s.connectivityInsights(ctx, byID, now.Add(-rng), now); err != nil {
-		s.internalError(w, err)
-		return
+		return nil, err
 	}
-	writeJSON(w, http.StatusOK, in)
+	return in, nil
 }
 
 // softwareInsights compares each device's installed packages with the

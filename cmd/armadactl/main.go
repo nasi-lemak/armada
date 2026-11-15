@@ -144,6 +144,8 @@ Maintenance (alerts held and updates paused for the covered devices):
   webhooks list | webhooks create --name N --url URL [--types device.*,alert.*] [--secret S]
   webhooks test|enable|disable|rotate-secret|delete ID
   openapi                                    print the API's OpenAPI document (JSON)
+  sites list | sites add NAME [NOTE] | sites token|delete ID | sites import ID FILE   (on a central server)
+  site status | site export [-o FILE]        (on a site server: its reports to the central one)
   schedules create --name N --at HH:MM [--op reboot|restart-agent|lock|wake|exec] [--label K=V]... [--channel C]
                    [--all] [--days mon,tue] [--tz Asia/Singapore] [--hold MINUTES] [--command "..."] [--paused]
   maintenance list [--all]
@@ -271,6 +273,10 @@ func (c *cli) run(args []string) error {
 		return c.maintenance(verb, rest)
 	case "schedules", "schedule", "scheduled":
 		return c.schedules(verb, rest)
+	case "sites":
+		return c.sites(verb, rest)
+	case "site":
+		return c.site(verb, rest)
 	case "webhooks", "webhook", "hooks":
 		return c.webhooks(verb, rest)
 	case "openapi":

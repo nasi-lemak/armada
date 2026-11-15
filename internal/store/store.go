@@ -1135,6 +1135,30 @@ func (s *Store) RecordEvent(ctx context.Context, e *api.Event) error {
 	return err
 }
 
+// PutSite creates or replaces a site (another server reporting here).
+func (s *Store) PutSite(ctx context.Context, site *api.Site) error {
+	return s.putDoc(ctx, "sites", site.ID, site.CreatedAt, site)
+}
+
+// GetSite loads a site.
+func (s *Store) GetSite(ctx context.Context, id string) (*api.Site, error) {
+	var site api.Site
+	if err := s.getDoc(ctx, "sites", id, &site); err != nil {
+		return nil, err
+	}
+	return &site, nil
+}
+
+// ListSites returns every site, oldest first.
+func (s *Store) ListSites(ctx context.Context) ([]*api.Site, error) {
+	return listDocs[api.Site](ctx, s, "sites")
+}
+
+// DeleteSite removes a site.
+func (s *Store) DeleteSite(ctx context.Context, id string) error {
+	return s.deleteDoc(ctx, "sites", id)
+}
+
 // PutEventHook creates or replaces an event webhook.
 func (s *Store) PutEventHook(ctx context.Context, h *api.EventHook) error {
 	return s.putDoc(ctx, "event_hooks", h.ID, h.CreatedAt, h)

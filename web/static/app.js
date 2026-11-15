@@ -309,6 +309,7 @@ const routes = [
   [/^#\/reports$/, 'reports', viewReports],
   [/^#\/certificates$/, 'certificates', viewCertificates],
   [/^#\/users$/, 'users', viewUsers, 'admin'],
+  [/^#\/sites$/, 'sites', viewSites, 'admin'],
   [/^#\/account$/, 'account', viewAccount],
 ];
 const allowed = need => !need || (need === 'fleet' ? fleetWide() : atLeast(need));
@@ -2433,6 +2434,101 @@ async function viewWebhooks(root) {
   return refresh;
 }
 
+// ---------- sites ----------
+
+// Sites: other Armada servers (on-prem installs, regions) that report here.
+const SITE_STATE = { fresh: ['ok', 'reporting'], stale: ['bad', 'not reporting'], never: ['', 'waiting for first report'], file: ['info', 'imported by hand'] };
+async function viewSites(root) {
+  const list = h('div', { class: 'stack' });
+  const totals = h('div', { class: 'grid cols-4' });
+  const shown = h('div', {});
+  const nameIn = h('input', { required: true, placeholder: 'Orchard store (on-prem)', 'aria-label': 'Site name' });
+  const noteIn = h('input', { placeholder: 'optional', 'aria-label': 'Site note' });
+  const showToken = (site, token) => replace(shown, h('div', { class: 'callout stack' },
+    h('div', {}, h('strong', {}, `Token for ${site.name}`), ' — copy it now; it won\'t be shown again.'),
+    h('div', { class: 'secret' }, token),
+    h('div', {}, 'Start the site\'s server with:'),
+    h('div', { class: 'secret' }, `ARMADA_CENTRAL_TOKEN=${token} armada-server … -central-url ${location.origin}`),
+    h('div', { class: 'muted' }, 'It reports every 5 minutes, outbound only (a proxy works: HTTPS_PROXY). For a site with no route here, run ',
+      h('code', {}, 'armadactl site export -o snapshot.json'), ' there and use Import snapshot below.')));
+  append(root, pageHead('Sites', 'Other Armada servers — on-prem installs, regions — reporting here, so you can watch them all in one place.'),
+    totals, h('div', { class: 'spacer' }),
+    h('div', { class: 'card stack' }, h('h2', {}, 'Add a site'),
+      h('form', { class: 'inline', onsubmit: async e => {
+        e.preventDefault();
+        const site = await guard(() => api('POST', '/api/v1/sites', { name: nameIn.value.trim(), note: noteIn.value.trim() }), 'Site added');
+        if (site) { showToken(site, site.token); nameIn.value = noteIn.value = ''; refresh(); }
+      } }, h('label', {}, 'Name', nameIn), h('label', {}, 'Note', noteIn), h('button', { class: 'btn primary', type: 'submit' }, 'Add site')),
+      shown),
+    h('div', { class: 'spacer' }), list);
+
+  const stat = (label, value, tone) => h('div', { class: 'site-stat' }, h('div', { class: 'v ' + (tone || '') }, value), h('div', { class: 'l' }, label));
+  async function refresh() {
+    const sites = await api('GET', '/api/v1/sites');
+    const snaps = sites.map(x => x.snapshot).filter(Boolean);
+    const sum = f => snaps.reduce((n, sn) => n + f(sn), 0);
+    const stale = sites.filter(x => x.state === 'stale' || x.state === 'never').length;
+    replace(totals, sites.length ? [
+      h('div', { class: 'card stat' }, h('div', { class: 'label' }, 'Sites'), h('div', { class: 'value' }, sites.length), h('div', { class: 'hint' + (stale ? ' bad' : '') }, stale ? `${stale} not reporting` : 'all reporting')),
+      h('div', { class: 'card stat' }, h('div', { class: 'label' }, 'Devices'), h('div', { class: 'value' }, sum(sn => sn.summary.devices)), h('div', { class: 'hint' }, `${sum(sn => sn.summary.offline)} offline`)),
+      h('div', { class: 'card stat' }, h('div', { class: 'label' }, 'Firing alerts'), h('div', { class: 'value' }, sum(sn => sn.summary.firing_alerts)), h('div', { class: 'hint' }, 'across all sites')),
+      h('div', { class: 'card stat' }, h('div', { class: 'label' }, 'Needs attention'), h('div', { class: 'value' }, sum(sn => sn.insights.software.reduce((n, p) => n + p.behind.length, 0) + sn.insights.certificates.items.length)),
+        h('div', { class: 'hint' }, 'software behind + certificates'))] : null);
+    replace(list, sites.length ? sites.map(site => {
+      const sn = site.snapshot;
+      const [tone, text] = SITE_STATE[site.state] || ['', site.state];
+      const fileIn = h('input', { type: 'file', accept: '.json,application/json', class: 'hidden' });
+      fileIn.addEventListener('change', async () => {
+        const f = fileIn.files[0];
+        if (!f) return;
+        let snap;
+        try { snap = JSON.parse(await f.text()); } catch { return toast('That file isn\'t a snapshot (JSON)', true); }
+        if (await guard(() => api('POST', `/api/v1/sites/${site.id}/import`, snap), 'Snapshot imported')) refresh();
+      });
+      const behind = sn ? sn.insights.software.reduce((n, p) => n + p.behind.length, 0) : 0;
+      const certs = sn ? sn.insights.certificates.items.length : 0;
+      const bk = sn && sn.summary.backup;
+      return h('div', { class: 'card site-card' },
+        h('div', { class: 'page-head' },
+          h('div', {}, h('h2', {}, site.name, ' ', h('span', { class: 'badge ' + tone }, text)),
+            h('div', { class: 'muted' }, site.last_report_at ? `report from ${ago(sn ? sn.generated_at : site.last_report_at)}` : 'no report yet',
+              sn && sn.server_version ? ` · server ${sn.server_version}` : '', site.note ? ' · ' + site.note : '')),
+          h('div', { class: 'btn-row' },
+            sn && sn.public_url ? h('a', { class: 'btn small', href: sn.public_url, target: '_blank', rel: 'noopener' }, 'Open its dashboard') : null,
+            h('button', { class: 'btn small ghost', onclick: () => fileIn.click() }, 'Import snapshot'), fileIn,
+            h('button', { class: 'btn small ghost', onclick: async () => {
+              if (!confirm(`Make a new token for ${site.name}? The old one stops working, and the site server needs the new one.`)) return;
+              const r = await guard(() => api('POST', `/api/v1/sites/${site.id}/token`));
+              if (r) { showToken(r, r.token); refresh(); }
+            } }, 'New token'),
+            h('button', { class: 'btn small ghost danger', onclick: async () => {
+              if (confirm(`Remove ${site.name}? Its reports stop being accepted.`) && await guard(() => api('DELETE', '/api/v1/sites/' + site.id), 'Removed') !== undefined) refresh();
+            } }, 'Remove'))),
+        sn ? h('div', { class: 'site-stats' },
+          stat('devices', `${sn.summary.online}/${sn.summary.online + sn.summary.offline}`, sn.summary.offline ? 'warn' : 'ok'),
+          stat('health issues', sn.summary.health_critical + sn.summary.health_warning, sn.summary.health_critical ? 'bad' : sn.summary.health_warning ? 'warn' : 'ok'),
+          stat('firing alerts', sn.summary.firing_alerts, sn.summary.firing_alerts ? 'bad' : 'ok'),
+          stat('software behind', behind, behind ? 'warn' : 'ok'),
+          stat('certificates due', certs, certs ? 'warn' : 'ok'),
+          stat('disconnections (7d)', sn.insights.connectivity.outages, sn.insights.connectivity.outages ? 'warn' : 'ok'),
+          stat('backups', bk ? (bk.warning ? (bk.enabled ? 'failing' : 'off') : 'ok') : '—', bk && bk.warning ? 'bad' : 'ok')) : null,
+        sn ? h('details', {}, h('summary', {}, 'Details'),
+          sn.firing_alerts && sn.firing_alerts.length ? [h('h3', {}, 'Firing alerts'), h('ul', { class: 'mini-list' }, sn.firing_alerts.map(a =>
+            h('li', {}, badge(a.severity), ' ', a.rule, h('span', { class: 'muted' }, ` · ${a.summary} · since ${ago(a.started_at)}`))))] : null,
+          sn.insights.offline_now.length ? [h('h3', {}, 'Offline now'), h('ul', { class: 'mini-list' }, sn.insights.offline_now.slice(0, 20).map(o =>
+            h('li', {}, o.name, h('span', { class: 'muted' }, ' · last seen ' + ago(o.since)))))] : null,
+          behind ? [h('h3', {}, 'Software behind'), h('ul', { class: 'mini-list' }, sn.insights.software.flatMap(p => p.behind.slice(0, 20).map(b =>
+            h('li', {}, b.name, h('span', { class: 'muted mono' }, ` ${p.package} ${b.installed} → ${b.latest}`)))))] : null,
+          certs ? [h('h3', {}, 'Certificates'), h('ul', { class: 'mini-list' }, sn.insights.certificates.items.slice(0, 20).map(c =>
+            h('li', {}, c.device_name, h('span', { class: 'mono' }, ' ' + c.target), h('span', { class: 'muted' }, c.days_left < 0 ? ` · expired ${-c.days_left}d ago` : ` · ${c.days_left}d left`))))] : null,
+          (sn.groupings || []).filter(g => g.values.length).map(g => [h('h3', {}, g.key), h('div', { class: 'chips' }, g.values.map(v => h('span', { class: 'chip' }, `${v.value} (${v.devices})`)))]),
+          bk && bk.warning ? [h('h3', {}, 'Backups'), h('p', { class: 'muted' }, bk.warning)] : null) : null);
+    }) : h('div', { class: 'card' }, h('div', { class: 'empty' }, 'No sites yet. Add one for each other Armada server you want to watch from here.')));
+  }
+  await guard(refresh);
+  return refresh;
+}
+
 // ---------- API reference ----------
 
 async function viewAPIDocs(root) {
@@ -3115,7 +3211,7 @@ async function viewMonitoring(root) {
   const rName = h('input', { required: true, placeholder: 'Storage failing', 'aria-label': 'Rule name' });
   const rCond = h('select', { 'aria-label': 'Condition' }, [['health', 'Health check failing'], ['device_offline', 'Device offline'], ['cert_expiry', 'Certificate expiring'],
     ['flaky_connectivity', 'Device keeps losing its connection'], ['site_outage', 'Many devices at a site offline at once'],
-    ...(isAdmin ? [['update_failed', 'Update failed'], ['deployment_paused', 'Rollout paused'], ['server_cert_expiry', "Server's own certificate expiring"]] : [])].map(([v, l]) => h('option', { value: v }, l)));
+    ...(isAdmin ? [['update_failed', 'Update failed'], ['deployment_paused', 'Rollout paused'], ['server_cert_expiry', "Server's own certificate expiring"], ['site_silent', 'A site server stopped reporting']] : [])].map(([v, l]) => h('option', { value: v }, l)));
   const rSev = h('select', { 'aria-label': 'Minimum severity' }, ['critical', 'warning'].map(v => h('option', { value: v }, v)));
   const rKinds = h('input', { placeholder: 'any, or storage power temperature', 'aria-label': 'Check kinds' });
   const rOffline = h('input', { type: 'number', min: '1', value: '10', 'aria-label': 'Offline minutes' });
@@ -3132,7 +3228,8 @@ async function viewMonitoring(root) {
   const syncCond = () => {
     rSev.closest('label').classList.toggle('hidden', rCond.value !== 'health');
     rKinds.closest('label').classList.toggle('hidden', rCond.value !== 'health');
-    rOffline.closest('label').classList.toggle('hidden', rCond.value !== 'device_offline' && rCond.value !== 'site_outage');
+    rOffline.closest('label').classList.toggle('hidden', !['device_offline', 'site_outage', 'site_silent'].includes(rCond.value));
+    if (rCond.value === 'site_silent' && rOffline.value === '10') rOffline.value = '30';
     if (rCond.value === 'site_outage' && rOffline.value === '10') rOffline.value = '5';
     for (const el of [rDrops, rWindow]) el.closest('label').classList.toggle('hidden', rCond.value !== 'flaky_connectivity');
     for (const el of [rGroup, rMinDev, rMinPct]) el.closest('label').classList.toggle('hidden', rCond.value !== 'site_outage');
@@ -3383,6 +3480,7 @@ async function viewMonitoring(root) {
           r.condition === 'health' ? h('div', { class: 'muted' }, `${r.min_severity || 'critical'}+${(r.check_kinds || []).length ? ' · ' + r.check_kinds.join(', ') : ''}`) : null,
           r.condition === 'device_offline' ? h('div', { class: 'muted' }, `${r.offline_minutes || 10} min`) : null,
           r.condition === 'cert_expiry' ? h('div', { class: 'muted' }, `${r.expiry_days || 30} days before`) : null,
+          r.condition === 'site_silent' ? h('div', { class: 'muted' }, `silent ${r.offline_minutes || 30} min`) : null,
           r.condition === 'flaky_connectivity' ? h('div', { class: 'muted' }, `${r.disconnections || 5}+ drops in ${r.window_hours || 24} h`) : null,
           r.condition === 'site_outage' ? h('div', { class: 'muted' }, `${r.min_devices || 3}+ devices and ${r.min_percent || 50}%+ per ${r.group_by || 'site'}, offline ${r.offline_minutes || 5} min`) : null,
           r.condition === 'server_cert_expiry' ? h('div', { class: 'muted' }, `${r.expiry_days || 21} days before`) : null),
