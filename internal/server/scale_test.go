@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"sync"
@@ -168,4 +169,8 @@ func TestScale(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("  engine tick %s", time.Since(t0).Round(time.Millisecond))
+	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	t.Logf("  heap in use %d MiB (the device cache with %d devices, plus the test's own data)", ms.HeapAlloc>>20, n)
 }

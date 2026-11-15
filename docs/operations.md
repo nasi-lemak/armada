@@ -275,15 +275,22 @@ on-prem server, the routine differs in a few ways:
 
   | | |
   |---|---|
-  | Heartbeats | about 950 a second (10,000 devices at 30 seconds need about 330); p99 under 40 ms |
-  | Fleet-wide pages: device list, summary, Needs attention, certificates, reports | 200–300 ms each |
+  | Heartbeats | about 850–950 a second (10,000 devices at 30 seconds need about 330); p99 under 40 ms |
+  | Overview, search, groupings | 10–25 ms |
+  | Device list, Needs attention, reports, certificates | 70–140 ms |
   | One device, its timeline, the activity log, alerts | about 1 ms |
   | The device list on the wire (gzip) | about 300 KB, from 10 MB of JSON |
-  | One engine tick | about 250 ms (every 10 seconds) |
+  | One engine tick | about 45 ms (every 10 seconds) |
+
+  The server keeps every device in memory, already decoded, so these pages don't read and decode
+  the whole table each time. Check-ins update their device in place; renames, relabels, lifecycle
+  changes, enrollments and deletions reload it (about 200 ms at 10,000 devices). It costs a few KB
+  per device.
 
 - **Fleet-wide pages cost the most.** Each open dashboard tab refreshes its page every 10 seconds.
   *Needs attention* refreshes once a minute. With many people watching a large fleet, give the
-  server a couple of cores. Run the test above on your own hardware to see where you stand.
+  server a couple of cores. Run the test above on your own hardware to see where you stand, and watch
+  `armada_http_request_duration_seconds` in [Prometheus](#prometheus).
 - **Disk growth comes from:**
   - artifacts (delete old releases you no longer deploy);
   - history (`-history-retention`, 90 days by default);

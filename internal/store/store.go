@@ -24,6 +24,7 @@ var ErrConflict = errors.New("already exists")
 type Store struct {
 	db        *sql.DB
 	migration MigrationInfo
+	devs      deviceCache
 }
 
 const schema = `
@@ -280,8 +281,11 @@ func (s *Store) SetDeviceHealth(ctx context.Context, id string, checks []api.Che
 	if checks == nil {
 		checks = []api.CheckResult{}
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE devices SET health=? WHERE id=?`, mustJSON(checks), id)
-	return err
+	health := mustJSON(checks)
+	return s.writeDevice(id, func() error {
+		_, err := s.db.ExecContext(ctx, `UPDATE devices SET health=? WHERE id=?`, health, id)
+		return err
+	}, func(d *api.Device) { applyHealth(d, health) })
 }
 
 // DeviceHardwareKey returns the device's attested public key (base64 PKIX DER), if any.
@@ -296,11 +300,13 @@ func (s *Store) DeviceHardwareKey(ctx context.Context, id string) (string, error
 
 // SetLicenseRevoked revokes or reinstates a device's app licenses.
 func (s *Store) SetLicenseRevoked(ctx context.Context, id string, revoked bool) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE devices SET license_revoked=? WHERE id=?`, boolInt(revoked), id)
-	if err != nil {
-		return err
-	}
-	return expectOne(res)
+	return s.writeDevice(id, func() error {
+		res, err := s.db.ExecContext(ctx, `UPDATE devices SET license_revoked=? WHERE id=?`, boolInt(revoked), id)
+		if err != nil {
+			return err
+		}
+		return expectOne(res)
+	}, func(d *api.Device) { d.LicenseRevoked = revoked })
 }
 
 // GetDevice loads a device by ID.
@@ -316,12 +322,12 @@ func (s *Store) GetDeviceByKeyHash(ctx context.Context, keyHash string) (*api.De
 // ListDevices returns the fleet's devices ordered by name: every device but
 // retired ones, which are kept only as records.
 func (s *Store) ListDevices(ctx context.Context) ([]*api.Device, error) {
-	return s.listDevices(ctx, `SELECT `+deviceCols+` FROM devices WHERE lifecycle <> 'retired' ORDER BY name, id`)
+	return s.listCached(ctx, func(d *api.Device) bool { return d.Lifecycle != api.LifecycleRetired })
 }
 
 // ListAllDevices returns every device, retired ones included.
 func (s *Store) ListAllDevices(ctx context.Context) ([]*api.Device, error) {
-	return s.listDevices(ctx, `SELECT `+deviceCols+` FROM devices ORDER BY name, id`)
+	return s.listCached(ctx, func(*api.Device) bool { return true })
 }
 
 // SetDeviceLifecycle stores devices' identity (name, channel, labels) and
@@ -329,6 +335,7 @@ func (s *Store) ListAllDevices(ctx context.Context) ([]*api.Device, error) {
 // never authenticate again), forgets its hardware key and revokes its
 // licenses.
 func (s *Store) SetDeviceLifecycle(ctx context.Context, devs ...*api.Device) error {
+	defer s.devs.invalidate()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -359,7 +366,7 @@ func (s *Store) SetDeviceLifecycle(ctx context.Context, devs ...*api.Device) err
 
 // ListPeripherals returns the devices a gateway reports (not retired).
 func (s *Store) ListPeripherals(ctx context.Context, gatewayID string) ([]*api.Device, error) {
-	return s.listDevices(ctx, `SELECT `+deviceCols+` FROM devices WHERE parent_id = ? AND lifecycle <> 'retired' ORDER BY name, id`, gatewayID)
+	return s.listCached(ctx, func(d *api.Device) bool { return d.ParentID == gatewayID && d.Lifecycle != api.LifecycleRetired })
 }
 
 func (s *Store) listDevices(ctx context.Context, q string, args ...any) ([]*api.Device, error) {
@@ -381,21 +388,33 @@ func (s *Store) listDevices(ctx context.Context, q string, args ...any) ([]*api.
 
 // RecordHeartbeat stores what a device reported.
 func (s *Store) RecordHeartbeat(ctx context.Context, id string, info api.DeviceInfo, m api.Metrics, pkgs map[string]string, status string, now time.Time) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE devices SET info=?, metrics=?, packages=?, agent_status=?, last_seen_at=? WHERE id=?`,
-		mustJSON(info), mustJSON(m), mustJSON(pkgs), status, ts(now), id)
-	if err != nil {
-		return err
-	}
-	return expectOne(res)
+	infoJ, metricsJ, pkgsJ, seen := mustJSON(info), mustJSON(m), mustJSON(pkgs), ts(now)
+	return s.writeDevice(id, func() error {
+		res, err := s.db.ExecContext(ctx, `UPDATE devices SET info=?, metrics=?, packages=?, agent_status=?, last_seen_at=? WHERE id=?`,
+			infoJ, metricsJ, pkgsJ, status, seen, id)
+		if err != nil {
+			return err
+		}
+		return expectOne(res)
+	}, func(d *api.Device) { applyHeartbeat(d, infoJ, metricsJ, pkgsJ, status, seen) })
 }
 
 // SetDeviceInventory stores what people record about a device.
 func (s *Store) SetDeviceInventory(ctx context.Context, id string, inv *api.Inventory) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE devices SET inventory=? WHERE id=?`, inventoryJSON(inv), id)
-	if err != nil {
-		return err
-	}
-	return expectOne(res)
+	invJ := inventoryJSON(inv)
+	return s.writeDevice(id, func() error {
+		res, err := s.db.ExecContext(ctx, `UPDATE devices SET inventory=? WHERE id=?`, invJ, id)
+		if err != nil {
+			return err
+		}
+		return expectOne(res)
+	}, func(d *api.Device) {
+		d.Inventory = nil
+		if invJ != "" {
+			d.Inventory = &api.Inventory{}
+			_ = json.Unmarshal([]byte(invJ), d.Inventory)
+		}
+	})
 }
 
 func inventoryJSON(inv *api.Inventory) string {
@@ -407,6 +426,7 @@ func inventoryJSON(inv *api.Inventory) string {
 
 // UpdateDeviceMeta changes admin-controlled fields.
 func (s *Store) UpdateDeviceMeta(ctx context.Context, id, name, channel string, labels map[string]string) error {
+	defer s.devs.invalidate() // the name decides the order
 	res, err := s.db.ExecContext(ctx, `UPDATE devices SET name=?, channel=?, labels=? WHERE id=?`, name, channel, mustJSON(labels), id)
 	if err != nil {
 		return err
@@ -416,6 +436,7 @@ func (s *Store) UpdateDeviceMeta(ctx context.Context, id, name, channel string, 
 
 // DeleteDevice removes a device and its history. Its key stops working immediately.
 func (s *Store) DeleteDevice(ctx context.Context, id string) error {
+	defer s.devs.invalidate()
 	res, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE id=?`, id)
 	if err != nil {
 		return err
@@ -603,6 +624,7 @@ type EnrollOptions struct {
 }
 
 func (s *Store) Enroll(ctx context.Context, tokenHash string, d *api.Device, keyHash, hwKey string, now time.Time, opts ...EnrollOptions) error {
+	defer s.devs.invalidate()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1711,14 +1733,28 @@ func (s *Store) PruneAlerts(ctx context.Context, before time.Time) error {
 // New peripherals take the gateway's channel and labels; afterwards those
 // are managed like any device's.
 func (s *Store) UpsertPeripheral(ctx context.Context, d *api.Device) (created bool, err error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE devices SET info=?, metrics=?, packages=?, last_seen_at=?, parent_id=?, health=? WHERE id=?`,
-		mustJSON(d.Info), mustJSON(d.Metrics), mustJSON(d.Packages), ts(d.LastSeenAt), d.ParentID, mustJSON(nonNilChecks(d.Checks)), d.ID)
-	if err != nil {
+	infoJ, metricsJ, pkgsJ, seen, health := mustJSON(d.Info), mustJSON(d.Metrics), mustJSON(d.Packages), ts(d.LastSeenAt), mustJSON(nonNilChecks(d.Checks))
+	updated := false
+	err = s.writeDevice(d.ID, func() error {
+		res, err := s.db.ExecContext(ctx, `UPDATE devices SET info=?, metrics=?, packages=?, last_seen_at=?, parent_id=?, health=? WHERE id=?`,
+			infoJ, metricsJ, pkgsJ, seen, d.ParentID, health, d.ID)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		updated = n > 0
+		return nil
+	}, func(c *api.Device) {
+		if updated {
+			applyHeartbeat(c, infoJ, metricsJ, pkgsJ, c.AgentStatus, seen)
+			c.ParentID = d.ParentID
+			applyHealth(c, health)
+		}
+	})
+	if err != nil || updated {
 		return false, err
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		return false, nil
-	}
+	defer s.devs.invalidate()
 	_, err = s.db.ExecContext(ctx, `INSERT INTO devices (`+deviceCols+`, key_hash, hw_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		d.ID, d.Name, d.Channel, mustJSON(d.Labels), mustJSON(d.Info), mustJSON(d.Metrics), mustJSON(d.Packages),
 		"", ts(d.EnrolledAt), ts(d.LastSeenAt), "", 0, mustJSON(nonNilChecks(d.Checks)), d.ParentID, api.LifecycleActive, "", "",
