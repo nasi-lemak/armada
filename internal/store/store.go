@@ -357,8 +357,13 @@ func (s *Store) SetDeviceLifecycle(ctx context.Context, devs ...*api.Device) err
 	return tx.Commit()
 }
 
-func (s *Store) listDevices(ctx context.Context, q string) ([]*api.Device, error) {
-	rows, err := s.db.QueryContext(ctx, q)
+// ListPeripherals returns the devices a gateway reports (not retired).
+func (s *Store) ListPeripherals(ctx context.Context, gatewayID string) ([]*api.Device, error) {
+	return s.listDevices(ctx, `SELECT `+deviceCols+` FROM devices WHERE parent_id = ? AND lifecycle <> 'retired' ORDER BY name, id`, gatewayID)
+}
+
+func (s *Store) listDevices(ctx context.Context, q string, args ...any) ([]*api.Device, error) {
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

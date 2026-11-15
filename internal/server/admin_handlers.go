@@ -198,13 +198,13 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	all, err := s.store.ListDevices(ctx)
+	periph, err := s.store.ListPeripherals(ctx, d.ID)
 	if err != nil {
 		s.internalError(w, err)
 		return
 	}
-	for _, p := range all {
-		if p.ParentID == d.ID && principalFrom(ctx).sees(p) {
+	for _, p := range periph {
+		if principalFrom(ctx).sees(p) {
 			s.decorate(p)
 			det.Peripherals = append(det.Peripherals, p)
 		}

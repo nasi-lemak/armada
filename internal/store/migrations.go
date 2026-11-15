@@ -132,6 +132,9 @@ CREATE TABLE IF NOT EXISTS sites (
 	created_at INTEGER NOT NULL
 );
 `},
+	{Version: 16, Name: "index devices by gateway", SQL: `
+CREATE INDEX IF NOT EXISTS devices_parent ON devices(parent_id);
+`},
 	// Append new migrations here.
 }
 

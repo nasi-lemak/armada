@@ -425,7 +425,7 @@ func (s *Server) Handler() http.Handler {
 	const scopedOK, fleetOnly = true, false
 	s.apiRoutes = s.apiRoutes[:0]
 	route := func(minRole string, scoped bool, pattern string, h http.HandlerFunc) {
-		mux.Handle(pattern, s.guard(minRole, scoped, h))
+		mux.Handle(pattern, gzipResponses(s.guard(minRole, scoped, h)))
 		s.apiRoutes = append(s.apiRoutes, apiRoute{pattern: pattern, minRole: minRole, clients: scoped, handler: handlerName(h)})
 	}
 	viewer := func(scoped bool, pattern string, h http.HandlerFunc) { route(api.RoleViewer, scoped, pattern, h) }

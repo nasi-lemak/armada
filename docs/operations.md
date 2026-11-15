@@ -214,6 +214,20 @@ on-prem server, the routine differs in a few ways:
 
 - **What one server handles:** one server with SQLite handles thousands of devices at a 30-second
   heartbeat. See [scaling.md](scaling.md) for what to change beyond that.
+- **Measured** with 10,000 simulated devices on one machine
+  (`ARMADA_SCALE_DEVICES=10000 go test -run TestScale ./internal/server`):
+
+  | | |
+  |---|---|
+  | Heartbeats | about 950 a second (10,000 devices at 30 seconds need about 330); p99 under 40 ms |
+  | Fleet-wide pages: device list, summary, Needs attention, certificates, reports | 200–300 ms each |
+  | One device, its timeline, the activity log, alerts | about 1 ms |
+  | The device list on the wire (gzip) | about 300 KB, from 10 MB of JSON |
+  | One engine tick | about 250 ms (every 10 seconds) |
+
+- **Fleet-wide pages cost the most.** Each open dashboard tab refreshes its page every 10 seconds.
+  *Needs attention* refreshes once a minute. With many people watching a large fleet, give the
+  server a couple of cores. Run the test above on your own hardware to see where you stand.
 - **Disk growth comes from:**
   - artifacts (delete old releases you no longer deploy);
   - history (`-history-retention`, 90 days by default);

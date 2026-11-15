@@ -440,7 +440,7 @@ function insightsSection() {
     h('div', { class: 'page-head' }, h('h2', {}, 'Needs attention'), seg), body);
   for (const [v, l] of [['1d', '24h'], ['7d', '7d'], ['30d', '30d']]) {
     const b = h('button', { type: 'button', class: v === range ? 'on' : '', onclick: () => {
-      range = v; seg.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); load();
+      range = v; seg.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); load(true);
     } }, l);
     seg.append(b);
   }
@@ -469,8 +469,12 @@ function insightsSection() {
       else if (made.length) { toast(`Started ${made.length} rollouts`); location.hash = '#/deployments'; }
     } }, `Update these ${todo.length}`));
   };
-  let seq = 0;
-  async function load() {
+  let seq = 0, loadedAt = 0;
+  // It reads the whole fleet, so the overview's 10-second refresh only
+  // reloads it once a minute (or when the range changes).
+  async function load(force) {
+    if (!force && Date.now() - loadedAt < 60_000) return;
+    loadedAt = Date.now();
     const my = ++seq;
     const ins = await api('GET', '/api/v1/insights?range=' + range).catch(() => null);
     if (!ins || my !== seq) return;
