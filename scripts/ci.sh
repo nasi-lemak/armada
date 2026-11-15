@@ -99,7 +99,7 @@ job_vulncheck() {
 job_dashboard() {
 	local rc=0 tmp pid
 	group "JavaScript syntax"
-	for f in web/static/*.js; do node --check "$f" || rc=1; done
+	for f in web/static/*.js web/static/js/*.js; do node --check "$f" || rc=1; done
 	endgroup
 
 	group "Install Playwright"

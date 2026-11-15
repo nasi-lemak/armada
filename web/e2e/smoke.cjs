@@ -87,7 +87,8 @@ async function visit(page, who, hash, expectHeading) {
   await admin.waitForSelector('#app:not(.hidden)', { timeout: 10000 });
   const pages = [['#/', 'Fleet overview'], ['#/devices', 'Devices'], ['#/devices/' + ids.acme, 'acme-kiosk'],
     ['#/deployments', 'Deployments'], ['#/releases', 'Releases'], ['#/monitoring', 'Monitoring'], ['#/config', 'Configuration'],
-    ['#/apps', 'Apps'], ['#/enroll', 'Enrollment'], ['#/activity', 'Activity'], ['#/certificates', 'Certificates'], ['#/reports', 'Reports'], ['#/users', 'Users'], ['#/sites', 'Sites'], ['#/account', 'My account']];
+    ['#/apps', 'Apps'], ['#/enroll', 'Enrollment'], ['#/activity', 'Activity'], ['#/certificates', 'Certificates'], ['#/reports', 'Reports'], ['#/users', 'Users'], ['#/sites', 'Sites'], ['#/account', 'My account'],
+    ['#/schedules', 'Scheduled actions'], ['#/webhooks', 'Event webhooks'], ['#/api', 'API reference'], ['#/labels?ids=' + ids.acme, 'Print labels']];
   for (const [hash, heading] of pages) {
     await visit(admin, 'admin', hash, heading);
     if (hash === '#/users') {
@@ -200,6 +201,18 @@ async function visit(page, who, hash, expectHeading) {
   } else {
     fail('smoke devices report no serial number');
   }
+
+  // Quick search (Ctrl+K) finds a device and opens it.
+  await admin.goto(base + '/#/');
+  await admin.waitForTimeout(500);
+  await admin.keyboard.press('Control+k');
+  await admin.fill('.palette input', 'acme-kiosk');
+  await admin.waitForTimeout(700);
+  const hits = await admin.$$eval('.palette-item', r => r.map(x => x.textContent)).catch(() => []);
+  if (!hits.some(x => x.includes('acme-kiosk'))) fail(`quick search found ${JSON.stringify(hits)}`);
+  await admin.keyboard.press('Enter');
+  await admin.waitForTimeout(700);
+  if (!(await admin.evaluate(() => location.hash)).startsWith('#/devices/')) fail('quick search did not open the device');
 
   // Client account: only its customer's devices, no fleet pages.
   const client = await browser.newPage({ viewport: { width: 1280, height: 900 } });

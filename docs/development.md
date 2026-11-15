@@ -23,10 +23,11 @@ make ci
 
 - **Go toolchains:** it runs the Go job twice, like CI. Once with the Go version `go.mod` names, and
   once with the newest Go release. Both are fetched automatically through `GOTOOLCHAIN`.
-- **Then:** the vulnerability scan, the dashboard smoke test and the Android build.
+- **Then:** the vulnerability scan, the upgrade test from older releases, the dashboard smoke test
+  and the Android build.
 - **Missing tools:** a job whose tools aren't installed (Node.js, a JDK, the Android SDK) is reported
   as skipped. `CI_STRICT=1` makes that a failure.
-- **One job only:** `scripts/ci.sh go --tidy`, `vulncheck`, `dashboard` or `android`.
+- **One job only:** `scripts/ci.sh go --tidy`, `vulncheck`, `upgrade`, `dashboard` or `android`.
 - **Settings:**
   - `CI_STABLE_GO=go1.x.y` picks the "newest" Go;
   - `ARMADA_PLAYWRIGHT=$(npm root -g)/playwright` uses an installed Playwright and browser instead
@@ -85,6 +86,8 @@ internal/attestation Android key attestation verifier (Google roots, revocation 
 pkg/license         license issuing and verification (import this in your backend)
 android/agent       Android Device Owner agent (Kotlin)
 android/client      Android client library for your app
+web/static          the dashboard: index.html, style.css, charts.js, and js/ (one file per area,
+                    plain scripts loaded in order: core.js first, main.js with routing and startup last)
 web/                embedded dashboard and the install scripts (install.sh, install.ps1)
 deploy/, examples/  service units, compose file, sample agent config and hooks
 docs/               documentation (go test ./docs checks every link)
