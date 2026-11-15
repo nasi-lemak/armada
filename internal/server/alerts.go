@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/mail"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -37,15 +38,21 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 		return err
 	}
 	ruleByID := map[string]*api.AlertRule{}
-	needDevices, needDeployments, needCerts := false, false, false
+	needDevices, needDeployments, needCerts, needOutages := false, false, false, false
+	var outageWindow time.Duration
 	for _, r := range rules {
 		ruleByID[r.ID] = r
 		if !r.Enabled {
 			continue
 		}
 		switch r.Condition {
-		case api.ConditionDeviceOffline, api.ConditionHealth:
+		case api.ConditionDeviceOffline, api.ConditionHealth, api.ConditionSiteOutage:
 			needDevices = true
+		case api.ConditionFlakyConnectivity:
+			needDevices, needOutages = true, true
+			if w := ruleWindow(r); w > outageWindow {
+				outageWindow = w
+			}
 		case api.ConditionCertExpiry:
 			needDevices, needCerts = true, true
 		case api.ConditionDeploymentPaused:
@@ -66,6 +73,12 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 		}
 		for _, c := range all {
 			certsByDevice[c.DeviceID] = append(certsByDevice[c.DeviceID], c)
+		}
+	}
+	var outages []*api.Outage
+	if needOutages {
+		if outages, err = s.store.ListOutages(ctx, now.Add(-outageWindow), now, ""); err != nil {
+			return err
 		}
 	}
 	var deps []*api.Deployment
@@ -100,6 +113,10 @@ func (s *Server) evaluateAlerts(ctx context.Context, now time.Time) error {
 			continue
 		}
 		switch r.Condition {
+		case api.ConditionFlakyConnectivity:
+			s.flakyCandidates(r, devices, outages, held, now, want)
+		case api.ConditionSiteOutage:
+			s.siteOutageCandidates(r, devices, held, now, want)
 		case api.ConditionDeviceOffline:
 			limit := time.Duration(max(r.OfflineMinutes, 1)) * time.Minute
 			if r.OfflineMinutes == 0 {
@@ -774,8 +791,8 @@ func (s *Server) handleSaveAlertRule(w http.ResponseWriter, r *http.Request) {
 		}
 		rule.ID, rule.CreatedAt, rule.ClientScope, rule.CreatedBy = newID("rul"), now, sc, p.name
 	}
-	if !scopeEmpty(rule.ClientScope) && rule.Condition != api.ConditionDeviceOffline && rule.Condition != api.ConditionHealth && rule.Condition != api.ConditionCertExpiry {
-		writeError(w, http.StatusBadRequest, "client alert rules can watch device_offline, health or cert_expiry; update failures, paused rollouts and the server's certificate are vendor-wide")
+	if !scopeEmpty(rule.ClientScope) && !slices.Contains(clientConditions, rule.Condition) {
+		writeError(w, http.StatusBadRequest, "client alert rules can watch "+strings.Join(clientConditions, ", ")+"; update failures, paused rollouts and the server's certificate are vendor-wide")
 		return
 	}
 	rule.Name = strings.TrimSpace(rule.Name)
@@ -783,10 +800,14 @@ func (s *Server) handleSaveAlertRule(w http.ResponseWriter, r *http.Request) {
 	case rule.Name == "":
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
-	case rule.Condition != api.ConditionDeviceOffline && rule.Condition != api.ConditionHealth &&
-		rule.Condition != api.ConditionUpdateFailed && rule.Condition != api.ConditionDeploymentPaused && rule.Condition != api.ConditionCertExpiry &&
-		rule.Condition != api.ConditionServerCertExpiry:
-		writeError(w, http.StatusBadRequest, "condition must be device_offline, health, cert_expiry, server_cert_expiry, update_failed or deployment_paused")
+	case !slices.Contains(allConditions, rule.Condition):
+		writeError(w, http.StatusBadRequest, "condition must be one of "+strings.Join(allConditions, ", "))
+		return
+	case rule.Disconnections < 0 || rule.WindowHours < 0 || rule.WindowHours > 24*30 || rule.MinDevices < 0 || rule.MinPercent < 0 || rule.MinPercent > 100:
+		writeError(w, http.StatusBadRequest, "disconnections, window_hours (up to 720), min_devices and min_percent (0-100) must be in range")
+		return
+	case rule.GroupBy != "" && !labelKeyRe.MatchString(rule.GroupBy):
+		writeError(w, http.StatusBadRequest, "group_by must be a label key, e.g. site")
 		return
 	case rule.ExpiryDays < 0 || rule.ExpiryDays > 365:
 		writeError(w, http.StatusBadRequest, "expiry_days must be between 1 and 365")
@@ -940,4 +961,111 @@ func (s *Server) validateClientChannel(c *api.NotificationChannel) error {
 		c.Email = &api.EmailConfig{To: c.Email.To}
 	}
 	return nil
+}
+
+var (
+	allConditions = []string{api.ConditionDeviceOffline, api.ConditionHealth, api.ConditionCertExpiry, api.ConditionFlakyConnectivity,
+		api.ConditionSiteOutage, api.ConditionServerCertExpiry, api.ConditionUpdateFailed, api.ConditionDeploymentPaused}
+	// clientConditions are about a client's own devices.
+	clientConditions = []string{api.ConditionDeviceOffline, api.ConditionHealth, api.ConditionCertExpiry, api.ConditionFlakyConnectivity, api.ConditionSiteOutage}
+)
+
+func ruleWindow(r *api.AlertRule) time.Duration {
+	if r.WindowHours > 0 {
+		return time.Duration(r.WindowHours) * time.Hour
+	}
+	return 24 * time.Hour
+}
+
+// flakyCandidates: devices that lost their connection at least N times
+// in the rule's window.
+func (s *Server) flakyCandidates(r *api.AlertRule, devices []*api.Device, outages []*api.Outage, held map[string]bool, now time.Time, want map[string]candidate) {
+	n := r.Disconnections
+	if n <= 0 {
+		n = 5
+	}
+	window := ruleWindow(r)
+	byDev := map[string][]*api.Outage{}
+	for _, o := range outages { // newest first
+		if now.Sub(o.EndedAt) <= window {
+			byDev[o.DeviceID] = append(byDev[o.DeviceID], o)
+		}
+	}
+	for _, d := range devices {
+		os := byDev[d.ID]
+		if len(os) < n || !ruleCovers(r, d) || held[d.ID] || !d.Alerting() {
+			continue
+		}
+		network, restart := 0, 0
+		var offline time.Duration
+		for _, o := range os {
+			offline += o.EndedAt.Sub(o.StartedAt)
+			switch o.Cause {
+			case api.OutageNetwork:
+				network++
+			case api.OutageRestart:
+				restart++
+			}
+		}
+		summary := fmt.Sprintf("%s lost its connection %d times in %s (%d network, %d restart; %s offline in all)",
+			d.Name, len(os), roundDuration(window), network, restart, roundDuration(offline))
+		if os[0].Detail != "" {
+			summary += "; last error: " + os[0].Detail
+		}
+		key := r.ID + "/" + d.ID
+		want[key] = candidate{rule: r, key: key, severity: api.HealthWarning, device: d, summary: summary}
+	}
+}
+
+// siteOutageCandidates: label groups (sites) with many devices offline at
+// once. One alert per group, not per device.
+func (s *Server) siteOutageCandidates(r *api.AlertRule, devices []*api.Device, held map[string]bool, now time.Time, want map[string]candidate) {
+	key := r.GroupBy
+	if key == "" {
+		key = "site"
+	}
+	minDev, minPct := r.MinDevices, r.MinPercent
+	if minDev <= 0 {
+		minDev = 3
+	}
+	if minPct <= 0 {
+		minPct = 50
+	}
+	limit := time.Duration(r.OfflineMinutes) * time.Minute
+	if limit <= 0 {
+		limit = 5 * time.Minute
+	}
+	type group struct {
+		total, offline int
+		since          time.Time
+		first          *api.Device // the first to go offline; the alert hangs off it so clients see it
+	}
+	groups := map[string]*group{}
+	for _, d := range devices {
+		v := d.Labels[key]
+		if v == "" || !ruleCovers(r, d) || held[d.ID] || !d.Alerting() || d.ParentID != "" || d.LastSeenAt.IsZero() {
+			continue
+		}
+		g := groups[v]
+		if g == nil {
+			g = &group{}
+			groups[v] = g
+		}
+		g.total++
+		if now.Sub(d.LastSeenAt) >= limit {
+			g.offline++
+			if g.since.IsZero() || d.LastSeenAt.Before(g.since) {
+				g.since, g.first = d.LastSeenAt, d
+			}
+		}
+	}
+	for v, g := range groups {
+		if g.offline < minDev || g.offline*100 < minPct*g.total {
+			continue
+		}
+		k := r.ID + "/" + key + "=" + v
+		want[k] = candidate{rule: r, key: k, severity: api.HealthCritical, device: g.first,
+			summary: fmt.Sprintf("%d of %d devices at %s=%s are offline (the first since %s): the site's internet, power or proxy may be down",
+				g.offline, g.total, key, v, g.since.UTC().Format("15:04 MST"))}
+	}
 }

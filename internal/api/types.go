@@ -880,6 +880,13 @@ const (
 	// ConditionCertExpiry fires when a managed certificate on a device is
 	// within ExpiryDays of expiring (critical within 7 days or expired).
 	ConditionCertExpiry = "cert_expiry"
+	// ConditionFlakyConnectivity: a device lost its connection at least
+	// Disconnections times within WindowHours.
+	ConditionFlakyConnectivity = "flaky_connectivity"
+	// ConditionSiteOutage: many devices sharing a label value (a site,
+	// project or customer) are offline at once, which usually means the
+	// site's internet or proxy is down.
+	ConditionSiteOutage = "site_outage"
 )
 
 // AlertRule decides when to notify whom.
@@ -887,7 +894,8 @@ type AlertRule struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Enabled bool   `json:"enabled"`
-	// Condition is device_offline | health | cert_expiry | update_failed | deployment_paused.
+	// Condition is device_offline | health | cert_expiry | flaky_connectivity |
+	// site_outage | update_failed | deployment_paused | server_cert_expiry.
 	Condition string `json:"condition"`
 	// Selector limits the rule to some devices (ignored for deployment_paused).
 	Selector Selector `json:"selector"`
@@ -899,6 +907,15 @@ type AlertRule struct {
 	ExpiryDays int `json:"expiry_days,omitempty"`
 	// CheckKinds limits a health rule to some kinds of check, e.g. ["storage", "power"].
 	CheckKinds []string `json:"check_kinds,omitempty"`
+	// Disconnections and WindowHours tune flaky_connectivity (default 5 in 24).
+	Disconnections int `json:"disconnections,omitempty"`
+	WindowHours    int `json:"window_hours,omitempty"`
+	// GroupBy is the label key a site_outage rule groups devices by (default
+	// site); it fires when at least MinDevices (default 3) and MinPercent
+	// (default 50) of a group's devices are offline (OfflineMinutes, default 5).
+	GroupBy    string `json:"group_by,omitempty"`
+	MinDevices int    `json:"min_devices,omitempty"`
+	MinPercent int    `json:"min_percent,omitempty"`
 	// Channels are notification channel IDs.
 	Channels []string `json:"channels"`
 	// RepeatMinutes re-sends a still-firing alert (0 = never).

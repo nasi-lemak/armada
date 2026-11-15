@@ -595,6 +595,8 @@ page or with the CLI.
 |---|---|---|
 | `health` | a matching device has a check at `warning` or `critical`. You can limit it to some kinds of check, such as `storage` or `power`. | the checks recover |
 | `device_offline` | a device hasn't checked in for N minutes | it checks in |
+| `flaky_connectivity` | a device lost its connection at least N times (default 5) within H hours (default 24). The alert says how many were network drops or restarts, and gives the last error. | the drops age out of the window |
+| `site_outage` | at least N devices (default 3) **and** P% (default 50) of the devices sharing a label value (`group_by`, default `site`) have been offline for M minutes (default 5). One alert per site: usually its internet, power or proxy is down. | enough of them are back |
 | `update_failed` | an update fails or rolls back. All failures in one rollout fold into one alert. | after an hour |
 | `deployment_paused` | a rollout auto-paused (or was paused) | it is resumed or aborted |
 | `cert_expiry` | a managed certificate on a device is within N days of expiring (default 30; critical within 7) | it's renewed |
@@ -715,8 +717,10 @@ client's.
   (narrowed further by its own labels), however it was written.
 - **A client's alerts only go to that client's channels**, and vendor alerts only to vendor channels.
   No notification about one customer's devices can reach another customer.
-- Client rules can watch `device_offline` and `health`. `update_failed` and `deployment_paused`
-  summarise rollouts across customers, so they stay vendor-only.
+- Client rules can watch `device_offline`, `health`, `cert_expiry`, `flaky_connectivity` and
+  `site_outage` on their own devices. `update_failed` and `deployment_paused` summarise rollouts
+  across customers, and `server_cert_expiry` is about the vendor's server, so those stay
+  vendor-only.
 - Everyone with access to a client sees its rules and channels. Its operators can change them, and
   its viewers can only look. Someone covering several clients chooses which one each rule is for.
 - **The server sends client notifications for them, so they are limited:**

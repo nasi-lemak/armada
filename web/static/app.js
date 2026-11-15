@@ -3095,11 +3095,17 @@ async function viewMonitoring(root) {
   const rFor = forClient(), cFor = forClient();
   const rName = h('input', { required: true, placeholder: 'Storage failing', 'aria-label': 'Rule name' });
   const rCond = h('select', { 'aria-label': 'Condition' }, [['health', 'Health check failing'], ['device_offline', 'Device offline'], ['cert_expiry', 'Certificate expiring'],
+    ['flaky_connectivity', 'Device keeps losing its connection'], ['site_outage', 'Many devices at a site offline at once'],
     ...(isAdmin ? [['update_failed', 'Update failed'], ['deployment_paused', 'Rollout paused'], ['server_cert_expiry', "Server's own certificate expiring"]] : [])].map(([v, l]) => h('option', { value: v }, l)));
   const rSev = h('select', { 'aria-label': 'Minimum severity' }, ['critical', 'warning'].map(v => h('option', { value: v }, v)));
   const rKinds = h('input', { placeholder: 'any, or storage power temperature', 'aria-label': 'Check kinds' });
   const rOffline = h('input', { type: 'number', min: '1', value: '10', 'aria-label': 'Offline minutes' });
   const rExpiry = h('input', { type: 'number', min: '1', max: '365', value: '30', 'aria-label': 'Days before expiry' });
+  const rDrops = h('input', { type: 'number', min: '1', value: '5', 'aria-label': 'Disconnections' });
+  const rWindow = h('input', { type: 'number', min: '1', max: '720', value: '24', 'aria-label': 'Within hours' });
+  const rGroup = h('input', { value: 'site', 'aria-label': 'Group devices by label' });
+  const rMinDev = h('input', { type: 'number', min: '1', value: '3', 'aria-label': 'At least devices' });
+  const rMinPct = h('input', { type: 'number', min: '1', max: '100', value: '50', 'aria-label': 'At least percent' });
   const rLabels = h('input', { placeholder: 'all devices, or site=sg', 'aria-label': 'Rule labels' });
   const rRepeat = h('input', { type: 'number', min: '0', value: '0', 'aria-label': 'Repeat minutes' });
   const rResolved = h('input', { type: 'checkbox', checked: true });
@@ -3107,7 +3113,10 @@ async function viewMonitoring(root) {
   const syncCond = () => {
     rSev.closest('label').classList.toggle('hidden', rCond.value !== 'health');
     rKinds.closest('label').classList.toggle('hidden', rCond.value !== 'health');
-    rOffline.closest('label').classList.toggle('hidden', rCond.value !== 'device_offline');
+    rOffline.closest('label').classList.toggle('hidden', rCond.value !== 'device_offline' && rCond.value !== 'site_outage');
+    if (rCond.value === 'site_outage' && rOffline.value === '10') rOffline.value = '5';
+    for (const el of [rDrops, rWindow]) el.closest('label').classList.toggle('hidden', rCond.value !== 'flaky_connectivity');
+    for (const el of [rGroup, rMinDev, rMinPct]) el.closest('label').classList.toggle('hidden', rCond.value !== 'site_outage');
     rExpiry.closest('label').classList.toggle('hidden', rCond.value !== 'cert_expiry' && rCond.value !== 'server_cert_expiry');
     if (rCond.value === 'server_cert_expiry' && rExpiry.value === '30') rExpiry.value = '21';
   };
@@ -3226,11 +3235,16 @@ async function viewMonitoring(root) {
       const body = { name: rName.value.trim(), enabled: true, condition: rCond.value, selector: { labels }, channels: chosen,
         min_severity: rSev.value, check_kinds: rKinds.value.split(/[\s,]+/).filter(Boolean), offline_minutes: parseInt(rOffline.value || '10', 10),
         expiry_days: ['cert_expiry', 'server_cert_expiry'].includes(rCond.value) ? parseInt(rExpiry.value || '30', 10) : 0,
+        disconnections: parseInt(rDrops.value || '5', 10), window_hours: parseInt(rWindow.value || '24', 10),
+        group_by: rCond.value === 'site_outage' ? rGroup.value.trim() : '', min_devices: parseInt(rMinDev.value || '3', 10), min_percent: parseInt(rMinPct.value || '50', 10),
         repeat_minutes: parseInt(rRepeat.value || '0', 10), notify_resolved: rResolved.checked, client_scope: clientScope };
       if (await guard(() => api('POST', '/api/v1/alert-rules', body), 'Rule added')) { rName.value = ''; refresh(); }
     } },
     h('div', { class: 'form-grid' }, rFor.label, h('label', {}, 'Name', rName), h('label', {}, 'When', rCond), h('label', {}, 'At least', rSev),
       h('label', {}, 'Only check kinds', rKinds), h('label', { class: 'hidden' }, 'Offline for (minutes)', rOffline),
+      h('label', { class: 'hidden' }, 'Disconnections', rDrops), h('label', { class: 'hidden' }, 'Within (hours)', rWindow),
+      h('label', { class: 'hidden', title: 'Devices with the same value of this label count as one site, e.g. site, project or customer' }, 'Group by label', rGroup),
+      h('label', { class: 'hidden' }, 'At least (devices)', rMinDev), h('label', { class: 'hidden' }, 'And at least (%)', rMinPct),
       h('label', { class: 'hidden' }, 'Days before expiry (critical within 7)', rExpiry),
       h('label', {}, 'Devices (labels)', rLabels), h('label', {}, 'Repeat every (minutes, 0 = never)', rRepeat)),
     h('label', { class: 'check' }, rResolved, 'Also notify when it resolves'),
@@ -3350,6 +3364,8 @@ async function viewMonitoring(root) {
           r.condition === 'health' ? h('div', { class: 'muted' }, `${r.min_severity || 'critical'}+${(r.check_kinds || []).length ? ' · ' + r.check_kinds.join(', ') : ''}`) : null,
           r.condition === 'device_offline' ? h('div', { class: 'muted' }, `${r.offline_minutes || 10} min`) : null,
           r.condition === 'cert_expiry' ? h('div', { class: 'muted' }, `${r.expiry_days || 30} days before`) : null,
+          r.condition === 'flaky_connectivity' ? h('div', { class: 'muted' }, `${r.disconnections || 5}+ drops in ${r.window_hours || 24} h`) : null,
+          r.condition === 'site_outage' ? h('div', { class: 'muted' }, `${r.min_devices || 3}+ devices and ${r.min_percent || 50}%+ per ${r.group_by || 'site'}, offline ${r.offline_minutes || 5} min`) : null,
           r.condition === 'server_cert_expiry' ? h('div', { class: 'muted' }, `${r.expiry_days || 21} days before`) : null),
         h('td', {}, labelChips(r.selector.labels)),
         h('td', {}, r.channels.map(id => chName[id] || id).join(', ')),
