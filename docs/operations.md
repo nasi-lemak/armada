@@ -198,7 +198,7 @@ offline copy.
     new files by itself within a minute; `systemctl kill -s HUP armada-server` makes it immediate.
     The log says `TLS certificate reloaded`.
   - **Behind a proxy:** renew it on the proxy. Armada only watches it.
-- **Certificates on devices:** see *Certificates on devices* in the README. With a renewal policy,
+- **Certificates on devices:** see [Certificates on devices](certificates.md). With a renewal policy,
   the only manual step is getting the client to sign the CSRs. If they're slow, the Certificates
   page shows what's waiting and since when, and the policy keeps reminding them.
 
@@ -251,7 +251,7 @@ offline copy.
 
 ## Sites without internet access
 
-See [Cloud, on-prem and offline sites](../README.md#cloud-on-prem-and-offline-sites). For an
+See [Cloud, on-prem and offline sites](sites.md). For an
 on-prem server, the routine differs in a few ways:
 
 - **Android revocation list:** refresh `-attestation-status-file` monthly. Download

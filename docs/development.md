@@ -1,0 +1,95 @@
+# Development
+
+```bash
+make vet test         # gofmt, go vet, unit and end-to-end tests
+```
+
+```bash
+make test-race        # same with the race detector (needs cgo)
+```
+
+The end-to-end tests run a real server and agent together. They cover enrollment, a
+package update, a failed health check with rollback, the auto-pause, remote actions, a
+self-update with the restart simulated, and crash-loop rollback.
+`internal/server/server_test.go` simulates a 200-device fleet through a staged rollout.
+
+**CI** (`.github/workflows/ci.yml`) runs on every push to `main` and every pull request, or by hand
+(**Run workflow**). Every job runs `scripts/ci.sh`, so you can run exactly the same checks on your
+own machine, without spending CI minutes:
+
+```bash
+make ci
+```
+
+- **Go toolchains:** it runs the Go job twice, like CI. Once with the Go version `go.mod` names, and
+  once with the newest Go release. Both are fetched automatically through `GOTOOLCHAIN`.
+- **Then:** the vulnerability scan, the dashboard smoke test and the Android build.
+- **Missing tools:** a job whose tools aren't installed (Node.js, a JDK, the Android SDK) is reported
+  as skipped. `CI_STRICT=1` makes that a failure.
+- **One job only:** `scripts/ci.sh go --tidy`, `vulncheck`, `dashboard` or `android`.
+- **Settings:**
+  - `CI_STABLE_GO=go1.x.y` picks the "newest" Go;
+  - `ARMADA_PLAYWRIGHT=$(npm root -g)/playwright` uses an installed Playwright and browser instead
+    of installing one;
+  - `JAVA_HOME` picks the JDK (CI uses 17).
+
+The CI jobs:
+
+| Job | What it checks |
+|---|---|
+| Go (go.mod and stable) | `gofmt`, `go vet`, `go mod tidy`, all tests with the race detector, agent cross-compiles for every platform, server and CLI builds for macOS, Windows and FreeBSD |
+| Vulnerability scan | `govulncheck` with the latest Go release |
+| Dashboard | JavaScript syntax, then a browser smoke test (`web/e2e/smoke.cjs`): signs in, opens every page as an admin, and checks a client account sees only its customer's devices and no fleet pages. It fails on any JavaScript error. |
+| Android | agent APK and client library build, unit tests, Android lint |
+
+Run the dashboard smoke test against a local server with:
+
+```bash
+cd web/e2e && npm ci && npx playwright install chromium
+node smoke.cjs http://localhost:8080 "$(cat ../../data/admin-token)"
+```
+
+Build releases with the **current Go release** rather than the minimum in `go.mod`. Many security
+fixes land in the standard library, and the vulnerability scan uses the latest Go for that reason.
+
+**Changing the database schema.** Schema changes are numbered migrations in
+`internal/store/migrations.go`. Each is applied once, in order, inside a transaction, and recorded in
+the `schema_migrations` table.
+- Add a new migration at the end. Never edit a released one; `TestMigrationsAreFrozen` fails if you
+  do. Then add its fingerprint (printed by the test) to the list in that test.
+- `TestLegacyDatabaseUpgrades` upgrades a real database written by the first release
+  (`internal/store/testdata`) and checks it ends up with exactly the same tables, columns and indexes as
+  a new one.
+- `make upgrade-test` (also part of `make ci`) builds older releases from git, fills each with data
+  through its API (devices, releases, a rollout, a client account, alert rules, events), then starts
+  this build on the same data directory. It checks that everything is still there, that device keys,
+  enrollment tokens and passwords still work, that newer features work on the upgraded data, that a
+  second start changes nothing, and that the old release refuses the upgraded database. Add each
+  release's tag to `DEFAULT_REFS` in `scripts/upgrade-test.sh`.
+
+Layout:
+
+```
+cmd/armada-server   server entrypoint
+cmd/armada-agent    agent entrypoint
+cmd/armadactl       CLI
+internal/api        wire types shared by everything
+internal/rollout    pure rollout logic: targeting, staging, version ordering, health evaluation
+internal/chunk      content-defined chunking for delta updates
+internal/store      SQLite persistence and numbered schema migrations
+internal/upgradetest  upgrade test from older releases (scripts/upgrade-test.sh)
+web/e2e             dashboard browser smoke test (run by CI)
+internal/server     HTTP API, agent protocol, rollout engine
+internal/agent      agent: enrollment, heartbeat, updates, self-update, actions
+internal/attestation Android key attestation verifier (Google roots, revocation list)
+pkg/license         license issuing and verification (import this in your backend)
+android/agent       Android Device Owner agent (Kotlin)
+android/client      Android client library for your app
+web/                embedded dashboard and the install scripts (install.sh, install.ps1)
+deploy/, examples/  service units, compose file, sample agent config and hooks
+docs/               documentation (go test ./docs checks every link)
+```
+
+---
+
+[← Armada documentation](../README.md#documentation)

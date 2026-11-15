@@ -2132,7 +2132,7 @@ async function viewCertificates(root) {
             r && ['requested', 'csr_ready'].includes(r.status) ? h('button', { class: 'btn small need-operator', onclick: async () => {
               if (confirm(`Cancel the ${c.target} renewal on ${c.device_name}?`) && await guard(() => api('POST', `/api/v1/certificates/${c.device_id}/${c.target}/cancel`), 'Cancelled')) refresh();
             } }, 'Cancel') : null)));
-      }), 'No managed certificates yet. List them in the agent\'s managed_certs on each device (see the README).'));
+      }), 'No managed certificates yet. List them in the agent\'s managed_certs on each device (see Certificates on devices in the documentation).'));
   }
   search.addEventListener('input', render);
   filter.addEventListener('change', render);
