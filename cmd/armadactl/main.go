@@ -156,6 +156,7 @@ Maintenance (alerts held and updates paused for the covered devices):
   maintenance delete <id>
   history <device-id> [--range 24h|7d|30d|90d] [--check NAME] [--csv]
   backup [-o FILE]                           download a full server backup (database, keys, artifacts)
+  backup status | backup run                 automatic backups: how they're doing, or make one now
   history checks                             check names with history, and how many devices have each
   history compare --check NAME [--range 7d] [--label K=V]... [--channel C] [--csv]
 
@@ -288,6 +289,35 @@ func (c *cli) run(args []string) error {
 	case "history":
 		return c.history(verb, rest)
 	case "backup":
+		switch verb {
+		case "status", "run":
+			var st api.BackupStatus
+			method, path := "GET", "/api/v1/backup/status"
+			if verb == "run" {
+				method, path = "POST", "/api/v1/backup/run"
+			}
+			if err := c.do(method, path, nil, &st); err != nil {
+				return err
+			}
+			if c.json {
+				return c.printJSON(st)
+			}
+			if !st.Enabled {
+				fmt.Fprintln(c.out, "automatic backups: off")
+			} else {
+				fmt.Fprintf(c.out, "automatic backups: every %s, keeping %d, to %s\n", st.Every, st.Keep, strings.Join(st.Destination, " and "))
+				if st.LastOKAt != nil {
+					fmt.Fprintf(c.out, "last good backup:  %s  %s (%s)\n", st.LastOKAt.Local().Format("2006-01-02 15:04"), st.LastFile, bytesH(uint64(st.LastSize)))
+				}
+				if st.LastError != "" {
+					fmt.Fprintf(c.out, "last attempt failed: %s\n", st.LastError)
+				}
+			}
+			if st.Warning != "" {
+				return errors.New(st.Warning)
+			}
+			return nil
+		}
 		return c.backup(append([]string{verb}, rest...))
 	case "android":
 		return c.android(verb, rest)

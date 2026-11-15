@@ -72,6 +72,9 @@ type Config struct {
 	SMTPRelay api.EmailConfig
 	// ReportBrand names the sender of customer reports (your company or product).
 	ReportBrand string
+	// Backups: automatic backups go to BackupDir and/or S3-compatible
+	// storage every BackupEvery, keeping the newest BackupKeep.
+	Backup BackupConfig
 	// GroupLabels are the label keys the dashboard's picker offers, e.g.
 	// customer and project.
 	GroupLabels []string
@@ -226,6 +229,8 @@ type Server struct {
 	hooks eventHookState
 	// apiRoutes is the admin API's route table, for the OpenAPI document.
 	apiRoutes []apiRoute
+	// backupMu allows one automatic backup at a time.
+	backupMu sync.Mutex
 }
 
 // New opens the data directory (creating the database and signing key if
@@ -557,6 +562,8 @@ func (s *Server) Handler() http.Handler {
 
 	admin("GET /api/v1/signing-key", s.handleSigningKey)
 	admin("GET /api/v1/backup", s.handleBackup)
+	admin("GET /api/v1/backup/status", s.handleBackupStatus)
+	admin("POST /api/v1/backup/run", s.handleRunBackup)
 	// Rules and channels: admins manage all; client operators manage their
 	// client's (checked per object in the handlers).
 	viewer(scopedOK, "GET /api/v1/channels", s.handleListChannels)
@@ -734,6 +741,7 @@ func (s *Server) Tick(ctx context.Context) error {
 		return err
 	}
 	s.serverCertTick(ctx, now)
+	s.backupTick(ctx, now)
 	if err := s.store.PruneSessions(ctx, now); err != nil {
 		return err
 	}

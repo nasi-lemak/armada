@@ -37,6 +37,9 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	if !p.scoped() {
 		sum.ServerCert = s.serverCertStatus(ctx)
 	}
+	if p.fleetRole() == api.RoleAdmin {
+		sum.Backup = s.backupStatus(ctx)
+	}
 	for _, d := range devs {
 		if !p.inView(d) {
 			continue

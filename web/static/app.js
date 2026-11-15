@@ -496,11 +496,13 @@ async function viewOverview(root) {
   const dist = h('div', {});
   const feed = h('div', {});
   const certWarning = h('div', {});
+  const backupWarning = h('div', {});
   const attention = insightsSection();
   const viewName = sortedEntries(view).map(([, v]) => v).join(' · ');
   append(root,
     pageHead(viewName ? viewName : 'Fleet overview', viewName ? 'Only these devices: ' + viewText().replace(/;/g, ', ') : null),
     certWarning,
+    backupWarning,
     stats,
     attention.el,
     fleetHist.el,
@@ -527,6 +529,14 @@ async function viewOverview(root) {
         : sc.warning ? `The server's TLS certificate expires in ${sc.days_left} days. ` : "The server's TLS certificate has a problem. "),
       sc.warning ? 'Renew it before then, or every device stops checking in. ' + (sc.source === 'tls-cert' ? 'Armada picks up the renewed files by itself.' : 'It is served by the proxy in front of Armada (-public-url).') : '',
       sc.error ? h('div', {}, sc.error) : null) : null);
+    // Backups (admins): off, failing or overdue.
+    const bk = sum.backup;
+    replace(backupWarning, bk && bk.warning ? h('div', { class: 'callout ' + (bk.enabled ? 'bad-callout ' : '') + 'mb' },
+      h('strong', {}, bk.enabled ? 'Backups need attention. ' : 'No automatic backups. '), bk.warning,
+      bk.enabled ? h('div', { class: 'btn-row mt' }, h('button', { class: 'btn small', onclick: async () => {
+        const st = await guard(() => api('POST', '/api/v1/backup/run'));
+        if (st) { toast(st.last_error ? 'Backup failed: ' + st.last_error : 'Backed up', !!st.last_error); refresh(); }
+      } }, 'Back up now')) : null) : null);
     const inService = sum.online + sum.offline;
     const pct = inService ? Math.round(100 * sum.online / inService) : 0;
     const outOfService = [sum.spare && `${sum.spare} spare`, sum.in_repair && `${sum.in_repair} in repair`].filter(Boolean).join(' · ');

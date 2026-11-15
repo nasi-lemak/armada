@@ -356,3 +356,11 @@ func (s *Store) AddLateSamples(ctx context.Context, deviceID string, samples []S
 			worst=excluded.worst, n=excluded.n, ok=excluded.ok`, from, until, deviceID)
 	return err
 }
+
+// GetMeta reads a server setting or state value ("" if unset).
+func (s *Store) GetMeta(ctx context.Context, key string) (string, error) { return s.getMeta(ctx, key) }
+
+// SetMeta stores a server setting or state value.
+func (s *Store) SetMeta(ctx context.Context, key, value string) error {
+	return s.setMeta(ctx, key, value)
+}

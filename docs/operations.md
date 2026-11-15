@@ -42,7 +42,16 @@ password. `signing.key` is the one file you can't recover from: keep an extra co
 ## Backups
 
 Take one nightly, keep several, keep a copy off the server, and **check that each one restores**.
-For example, from cron on another machine:
+
+**Automatic backups:**
+- **Setting them up:** start the server with `-backup-dir` (another disk) and/or `-backup-s3-url`
+  (off the machine). It makes one every `-backup-every` and keeps `-backup-keep` in each place.
+- **When something is wrong:** the overview warns, and `armadactl backup status` exits non-zero. Put
+  that in your monitoring.
+- **Checking they restore:** still do this, e.g. weekly: `armada-server -verify-backup` on the
+  newest file in the folder, or on one fetched from the bucket.
+
+Or take them from cron on another machine:
 
 ```bash
 #!/bin/sh

@@ -827,6 +827,8 @@ type FleetSummary struct {
 	FiringAlerts      int `json:"firing_alerts"`
 	// ServerCert is the server's own TLS certificate (fleet-wide accounts only).
 	ServerCert *ServerCertStatus `json:"server_cert,omitempty"`
+	// Backup is how automatic backups are doing (fleet admins only).
+	Backup *BackupStatus `json:"backup,omitempty"`
 	// Spare and InRepair count devices out of service; Online and Offline
 	// count active devices only. Retired devices aren't counted.
 	Spare           int                       `json:"spare"`
@@ -1978,4 +1980,19 @@ type DeviceOutageStat struct {
 	LastAt         time.Time `json:"last_at"`
 	LastCause      string    `json:"last_cause"`
 	LastDetail     string    `json:"last_detail,omitempty"`
+}
+
+// BackupStatus is how the server's automatic backups are doing.
+type BackupStatus struct {
+	Enabled     bool       `json:"enabled"`
+	Every       string     `json:"every,omitempty"` // e.g. "24h0m0s"
+	Keep        int        `json:"keep,omitempty"`
+	Destination []string   `json:"destinations,omitempty"`
+	LastAt      *time.Time `json:"last_at,omitempty"`    // last attempt
+	LastOKAt    *time.Time `json:"last_ok_at,omitempty"` // last success
+	LastFile    string     `json:"last_file,omitempty"`
+	LastSize    int64      `json:"last_size,omitempty"`
+	LastError   string     `json:"last_error,omitempty"`
+	// Warning is set when the last backup failed or one is overdue.
+	Warning string `json:"warning,omitempty"`
 }

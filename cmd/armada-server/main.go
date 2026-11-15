@@ -101,6 +101,11 @@ func run() error {
 	flag.StringVar(&cfg.TOTPIssuer, "totp-issuer", env("ARMADA_TOTP_ISSUER", "Armada"), "name shown in authenticator apps")
 	flag.BoolVar(&cfg.CheckPublicCert, "check-public-cert", envBool("ARMADA_CHECK_PUBLIC_CERT", true), "behind a reverse proxy, check hourly the TLS certificate -public-url presents and warn before it expires")
 	flag.StringVar(&cfg.ReportBrand, "report-brand", env("ARMADA_REPORT_BRAND", "Armada"), "name on customer reports and their emails (your company or product)")
+	flag.StringVar(&cfg.Backup.Dir, "backup-dir", env("ARMADA_BACKUP_DIR", ""), "make automatic backups into this folder (ideally another disk)")
+	flag.DurationVar(&cfg.Backup.Every, "backup-every", envDur("ARMADA_BACKUP_EVERY", 24*time.Hour), "how often to make automatic backups")
+	flag.IntVar(&cfg.Backup.Keep, "backup-keep", 14, "how many automatic backups to keep in each place")
+	flag.StringVar(&cfg.Backup.S3URL, "backup-s3-url", env("ARMADA_BACKUP_S3_URL", ""), "also upload automatic backups to S3-compatible storage: https://host/bucket/prefix/ (keys in ARMADA_BACKUP_S3_ACCESS_KEY and ARMADA_BACKUP_S3_SECRET_KEY)")
+	flag.StringVar(&cfg.Backup.S3Region, "backup-s3-region", env("ARMADA_BACKUP_S3_REGION", "us-east-1"), "region for -backup-s3-url")
 	groupLabels := flag.String("group-labels", env("ARMADA_GROUP_LABELS", "customer,project"), "label keys the dashboard's customer/project picker offers, comma-separated")
 	flag.StringVar(&cfg.OIDC.Issuer, "oidc-issuer", os.Getenv("ARMADA_OIDC_ISSUER"), "OpenID Connect issuer URL for single sign-on, e.g. https://accounts.google.com (ARMADA_OIDC_ISSUER)")
 	flag.StringVar(&cfg.OIDC.ClientID, "oidc-client-id", os.Getenv("ARMADA_OIDC_CLIENT_ID"), "OIDC client ID (ARMADA_OIDC_CLIENT_ID)")
@@ -127,6 +132,11 @@ func run() error {
 		if k = strings.TrimSpace(k); k != "" {
 			cfg.GroupLabels = append(cfg.GroupLabels, k)
 		}
+	}
+	cfg.Backup.S3AccessKey = os.Getenv("ARMADA_BACKUP_S3_ACCESS_KEY") // environment only, never argv
+	cfg.Backup.S3SecretKey = os.Getenv("ARMADA_BACKUP_S3_SECRET_KEY")
+	if cfg.Backup.S3URL != "" && (cfg.Backup.S3AccessKey == "" || cfg.Backup.S3SecretKey == "") {
+		return errors.New("-backup-s3-url needs ARMADA_BACKUP_S3_ACCESS_KEY and ARMADA_BACKUP_S3_SECRET_KEY in the environment")
 	}
 	cfg.SMTPRelay.Port = *smtpPort
 	cfg.SMTPRelay.Password = os.Getenv("ARMADA_SMTP_PASSWORD") // environment only, never argv

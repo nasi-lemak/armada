@@ -1813,9 +1813,36 @@ Add `--json` to any command for machine-readable output.
 | `-oidc-name`, `-oidc-allowed-domains`, `-oidc-create-role`, `-oidc-group-roles`, `-oidc-groups-claim`, `-oidc-scopes`, `-oidc-redirect-url` | `ARMADA_OIDC_…` | see [Single sign-on](#single-sign-on) |
 | `-scim-default-role` | `ARMADA_SCIM_DEFAULT_ROLE` | `viewer`, used only while no group mappings exist (see [SCIM provisioning](#scim-provisioning)) |
 | `-push-hold` | `ARMADA_PUSH_HOLD` | `50s` (agent long-poll; keep below your proxy's idle timeout; `0` disables) |
+| `-backup-dir` | `ARMADA_BACKUP_DIR` | — (automatic backups into this folder; ideally another disk) |
+| `-backup-every`, `-backup-keep` | `ARMADA_BACKUP_EVERY` | `24h`, `14` (how often, and how many to keep in each place) |
+| `-backup-s3-url`, `-backup-s3-region` | `ARMADA_BACKUP_S3_URL`, `ARMADA_BACKUP_S3_REGION` | — (also upload to S3-compatible storage: `https://host/bucket/prefix/`), `us-east-1` |
+| | `ARMADA_BACKUP_S3_ACCESS_KEY`, `ARMADA_BACKUP_S3_SECRET_KEY` | (environment only) |
 
 The data directory holds `armada.db` (SQLite), `artifacts/`, `signing.key`, `license.key`, `secrets.key` and
-`admin-token`. **Back it up**, for example nightly from cron:
+`admin-token`. **Back it up.** The simplest way is to let the server do it:
+
+```bash
+armada-server ... -backup-dir /mnt/backups/armada
+```
+
+```bash
+ARMADA_BACKUP_S3_ACCESS_KEY=... ARMADA_BACKUP_S3_SECRET_KEY=... armada-server ... -backup-s3-url https://s3.eu-west-1.amazonaws.com/my-bucket/armada/
+```
+
+- **What it does:**
+  - makes a backup every day (`-backup-every`);
+  - keeps the newest 14 in each place (`-backup-keep`);
+  - retries within the hour if one fails.
+- **Where backups go:** a folder, S3-compatible storage (AWS S3, MinIO, Wasabi, Backblaze B2; give a
+  path-style URL), or both.
+- **Monitoring:**
+  - the overview warns admins when backups are off, the last one failed, or none has succeeded for
+    two periods;
+  - **Back up now** retries;
+  - `armadactl backup status` and `armadactl backup run` do the same from the command line.
+- **The activity log** records each backup (`server.backup`) or failure (`server.backup_failed`).
+
+You can also take one by hand, from anywhere with an admin token:
 
 ```bash
 armadactl backup -o /backups/armada-$(date +%F).tar.gz
@@ -1943,6 +1970,7 @@ armadactl webhooks list
 | `GET /api/v1/events` | Activity log. Filters: `type` (comma list; `prefix.*`), `actor` (`system` for none), `q`, `since`/`until` (date or RFC 3339; dates use `tz`), `device_id`, `deployment_id`. Paging: `limit` (up to 1000), `before_id`. `format=csv` exports up to 50,000 entries |
 | `GET /api/v1/events/types` | Event types recorded, for filter menus |
 | `GET/POST /api/v1/event-hooks`, `PUT/DELETE /api/v1/event-hooks/{id}`, `POST /api/v1/event-hooks/{id}/test` | Event webhooks |
+| `GET /api/v1/backup`, `GET /api/v1/backup/status`, `POST /api/v1/backup/run` | Download a backup; automatic backups' status; make one now (admins) |
 | `GET /api/v1/groupings` | Customers and projects (the `-group-labels` keys) among your devices, for the picker |
 | `GET /api/v1/insights?range=7d` | What needs attention among the devices in view: software behind, certificates, disconnections |
 | `GET /api/v1/devices/{id}/outages` | A device's outages, with cause (network or restart) and the agent's last error |

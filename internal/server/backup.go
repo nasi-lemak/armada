@@ -3,35 +3,33 @@ package server
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
-// handleBackup streams a .tar.gz with everything needed to restore the
-// server: a consistent database snapshot, the release and license signing
-// keys, and all release artifacts. Restore by extracting it into an empty
-// data directory. The archive contains private keys; store it securely.
-func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
+// writeBackup writes a .tar.gz with everything needed to restore the
+// server: a consistent database snapshot, the release, license and
+// secrets keys, and all release artifacts. Restore by extracting it into
+// an empty data directory (armada-server -restore). The archive contains
+// private keys; store it securely.
+func (s *Server) writeBackup(ctx context.Context, w io.Writer) (files int, err error) {
 	tmp, err := os.CreateTemp(s.cfg.DataDir, "backup-*.db")
 	if err != nil {
-		s.internalError(w, err)
-		return
+		return 0, err
 	}
 	snap := tmp.Name()
 	tmp.Close()
 	os.Remove(snap) // VACUUM INTO needs a path that doesn't exist yet
 	defer os.Remove(snap)
-	if err := s.store.Snapshot(r.Context(), snap); err != nil {
-		s.internalError(w, err)
-		return
+	if err := s.store.Snapshot(ctx, snap); err != nil {
+		return 0, err
 	}
-	name := "armada-backup-" + s.now().Format("20060102-150405") + ".tar.gz"
-	w.Header().Set("Content-Type", "application/gzip")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)
 	add := func(src, dst string) error {
@@ -50,26 +48,38 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 		_, err = io.Copy(tw, f)
 		return err
 	}
-	files := [][2]string{{snap, "armada.db"}, {filepath.Join(s.cfg.DataDir, "signing.key"), "signing.key"}, {filepath.Join(s.cfg.DataDir, "license.key"), "license.key"}, {filepath.Join(s.cfg.DataDir, "secrets.key"), "secrets.key"}}
+	list := [][2]string{{snap, "armada.db"}, {filepath.Join(s.cfg.DataDir, "signing.key"), "signing.key"}, {filepath.Join(s.cfg.DataDir, "license.key"), "license.key"}, {filepath.Join(s.cfg.DataDir, "secrets.key"), "secrets.key"}}
 	arts, _ := os.ReadDir(s.artifactDir)
 	for _, a := range arts {
 		// Artifacts are stored under their release ID; skip in-progress uploads.
 		if a.Type().IsRegular() && !strings.HasPrefix(a.Name(), "upload-") && !strings.HasSuffix(a.Name(), ".chunks.json") && !strings.HasSuffix(a.Name(), ".tmp") {
-			files = append(files, [2]string{filepath.Join(s.artifactDir, a.Name()), "artifacts/" + a.Name()})
+			list = append(list, [2]string{filepath.Join(s.artifactDir, a.Name()), "artifacts/" + a.Name()})
 		}
 	}
-	for _, f := range files {
+	for _, f := range list {
 		if err := add(f[0], f[1]); err != nil {
-			// Headers are already sent; abort the stream so the client sees a broken archive.
-			s.log.Error("backup failed", "file", f[1], "err", err)
-			panic(http.ErrAbortHandler)
+			return 0, fmt.Errorf("%s: %w", f[1], err)
 		}
 	}
 	if err := tw.Close(); err != nil {
+		return 0, err
+	}
+	return len(list), gz.Close()
+}
+
+func backupName(t time.Time) string {
+	return "armada-backup-" + t.UTC().Format("20060102-150405") + ".tar.gz"
+}
+
+// handleBackup streams a backup to the caller.
+func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+backupName(s.now())+`"`)
+	n, err := s.writeBackup(r.Context(), w)
+	if err != nil {
+		// Headers are already sent; abort the stream so the client sees a broken archive.
+		s.log.Error("backup failed", "err", err)
 		panic(http.ErrAbortHandler)
 	}
-	if err := gz.Close(); err != nil {
-		panic(http.ErrAbortHandler)
-	}
-	s.logEvent(r.Context(), "server.backup", "", "", fmt.Sprintf("backup downloaded (%d files)", len(files)))
+	s.logEvent(r.Context(), "server.backup", "", "", fmt.Sprintf("backup downloaded (%d files)", n))
 }
