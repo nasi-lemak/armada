@@ -452,3 +452,28 @@ table.data-table td, table.data-table th { padding: 4px 12px; font-size: 12px; }
 .api-ref th:nth-child(2) { width: 42%; }
 .api-ref th:nth-child(4) { width: 150px; }
 .api-ref td { overflow-wrap: anywhere; }
+
+/* Customer / project picker */
+.scopebar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 6px 24px; border-bottom: 1px solid var(--border);
+  background: var(--panel); font-size: 13px; }
+.scopebar.active { background: color-mix(in srgb, var(--accent) 9%, var(--panel)); border-bottom-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.scope-pick { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; margin: 0; font-weight: 500; }
+.scope-pick select { width: auto; padding: 3px 8px; font-size: 13px; }
+.scope-note { color: var(--muted); }
+@media (max-width: 700px) { .scopebar { padding: 6px 16px; } }
+@media print { .scopebar { display: none !important; } }
+
+/* Needs attention (project dashboard) */
+.grid.cols-3 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.insight h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.insight-big { font-size: 18px; font-weight: 650; margin-bottom: 4px; }
+.insight-big.ok { color: var(--ok); }
+.insight-big.warn { color: var(--warn); }
+.insight-big.bad { color: var(--bad); }
+.insight-sub { margin-top: 10px; }
+.insight-pkg { margin-top: 6px; }
+.insight-pkg summary { cursor: pointer; }
+.warn-text { color: var(--warn); }
+.mini-list { list-style: none; margin: 6px 0 0; padding: 0; font-size: 13px; }
+.mini-list li { padding: 3px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.mini-list li:first-child { border-top: 0; }

@@ -695,6 +695,17 @@ type HeartbeatRequest struct {
 	// Certs reports the certificates the agent manages (its managed_certs).
 	// Nil means the agent doesn't manage certificates.
 	Certs []CertReport `json:"certs"`
+	// Connectivity is set on the first heartbeat that gets through after
+	// the agent failed to reach the server: since when, and why.
+	Connectivity *ConnectivityReport `json:"connectivity,omitempty"`
+}
+
+// ConnectivityReport describes the agent's failed attempts to reach the
+// server before this heartbeat.
+type ConnectivityReport struct {
+	Since          *time.Time `json:"since,omitempty"` // the first failed attempt (device clock)
+	FailedAttempts int        `json:"failed_attempts"`
+	LastError      string     `json:"last_error,omitempty"` // e.g. a DNS failure or timeout
 }
 
 // HeartbeatResponse tells the agent what to do next.
@@ -1641,7 +1652,7 @@ type TimelineEntry struct {
 	ID   string     `json:"id"`
 	Time time.Time  `json:"time"`
 	End  *time.Time `json:"end,omitempty"` // spans: when it ended
-	// Kind is alert | update | action | lifecycle | cert | health | config | maintenance | other.
+	// Kind is alert | update | action | lifecycle | connectivity | cert | health | config | maintenance | other.
 	Kind    string `json:"kind"`
 	Type    string `json:"type"` // event type, alert condition or update status
 	Title   string `json:"title"`
@@ -1812,4 +1823,115 @@ type HookDevice struct {
 	Name    string            `json:"name"`
 	Channel string            `json:"channel,omitempty"`
 	Labels  map[string]string `json:"labels,omitempty"`
+}
+
+// Grouping is one label key the dashboard's picker offers (customer,
+// project, ...) with the values devices you can see have.
+type Grouping struct {
+	Key    string          `json:"key"`
+	Values []GroupingValue `json:"values"`
+}
+
+// GroupingValue is one customer or project and how many devices it has.
+type GroupingValue struct {
+	Value   string `json:"value"`
+	Devices int    `json:"devices"`
+}
+
+// Outage is a time a device couldn't be reached: from its last check-in
+// (or the agent's first failed attempt) until it checked in again.
+type Outage struct {
+	ID         int64     `json:"id"`
+	DeviceID   string    `json:"device_id"`
+	DeviceName string    `json:"device_name,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	EndedAt    time.Time `json:"ended_at"`
+	Seconds    int64     `json:"seconds"`
+	// Cause is network (the device stayed up but couldn't reach the server),
+	// restart (it rebooted or lost power), or unknown.
+	Cause          string `json:"cause"`
+	Detail         string `json:"detail,omitempty"` // the agent's last connection error
+	FailedAttempts int    `json:"failed_attempts,omitempty"`
+}
+
+// Outage causes.
+const (
+	OutageNetwork = "network"
+	OutageRestart = "restart"
+	OutageUnknown = "unknown"
+)
+
+// Insights is the at-a-glance view of a set of devices (the dashboard's
+// project view): what's behind on software, which certificates need
+// attention, and how often devices lose their connection.
+type Insights struct {
+	Devices      int                 `json:"devices"`
+	Online       int                 `json:"online"`
+	OfflineNow   []InsightDevice     `json:"offline_now"`
+	Software     []SoftwareStatus    `json:"software"`
+	Certificates CertificateInsights `json:"certificates"`
+	Connectivity ConnectivityInsight `json:"connectivity"`
+}
+
+// InsightDevice is a device in an insight list.
+type InsightDevice struct {
+	ID    string     `json:"id"`
+	Name  string     `json:"name"`
+	Since *time.Time `json:"since,omitempty"`
+}
+
+// SoftwareStatus is one package: how many devices run the newest release
+// for their channel and platform, and which don't.
+type SoftwareStatus struct {
+	Package  string           `json:"package"`
+	Latest   string           `json:"latest"` // newest release (any channel)
+	UpToDate int              `json:"up_to_date"`
+	Behind   []SoftwareBehind `json:"behind"`
+}
+
+// SoftwareBehind is a device not on the newest release for it.
+type SoftwareBehind struct {
+	DeviceID  string `json:"device_id"`
+	Name      string `json:"name"`
+	Channel   string `json:"channel"`
+	Installed string `json:"installed"`
+	Latest    string `json:"latest"`
+	// Updating is the status of an update in progress to a newer version, if any.
+	Updating string `json:"updating,omitempty"`
+}
+
+// CertificateInsights counts certificates needing attention.
+type CertificateInsights struct {
+	Total    int           `json:"total"`
+	Expired  int           `json:"expired"`
+	Expiring int           `json:"expiring"` // within 30 days
+	Waiting  int           `json:"waiting"`  // renewal: CSR waiting to be signed
+	Failed   int           `json:"failed"`   // renewal failed
+	Items    []*DeviceCert `json:"items"`    // the ones needing attention, soonest first
+}
+
+// ConnectivityInsight summarizes outages over a period.
+type ConnectivityInsight struct {
+	From           time.Time          `json:"from"`
+	To             time.Time          `json:"to"`
+	Outages        int                `json:"outages"`
+	Network        int                `json:"network"`
+	Restart        int                `json:"restart"`
+	Unknown        int                `json:"unknown"`
+	OfflineSeconds int64              `json:"offline_seconds"`
+	DevicesHit     int                `json:"devices_hit"`
+	Worst          []DeviceOutageStat `json:"worst"`
+}
+
+// DeviceOutageStat is one device's outages over a period.
+type DeviceOutageStat struct {
+	DeviceID       string    `json:"device_id"`
+	Name           string    `json:"name"`
+	Outages        int       `json:"outages"`
+	Network        int       `json:"network"`
+	Restart        int       `json:"restart"`
+	OfflineSeconds int64     `json:"offline_seconds"`
+	LastAt         time.Time `json:"last_at"`
+	LastCause      string    `json:"last_cause"`
+	LastDetail     string    `json:"last_detail,omitempty"`
 }

@@ -295,6 +295,22 @@ async function visit(page, who, hash, expectHeading) {
   const filtered = await admin.$$eval('#view tbody tr', rows => rows.map(r => r.textContent));
   if (filtered.length !== 1 || !filtered[0].includes('/api/v1/devices/{id}/timeline')) fail(`API filter: ${filtered.join(' | ')}`);
 
+  // Customer/project picker: choosing acme narrows every page, and stays
+  // in the address; the overview shows what needs attention.
+  await visit(admin, 'admin', '#/', 'Fleet overview');
+  await admin.waitForSelector('#scopebar select[aria-label="Customer"]', { timeout: 5000 }).catch(() => fail('customer picker missing'));
+  await admin.selectOption('#scopebar select[aria-label="Customer"]', 'acme');
+  await admin.waitForSelector('#view h1:has-text("acme")', { timeout: 5000 }).catch(() => fail('overview did not switch to acme'));
+  if (!admin.url().includes('customer=acme')) fail('picker choice is not in the address');
+  await admin.waitForSelector('.insight[data-insight="connectivity"]', { timeout: 5000 }).catch(() => fail('needs-attention section missing'));
+  await admin.goto(base + '/?customer=acme#/devices');
+  await admin.waitForTimeout(1200);
+  const pickedRows = await admin.$$eval('#view table tbody tr', rows => rows.map(r => r.textContent));
+  if (!pickedRows.length || pickedRows.some(r => r.includes('globex'))) fail(`picker did not narrow the device list: ${pickedRows.length} rows`);
+  await admin.click('#scopebar button:has-text("Show all")');
+  await admin.waitForTimeout(800);
+  if (admin.url().includes('customer=')) fail('Show all did not clear the picker');
+
   await browser.close();
   if (failures.length) {
     console.error(`${failures.length} failure(s)`);

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/nasi-lemak/armada/internal/api"
 	"github.com/nasi-lemak/armada/internal/rollout"
@@ -106,8 +107,13 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, dev *ap
 		s.internalError(w, err)
 		return
 	}
-	if wasOffline {
-		s.event(ctx, "device.online", dev.ID, "", dev.Name+" came back online")
+	if o := s.outageFrom(dev, &req, now, wasOffline); o != nil {
+		if err := s.store.AddOutage(ctx, o); err != nil {
+			s.log.Error("record outage", "device", dev.ID, "err", err)
+		}
+		if wasOffline {
+			s.event(ctx, "device.online", dev.ID, "", fmt.Sprintf("%s came back online after %s (%s)", dev.Name, roundDuration(now.Sub(o.StartedAt)), outageText(o)))
+		}
 	}
 	dev.Info, dev.Metrics, dev.Packages = req.Info, req.Metrics, req.Packages
 	if req.Health != nil {
@@ -432,4 +438,49 @@ func (s *Server) agentPackageFor(info api.DeviceInfo) string {
 		return s.cfg.Android.AgentPackage
 	}
 	return api.AgentPackage
+}
+
+// outageFrom works out the outage a heartbeat ends, if any: the device was
+// offline, or its agent says it couldn't reach the server for a while.
+// Its uptime tells a network outage (it stayed up) from a restart.
+func (s *Server) outageFrom(dev *api.Device, req *api.HeartbeatRequest, now time.Time, wasOffline bool) *api.Outage {
+	c := req.Connectivity
+	if !wasOffline && (c == nil || c.FailedAttempts == 0) {
+		return nil
+	}
+	start := dev.LastSeenAt
+	if c != nil && c.Since != nil && c.Since.After(start) && c.Since.Before(now) {
+		start = *c.Since // the agent's first failure: closer to when it began
+	}
+	if dev.LastSeenAt.IsZero() || !now.After(start) {
+		return nil
+	}
+	o := &api.Outage{DeviceID: dev.ID, StartedAt: start, EndedAt: now, Cause: api.OutageUnknown}
+	if c != nil {
+		o.Detail, o.FailedAttempts = c.LastError, c.FailedAttempts
+		o.Cause = api.OutageNetwork
+	}
+	if up := req.Metrics.UptimeSeconds; up > 0 {
+		boot := now.Add(-time.Duration(up) * time.Second)
+		if boot.After(start.Add(30 * time.Second)) {
+			o.Cause = api.OutageRestart // it booted during the gap
+		} else {
+			o.Cause = api.OutageNetwork // up all along, but couldn't reach us
+		}
+	}
+	o.Seconds = int64(now.Sub(start).Seconds())
+	return o
+}
+
+func outageText(o *api.Outage) string {
+	switch o.Cause {
+	case api.OutageNetwork:
+		if o.Detail != "" {
+			return "network: " + o.Detail
+		}
+		return "network: the device stayed up but couldn't reach the server"
+	case api.OutageRestart:
+		return "the device restarted or lost power"
+	}
+	return "cause unknown"
 }

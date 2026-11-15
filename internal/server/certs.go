@@ -129,7 +129,7 @@ func (s *Server) visibleCerts(ctx context.Context, p *principal, sel api.Selecto
 	}
 	byID := map[string]*api.Device{}
 	for _, d := range devs {
-		if p.sees(d) && rollout.Matches(sel, d) {
+		if p.inView(d) && rollout.Matches(sel, d) {
 			byID[d.ID] = d
 		}
 	}

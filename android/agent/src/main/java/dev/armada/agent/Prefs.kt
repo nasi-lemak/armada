@@ -40,6 +40,19 @@ class Prefs(context: Context) {
         get() = sp.getInt("heartbeat_seconds", 30)
         set(v) = sp.edit().putInt("heartbeat_seconds", v).apply()
 
+    /** Failed attempts to reach the server since the last successful check-in. */
+    var connFailedSince: Long
+        get() = sp.getLong("conn_failed_since", 0L)
+        set(v) = sp.edit().putLong("conn_failed_since", v).apply()
+
+    var connFailedAttempts: Int
+        get() = sp.getInt("conn_failed_attempts", 0)
+        set(v) = sp.edit().putInt("conn_failed_attempts", v).apply()
+
+    var connLastError: String
+        get() = sp.getString("conn_last_error", "") ?: ""
+        set(v) = sp.edit().putString("conn_last_error", v).apply()
+
     var managedPackages: List<String>
         get() = sp.getString("managed_packages", null)?.let { s ->
             val a = JSONArray(s)

@@ -30,6 +30,9 @@ type principal struct {
 	method string
 	// signedInAt is when the dashboard session started.
 	signedInAt time.Time
+	// view narrows lists to devices matching it (the dashboard's customer
+	// or project picker). It only filters what's shown; access is unchanged.
+	view api.Selector
 	// setupRequired means two-factor sign-in is required and not set up yet:
 	// only account and sign-out routes are allowed.
 	setupRequired bool
@@ -73,6 +76,15 @@ func (p *principal) roleFor(d *api.Device) string {
 
 // sees reports whether any grant covers a device.
 func (p *principal) sees(d *api.Device) bool { return p.roleFor(d) != "" }
+
+// viewing reports whether the principal's view is narrowed (the picker).
+func (p *principal) viewing() bool { return p != nil && len(p.view.Labels) > 0 }
+
+// inView is sees, narrowed by the view: for lists and totals. Opening one
+// device by ID uses sees, so links still work outside the view.
+func (p *principal) inView(d *api.Device) bool {
+	return p.sees(d) && (!p.viewing() || rollout.Matches(p.view, d))
+}
 
 // scopes lists the device scopes of a principal without fleet-wide access.
 func (p *principal) scopes() []api.Selector {
@@ -181,6 +193,14 @@ func (s *Server) guard(minRole string, scopedOK bool, next http.HandlerFunc) htt
 		if api.RoleRank(have) < api.RoleRank(minRole) {
 			writeError(w, http.StatusForbidden, "your role ("+have+") cannot do this; it needs "+minRole)
 			return
+		}
+		if v := r.Header.Get("X-Armada-View"); v != "" {
+			labels, err := parseLabelList(v)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "X-Armada-View: "+err.Error())
+				return
+			}
+			p.view = api.Selector{Labels: labels}
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
 	})

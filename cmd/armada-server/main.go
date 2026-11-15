@@ -86,6 +86,7 @@ func run() error {
 	allowADB := flag.Bool("android-allow-adb", false, "do not disable USB debugging on Android devices")
 	flag.BoolVar(&cfg.Android.RequireStrongBox, "android-require-strongbox", false, "require attested keys to live in a StrongBox security chip, not just the TEE")
 	flag.StringVar(&cfg.Android.StatusURL, "attestation-status-url", cfg.Android.StatusURL, "Google attestation revocation list URL; empty disables revocation checks")
+	flag.StringVar(&cfg.Android.StatusFile, "attestation-status-file", env("ARMADA_ATTESTATION_STATUS_FILE", ""), "for servers without internet: a downloaded copy of Google's attestation revocation list (re-read when it changes; replaces -attestation-status-url)")
 	envBool := func(k string, def bool) bool {
 		if v := os.Getenv(k); v != "" {
 			b, err := strconv.ParseBool(v)
@@ -100,6 +101,7 @@ func run() error {
 	flag.StringVar(&cfg.TOTPIssuer, "totp-issuer", env("ARMADA_TOTP_ISSUER", "Armada"), "name shown in authenticator apps")
 	flag.BoolVar(&cfg.CheckPublicCert, "check-public-cert", envBool("ARMADA_CHECK_PUBLIC_CERT", true), "behind a reverse proxy, check hourly the TLS certificate -public-url presents and warn before it expires")
 	flag.StringVar(&cfg.ReportBrand, "report-brand", env("ARMADA_REPORT_BRAND", "Armada"), "name on customer reports and their emails (your company or product)")
+	groupLabels := flag.String("group-labels", env("ARMADA_GROUP_LABELS", "customer,project"), "label keys the dashboard's customer/project picker offers, comma-separated")
 	flag.StringVar(&cfg.OIDC.Issuer, "oidc-issuer", os.Getenv("ARMADA_OIDC_ISSUER"), "OpenID Connect issuer URL for single sign-on, e.g. https://accounts.google.com (ARMADA_OIDC_ISSUER)")
 	flag.StringVar(&cfg.OIDC.ClientID, "oidc-client-id", os.Getenv("ARMADA_OIDC_CLIENT_ID"), "OIDC client ID (ARMADA_OIDC_CLIENT_ID)")
 	flag.StringVar(&cfg.OIDC.RedirectURL, "oidc-redirect-url", os.Getenv("ARMADA_OIDC_REDIRECT_URL"), "OIDC redirect URL; default <public-url>/api/v1/auth/sso/callback")
@@ -120,6 +122,12 @@ func run() error {
 	flag.StringVar(&cfg.SMTPRelay.Username, "smtp-username", env("ARMADA_SMTP_USERNAME", ""), "SMTP relay user name")
 	flag.StringVar(&cfg.SMTPRelay.From, "smtp-from", env("ARMADA_SMTP_FROM", ""), "From address for relayed alert email, e.g. alerts@fleet.example.com")
 	flag.Parse()
+	cfg.GroupLabels = nil
+	for _, k := range strings.Split(*groupLabels, ",") {
+		if k = strings.TrimSpace(k); k != "" {
+			cfg.GroupLabels = append(cfg.GroupLabels, k)
+		}
+	}
 	cfg.SMTPRelay.Port = *smtpPort
 	cfg.SMTPRelay.Password = os.Getenv("ARMADA_SMTP_PASSWORD") // environment only, never argv
 	if cfg.SMTPRelay.Host != "" && cfg.SMTPRelay.From == "" {

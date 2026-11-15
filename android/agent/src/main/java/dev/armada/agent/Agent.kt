@@ -79,7 +79,26 @@ class Agent private constructor(private val context: Context) {
             .put("health", Health.checks(context))
             .put("busy", false)
             .put("config", config.report())
-        val r = api().post("/api/v1/agent/heartbeat", body)
+        if (prefs.connFailedAttempts > 0) {
+            // Tell the server how long it couldn't be reached, and why.
+            body.put("connectivity", JSONObject()
+                .put("since", isoTime(prefs.connFailedSince))
+                .put("failed_attempts", prefs.connFailedAttempts)
+                .put("last_error", prefs.connLastError))
+        }
+        val r = try {
+            api().post("/api/v1/agent/heartbeat", body)
+        } catch (e: java.io.IOException) {
+            // The network failed (an HTTP error status would be an ApiException).
+            if (prefs.connFailedAttempts == 0) prefs.connFailedSince = System.currentTimeMillis()
+            prefs.connFailedAttempts = prefs.connFailedAttempts + 1
+            prefs.connLastError = (e.message ?: e.javaClass.simpleName).take(300)
+            throw e
+        }
+        if (prefs.connFailedAttempts > 0) {
+            prefs.connFailedAttempts = 0
+            prefs.connLastError = ""
+        }
         prefs.heartbeatSeconds = r.optInt("heartbeat_interval_seconds", prefs.heartbeatSeconds)
         r.optJSONArray("managed_packages")?.let { a -> prefs.managedPackages = List(a.length()) { a.getString(it) } }
         r.optJSONObject("policy")?.let {
@@ -304,4 +323,11 @@ class Agent private constructor(private val context: Context) {
         fun sha256Hex(b: ByteArray): String =
             MessageDigest.getInstance("SHA-256").digest(b).joinToString("") { "%02x".format(it) }
     }
+}
+
+/** RFC 3339 UTC time for a Unix time in milliseconds. */
+internal fun isoTime(ms: Long): String {
+    val f = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+    f.timeZone = java.util.TimeZone.getTimeZone("UTC")
+    return f.format(java.util.Date(ms))
 }

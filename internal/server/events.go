@@ -76,8 +76,9 @@ func (s *Server) eventFilter(r *http.Request, p *principal) (store.EventFilter, 
 			return f, errors.New("before_id must be an event ID")
 		}
 	}
-	if p.scoped() {
-		// Client accounts see events about their own devices only.
+	if p.scoped() || p.viewing() {
+		// Client accounts see events about their own devices only (and the
+		// picker narrows anyone's to its devices).
 		visible, err := s.visibleDeviceIDs(r.Context(), p)
 		if err != nil {
 			return f, err

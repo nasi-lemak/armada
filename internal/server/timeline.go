@@ -19,16 +19,17 @@ import (
 // that cover it. Alert and update events are left out of the log part
 // because those records say the same thing in more detail.
 
-var timelineKinds = []string{"alert", "update", "action", "lifecycle", "cert", "health", "config", "maintenance", "other"}
+var timelineKinds = []string{"alert", "update", "action", "lifecycle", "connectivity", "cert", "health", "config", "maintenance", "other"}
 
 // eventKindTypes are the event types behind each kind ("other" is the rest).
 var eventKindTypes = map[string][]string{
-	"action":      {"action.*", "bulk.*"},
-	"lifecycle":   {"device.enrolled", "device.lifecycle", "device.replaced", "device.replacement", "device.deleted", "device.license", "device.discovered"},
-	"cert":        {"cert.*"},
-	"health":      {"health.*"},
-	"config":      {"config.*"},
-	"maintenance": {"maintenance.*"},
+	"action":       {"action.*", "bulk.*"},
+	"lifecycle":    {"device.enrolled", "device.lifecycle", "device.replaced", "device.replacement", "device.deleted", "device.license", "device.discovered"},
+	"connectivity": {"device.online"},
+	"cert":         {"cert.*"},
+	"health":       {"health.*"},
+	"config":       {"config.*"},
+	"maintenance":  {"maintenance.*"},
 }
 
 // Covered by alert and update records instead.

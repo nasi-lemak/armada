@@ -38,7 +38,7 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		sum.ServerCert = s.serverCertStatus(ctx)
 	}
 	for _, d := range devs {
-		if !p.sees(d) {
+		if !p.inView(d) {
 			continue
 		}
 		s.decorate(d)
@@ -148,7 +148,7 @@ func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 	out := []*api.Device{}
 	for _, d := range devs {
 		s.decorate(d)
-		if !principalFrom(r.Context()).sees(d) || !rollout.Matches(sel, d) || (status != "" && d.Status != status) || (health != "" && d.Health != health) ||
+		if !principalFrom(r.Context()).inView(d) || !rollout.Matches(sel, d) || (status != "" && d.Status != status) || (health != "" && d.Health != health) ||
 			(life != "" && life != "all" && d.Lifecycle != life) {
 			continue
 		}
@@ -1256,7 +1256,7 @@ func (s *Server) logEvent(ctx context.Context, typ, deviceID, deploymentID, msg 
 	s.fanoutEvent(context.WithoutCancel(ctx), e)
 }
 
-// visibleDeviceIDs is the set of devices a principal may see.
+// visibleDeviceIDs is the set of devices a principal may see (in its view).
 func (s *Server) visibleDeviceIDs(ctx context.Context, p *principal) (map[string]bool, error) {
 	devs, err := s.store.ListAllDevices(ctx)
 	if err != nil {
@@ -1264,7 +1264,7 @@ func (s *Server) visibleDeviceIDs(ctx context.Context, p *principal) (map[string
 	}
 	out := map[string]bool{}
 	for _, d := range devs {
-		if p.sees(d) {
+		if p.inView(d) {
 			out[d.ID] = true
 		}
 	}
@@ -1274,7 +1274,7 @@ func (s *Server) visibleDeviceIDs(ctx context.Context, p *principal) (map[string
 // visibleAlerts drops alerts about devices outside the principal's scope
 // (and fleet-wide alerts, for client accounts).
 func (s *Server) visibleAlerts(ctx context.Context, p *principal, alerts []*api.Alert) []*api.Alert {
-	if !p.scoped() {
+	if !p.scoped() && !p.viewing() {
 		return alerts
 	}
 	visible, err := s.visibleDeviceIDs(ctx, p)

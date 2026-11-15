@@ -13,6 +13,16 @@ let token = store.get('armada.token') || '';
 // Who is signed in (GET /api/v1/me). Role and scope only hide UI; the server
 // enforces both on every request.
 let me = null;
+// view is the customer/project picker's choice ({customer: 'acme'}); every
+// API call sends it, and the server narrows lists to those devices.
+let view = {};
+let groupings = null;
+const viewText = () => sortedEntries(view).map(([k, v]) => k + '=' + v).join(';');
+function authHeaders(extra) {
+  const hd = { Authorization: 'Bearer ' + token, ...(extra || {}) };
+  if (Object.keys(view).length) hd['X-Armada-View'] = viewText();
+  return hd;
+}
 const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
 const atLeast = role => !!me && ROLE_RANK[me.role] >= ROLE_RANK[role];
 const fleetWide = () => !!me && !me.scoped;
@@ -22,7 +32,7 @@ class APIError extends Error {
 }
 
 async function api(method, path, body) {
-  const opts = { method, headers: { Authorization: 'Bearer ' + token } };
+  const opts = { method, headers: authHeaders() };
   if (body instanceof FormData) {
     opts.body = body;
   } else if (body instanceof Blob) {
@@ -49,7 +59,7 @@ function uploadForm(path, form, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', path);
-    xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+    for (const [k, v] of Object.entries(authHeaders())) xhr.setRequestHeader(k, v);
     xhr.upload.onprogress = e => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.onload = () => {
       let data = null;
@@ -64,7 +74,7 @@ function uploadForm(path, form, onProgress) {
 
 // Downloads go through fetch so the admin token stays in a header, not a URL.
 async function downloadArtifact(r) {
-  const res = await fetch(`/api/v1/releases/${r.id}/artifact`, { headers: { Authorization: 'Bearer ' + token } });
+  const res = await fetch(`/api/v1/releases/${r.id}/artifact`, { headers: authHeaders() });
   if (!res.ok) throw new APIError(res.status, 'download failed (HTTP ' + res.status + ')');
   const url = URL.createObjectURL(await res.blob());
   const a = h('a', { href: url, download: `${r.package}-${r.version}` });
@@ -82,7 +92,7 @@ function downloadReport(query, format) {
 
 // downloadFile saves an API response as a file, named as the server suggests.
 async function downloadFile(path, fallbackName, rename = n => n) {
-  const res = await fetch(path, { headers: { Authorization: 'Bearer ' + token } });
+  const res = await fetch(path, { headers: authHeaders() });
   if (!res.ok) {
     let msg = 'download failed (HTTP ' + res.status + ')';
     try { msg = (await res.json()).error || msg; } catch { /* not JSON */ }
@@ -306,6 +316,7 @@ const allowed = need => !need || (need === 'fleet' ? fleetWide() : atLeast(need)
 async function route() {
   if (!token) return showLogin();
   if (!me && await guard(loadMe) === undefined) return;
+  if (!groupings) await loadGroupings();
   clearInterval(refreshTimer);
   currentRefresh = null;
   const hash = location.hash || '#/';
@@ -329,6 +340,48 @@ async function route() {
   location.hash = '#/';
 }
 
+// ---------- customer / project picker ----------
+
+async function loadGroupings() {
+  try { groupings = await api('GET', '/api/v1/groupings'); } catch { groupings = []; }
+  const params = new URLSearchParams(location.search);
+  view = {};
+  for (const g of groupings) {
+    const v = params.get(g.key);
+    if (v) view[g.key] = v;
+  }
+  renderScopeBar();
+}
+function setView(key, value) {
+  if (value) view[key] = value; else delete view[key];
+  const params = new URLSearchParams(location.search);
+  for (const g of groupings) params.delete(g.key);
+  for (const [k, v] of sortedEntries(view)) params.set(k, v);
+  const qs = params.toString();
+  history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '') + location.hash);
+  renderScopeBar();
+  route();
+}
+function renderScopeBar() {
+  const bar = $('#scopebar');
+  const groups = (groupings || []).filter(g => g.values.length || view[g.key]);
+  bar.classList.toggle('hidden', !groups.length);
+  bar.classList.toggle('active', Object.keys(view).length > 0);
+  if (!groups.length) return replace(bar);
+  const label = k => k.charAt(0).toUpperCase() + k.slice(1).replace(/[_-]/g, ' ');
+  replace(bar, groups.map(g => {
+    const sel = h('select', { 'aria-label': label(g.key) },
+      h('option', { value: '' }, `All ${g.key === 'customer' ? 'customers' : g.key === 'project' ? 'projects' : g.key + ' values'}`),
+      g.values.map(v => h('option', { value: v.value }, `${v.value} (${v.devices})`)));
+    if (view[g.key] && !g.values.some(v => v.value === view[g.key])) sel.append(h('option', { value: view[g.key] }, view[g.key] + ' (0)'));
+    sel.value = view[g.key] || '';
+    sel.addEventListener('change', () => setView(g.key, sel.value));
+    return h('label', { class: 'scope-pick' }, label(g.key), sel);
+  }),
+  Object.keys(view).length ? [h('span', { class: 'scope-note' }, 'Every page shows only these devices.'),
+    h('button', { class: 'btn ghost small', onclick: () => { view = {}; setView('', ''); } }, 'Show all')] : null);
+}
+
 function pageHead(title, sub, ...actions) {
   return h('div', { class: 'page-head' },
     h('div', {}, h('h1', {}, title), sub && h('div', { class: 'sub' }, sub)),
@@ -336,6 +389,81 @@ function pageHead(title, sub, ...actions) {
 }
 
 // ---------- views ----------
+
+// insightsSection: what needs attention among the devices in view —
+// software not on the latest release, certificates to renew, and how often
+// devices lose their connection (and why).
+function insightsSection() {
+  let range = '7d';
+  const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Disconnections over' });
+  const body = h('div', { class: 'grid cols-3' });
+  const el = h('section', { class: 'mt', 'aria-label': 'Needs attention' },
+    h('div', { class: 'page-head' }, h('h2', {}, 'Needs attention'), seg), body);
+  for (const [v, l] of [['1d', '24h'], ['7d', '7d'], ['30d', '30d']]) {
+    const b = h('button', { type: 'button', class: v === range ? 'on' : '', onclick: () => {
+      range = v; seg.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); load();
+    } }, l);
+    seg.append(b);
+  }
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const more = (n, href, what) => n > 0 ? h('li', { class: 'muted' }, href ? h('a', { href }, `and ${n} more ${what}`) : `and ${n} more ${what}`) : null;
+  const devLink = (id, name) => h('a', { href: '#/devices/' + id }, name);
+  let seq = 0;
+  async function load() {
+    const my = ++seq;
+    const ins = await api('GET', '/api/v1/insights?range=' + range).catch(() => null);
+    if (!ins || my !== seq) return;
+
+    // Software.
+    const behindAll = ins.software.reduce((n, s) => n + s.behind.length, 0);
+    const sw = h('div', { class: 'card insight', 'data-insight': 'software' },
+      h('h3', {}, 'Software not on the latest version'),
+      h('div', { class: 'insight-big ' + (behindAll ? 'warn' : 'ok') }, behindAll ? plural(behindAll, 'device') + ' behind' : 'All up to date'),
+      !ins.software.length ? h('p', { class: 'muted' }, 'No releases uploaded for these devices yet.') : null,
+      ins.software.map(s => h('details', { class: 'insight-pkg', open: s.behind.length > 0 && ins.software.length <= 2 },
+        h('summary', {}, h('strong', {}, s.package), ` ${s.latest}: `, `${s.up_to_date} up to date`,
+          s.behind.length ? h('span', { class: 'warn-text' }, ` · ${s.behind.length} behind`) : null),
+        s.behind.length ? h('ul', { class: 'mini-list' }, s.behind.slice(0, 8).map(b => h('li', {}, devLink(b.device_id, b.name),
+          h('span', { class: 'muted mono' }, ` ${b.installed} → ${b.latest}`), b.updating ? [' ', badge(b.updating)] : null,
+          b.channel !== 'stable' ? h('span', { class: 'muted' }, ' · ' + b.channel) : null)), more(s.behind.length - 8, null, 'devices')) : null)));
+
+    // Certificates.
+    const c = ins.certificates;
+    const need = c.items.length;
+    const certLine = cert => {
+      const r = cert.renewal && cert.renewal.status;
+      const status = r === 'csr_ready' ? 'waiting for the signed certificate' : r === 'failed' ? 'renewal failed'
+        : cert.days_left < 0 ? `expired ${-cert.days_left}d ago` : `expires in ${cert.days_left}d`;
+      return h('li', {}, devLink(cert.device_id, cert.device_name), h('span', { class: 'mono' }, ' ' + cert.target), h('span', { class: 'muted' }, ' · ' + status),
+        r && r !== 'csr_ready' && r !== 'failed' ? h('span', { class: 'muted' }, ' · renewal ' + (RENEWAL_TEXT[r] || r)) : null);
+    };
+    const certs = h('div', { class: 'card insight', 'data-insight': 'certificates' },
+      h('h3', {}, 'Certificates to renew'),
+      h('div', { class: 'insight-big ' + (c.expired || c.failed ? 'bad' : need ? 'warn' : 'ok') }, need ? plural(need, 'certificate') + ' need attention' : c.total ? 'Nothing due' : 'No certificates tracked'),
+      need ? h('div', { class: 'muted' }, [c.expired && `${c.expired} expired`, c.expiring && `${c.expiring} expiring within 30 days`,
+        c.waiting && `${c.waiting} waiting for the client's signed certificate`, c.failed && `${c.failed} renewal failed`].filter(Boolean).join(' · ')) : null,
+      need ? h('ul', { class: 'mini-list' }, c.items.slice(0, 8).map(certLine), more(need - 8, '#/certificates', 'on the Certificates page')) : null);
+
+    // Connectivity.
+    const cn = ins.connectivity;
+    const off = ins.offline_now;
+    const rangeText = { '1d': 'last 24 hours', '7d': 'last 7 days', '30d': 'last 30 days' }[range];
+    const conn = h('div', { class: 'card insight', 'data-insight': 'connectivity' },
+      h('h3', {}, 'Disconnections'),
+      h('div', { class: 'insight-big ' + (cn.outages ? 'warn' : 'ok') }, cn.outages ? `${plural(cn.outages, 'disconnection')} on ${plural(cn.devices_hit, 'device')}` : 'No disconnections'),
+      h('div', { class: 'muted' }, rangeText, cn.outages ? ` · ${cn.network} network · ${cn.restart} restart/power` + (cn.unknown ? ` · ${cn.unknown} unknown` : '') +
+        ` · ${duration(cn.offline_seconds)} offline in all` : ''),
+      cn.worst.length ? h('ul', { class: 'mini-list' }, cn.worst.map(w => h('li', {}, devLink(w.device_id, w.name),
+        h('span', {}, ` ${w.outages}×`), h('span', { class: 'muted' }, ` · ${duration(w.offline_seconds)} offline` +
+          (w.network && w.restart ? ` · ${w.network} network, ${w.restart} restart` : w.restart ? ' · restarts' : ' · network')),
+        w.last_detail ? h('div', { class: 'muted small mono' }, w.last_detail) : null))) : null,
+      off.length ? [h('div', { class: 'insight-sub' }, h('strong', {}, `Offline now: ${off.length}`)),
+        h('ul', { class: 'mini-list' }, off.slice(0, 6).map(o => h('li', {}, devLink(o.id, o.name), h('span', { class: 'muted' }, ' · last seen ' + ago(o.since)))),
+          more(off.length - 6, '#/devices?status=offline', 'offline devices'))] : null);
+    replace(body, sw, certs, conn);
+  }
+  return { el, load };
+}
 
 async function viewOverview(root) {
   const fleetHist = fleetHistorySection();
@@ -345,10 +473,13 @@ async function viewOverview(root) {
   const dist = h('div', {});
   const feed = h('div', {});
   const certWarning = h('div', {});
+  const attention = insightsSection();
+  const viewName = sortedEntries(view).map(([, v]) => v).join(' · ');
   append(root,
-    pageHead('Fleet overview'),
+    pageHead(viewName ? viewName : 'Fleet overview', viewName ? 'Only these devices: ' + viewText().replace(/;/g, ', ') : null),
     certWarning,
     stats,
+    attention.el,
     fleetHist.el,
     h('div', { class: 'grid side mt' },
       h('div', { class: 'stack' },
@@ -358,6 +489,7 @@ async function viewOverview(root) {
 
   async function refresh() {
     if (fleetWide()) fleetHist.load();
+    attention.load();
     const [sum, active, events] = await Promise.all([
       api('GET', '/api/v1/summary'),
       fleetWide() ? api('GET', '/api/v1/deployments?status=scheduled,running,paused') : [],
@@ -823,7 +955,7 @@ async function viewBulk(root, id) {
 
 // timelineCard is a device's history: activity, alerts, updates and
 // maintenance in one feed, newest first, grouped by day.
-const TIMELINE_KINDS = [['', 'Everything'], ['alert', 'Alerts'], ['update', 'Updates'], ['action', 'Actions'], ['lifecycle', 'Lifecycle'],
+const TIMELINE_KINDS = [['', 'Everything'], ['alert', 'Alerts'], ['update', 'Updates'], ['action', 'Actions'], ['lifecycle', 'Lifecycle'], ['connectivity', 'Connectivity'],
   ['cert', 'Certificates'], ['health', 'Health'], ['config', 'Config'], ['maintenance', 'Maintenance'], ['other', 'Other']];
 function timelineCard(id) {
   const PAGE = 30;
@@ -1812,7 +1944,7 @@ async function viewCertificates(root) {
     const { cs, q } = selected.size ? waitingQuery() : { cs: certsList.filter(c => c.renewal && c.renewal.status === 'csr_ready'), q: '' };
     if (!cs.length) return toast('None of these are waiting for a signed certificate (request CSRs first).', true);
     await guard(async () => {
-      const res = await fetch('/api/v1/certificates/csrs' + (q ? '?' + q : ''), { headers: { Authorization: 'Bearer ' + token } });
+      const res = await fetch('/api/v1/certificates/csrs' + (q ? '?' + q : ''), { headers: authHeaders() });
       if (!res.ok) throw new APIError(res.status, (await res.json().catch(() => ({}))).error || 'download failed');
       const url = URL.createObjectURL(await res.blob());
       const a = h('a', { href: url, download: `csrs-${new Date().toISOString().slice(0, 10)}.zip` });
@@ -2419,6 +2551,7 @@ async function signedIn(candidate) {
   $('#login').classList.add('hidden');
   $('#app').classList.remove('hidden');
   me = null;
+  groupings = null; // another account may see other customers
   route();
 }
 
@@ -2569,7 +2702,7 @@ function passkeysCard() {
 }
 // postJSONAuth is postJSON with the session token (for account changes).
 async function postJSONAuth(path, body) {
-  const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }, body: JSON.stringify(body || {}) });
+  const res = await fetch(path, { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body || {}) });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new APIError(res.status, data.error || res.statusText);
   return data;
@@ -2591,6 +2724,7 @@ $('#logout').addEventListener('click', () => {
   if (token.startsWith('st_')) fetch('/api/v1/auth/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + token } }).catch(() => {});
   token = '';
   me = null;
+  groupings = null;
   store.del('armada.token');
   showLogin();
 });
@@ -3487,7 +3621,7 @@ function fleetHistorySection() {
   const cmpLabels = h('input', { placeholder: 'labels, e.g. site=sg', 'aria-label': 'Compare labels', size: '16' });
   const cmpBox = h('div', {});
   const el = h('section', { class: 'mt', 'aria-label': 'Fleet history' },
-    h('div', { class: 'page-head' }, h('h2', {}, 'Fleet history'),
+    h('div', { class: 'page-head' }, h('h2', {}, 'Fleet history', Object.keys(view).length ? h('span', { class: 'muted small' }, ' · whole fleet') : null),
       h('div', { class: 'filters' }, rangePicker(range, v => { range = v; load(true); }), checkSel, cmpLabels)),
     grid, h('div', { class: 'spacer' }), cmpBox);
   checkSel.addEventListener('change', () => loadCompare());

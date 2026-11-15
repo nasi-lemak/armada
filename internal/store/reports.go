@@ -240,3 +240,49 @@ func (s *Store) ListCertPolicies(ctx context.Context) ([]*api.CertPolicy, error)
 func (s *Store) DeleteCertPolicy(ctx context.Context, id string) error {
 	return s.deleteDoc(ctx, "cert_policies", id)
 }
+
+// AddOutage records a time a device was unreachable.
+func (s *Store) AddOutage(ctx context.Context, o *api.Outage) error {
+	res, err := s.db.ExecContext(ctx, `INSERT INTO outages (device_id, started_at, ended_at, cause, detail, attempts) VALUES (?,?,?,?,?,?)`,
+		o.DeviceID, ts(o.StartedAt), ts(o.EndedAt), o.Cause, o.Detail, o.FailedAttempts)
+	if err != nil {
+		return err
+	}
+	o.ID, err = res.LastInsertId()
+	return err
+}
+
+// ListOutages returns outages that ended in [from, to] (to included, so
+// "now" covers one that just ended), newest first; deviceID narrows them
+// to one device.
+func (s *Store) ListOutages(ctx context.Context, from, to time.Time, deviceID string) ([]*api.Outage, error) {
+	q := `SELECT id, device_id, started_at, ended_at, cause, detail, attempts FROM outages WHERE ended_at >= ? AND ended_at <= ?`
+	args := []any{ts(from), ts(to)}
+	if deviceID != "" {
+		q += ` AND device_id = ?`
+		args = append(args, deviceID)
+	}
+	rows, err := s.db.QueryContext(ctx, q+` ORDER BY ended_at DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*api.Outage
+	for rows.Next() {
+		var o api.Outage
+		var st, en int64
+		if err := rows.Scan(&o.ID, &o.DeviceID, &st, &en, &o.Cause, &o.Detail, &o.FailedAttempts); err != nil {
+			return nil, err
+		}
+		o.StartedAt, o.EndedAt = fromTS(st), fromTS(en)
+		o.Seconds = int64(o.EndedAt.Sub(o.StartedAt).Seconds())
+		out = append(out, &o)
+	}
+	return out, rows.Err()
+}
+
+// PruneOutages drops outages that ended before a time.
+func (s *Store) PruneOutages(ctx context.Context, before time.Time) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM outages WHERE ended_at < ?`, ts(before))
+	return err
+}

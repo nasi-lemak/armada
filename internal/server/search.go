@@ -69,7 +69,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	var hits []searchHit
 	for _, d := range devs {
-		if !p.sees(d) {
+		if !p.inView(d) {
 			continue
 		}
 		fields := []string{d.Name, d.ID, d.Info.Serial, d.Info.Hostname, d.Info.Model}

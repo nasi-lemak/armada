@@ -82,6 +82,8 @@ It has three parts, all in Go with no external services:
   - [quick search](#device-inventory) (Ctrl+K);
   - a timeline on each device;
   - [CSV import and pre-registration by serial](#pre-registration-and-bulk-import);
+  - a [customer/project picker](#customers-and-projects), with a *Needs attention* view: software
+    not yet updated, certificates to renew, and disconnections;
   - [scheduled actions](#scheduled-actions), such as nightly reboots;
   - printable [QR asset labels](#device-inventory);
   - [event webhooks](#event-webhooks);
@@ -438,6 +440,7 @@ Use [configuration profiles](#configuration-profiles):
 | `-android-allow-unattested` | off | Accept enrollments without attestation (such devices can't get licenses) |
 | `-android-allow-adb` | off | Don't disable USB debugging |
 | `-attestation-status-url` | Google's list | Revocation list for attestation keys; set it to empty to disable |
+| `-attestation-status-file` | — | Servers without internet: a copy of that list, re-read when it changes |
 
 ## Health monitoring
 
@@ -804,6 +807,103 @@ armadactl import devices.csv
 armadactl registrations list
 armadactl registrations delete SN-0001
 ```
+
+## Customers and projects
+
+Label devices with their customer and project (`customer=acme`, `project=kiosk-rollout`).
+Enrollment tokens can add the labels, or use an import or bulk labels.
+
+### The picker
+
+The bar under the top menu lists the customers and projects your devices have, with their device
+counts.
+
+- **Choosing one filters every page** to those devices:
+  - the overview tiles and the *Needs attention* section;
+  - the device list, search and bulk actions;
+  - the activity log, alerts, certificates and reports.
+- **It stays in the address** (`/?customer=acme&project=tills#/devices`), so a view can be bookmarked
+  or sent to a colleague.
+- **What it doesn't filter:**
+  - a device opened by its link still opens;
+  - the fleet history charts always show the whole fleet, and say so.
+- **It narrows what you see, not what you may do:**
+  - client accounts are still limited to their own devices, whatever they pick;
+  - the API takes the same filter as the header `X-Armada-View: customer=acme;project=tills`.
+- **Other label keys:** to offer different keys, start the server with `-group-labels client,site`
+  (default `customer,project`).
+
+### Needs attention
+
+The overview shows, for the devices in view:
+
+- **Software not on the latest version:**
+  - per package, how many devices run the newest release for their channel and platform;
+  - which don't, with installed → latest versions and any update already in progress.
+- **Certificates to renew:**
+  - expired;
+  - expiring within 30 days;
+  - waiting for the client to sign a CSR;
+  - renewal failed.
+- **Disconnections** over the last 24 hours, 7 days or 30 days:
+  - how many, on how many devices, and how long they were offline in all;
+  - the devices that drop out most;
+  - which devices are offline right now.
+
+### How disconnections are tracked
+
+When a device checks in again after losing contact, the server records an outage: when it started
+and ended, and why.
+
+- **Network:** the device stayed up but couldn't reach the server. Its uptime spans the gap.
+- **Restart:** the device rebooted or lost power during the gap. Its uptime is shorter.
+- **Error detail:** the agents (Linux, macOS, Windows and Android) note their failed attempts. The
+  next check-in reports when the trouble started and the last error, e.g. `lookup fleet.example.com:
+  no such host` or `i/o timeout`.
+- **Short drops count too:** drops shorter than the offline threshold are recorded as long as the
+  agent noticed them.
+- **Where outages show:**
+  - on the device's timeline (*Connectivity*);
+  - at `GET /api/v1/devices/{id}/outages`;
+  - in the overview.
+- **Retention:** outages are kept as long as health history (90 days by default).
+
+## Cloud, on-prem and offline sites
+
+A device only ever makes outbound HTTPS requests to the Armada server's URL. Updates, certificates,
+actions and logs all go through that one connection. Nothing connects to the device, and it needs no
+other internet host. So the server can run wherever your devices can reach it:
+
+- **Cloud:** the server has a public address and devices use their own internet connection.
+- **On-prem:** run the server inside the customer's network, and devices reach it over the LAN.
+  Everything works without internet access:
+  - releases are uploaded to that server (dashboard or `armadactl` over the LAN);
+  - the server serves agent installs and updates itself.
+
+  A few optional extras need a reachable service. Point them at internal ones:
+
+  | Feature | On a network without internet |
+  |---|---|
+  | Alert and report email | an internal SMTP relay (`-smtp-host`) |
+  | Slack, webhooks, event webhooks | internal endpoints |
+  | Single sign-on | an internal identity provider (`-oidc-issuer`) |
+  | The server's TLS certificate | your internal CA; give agents its certificate with `ca_cert` |
+  | Android key-attestation revocation list | copy Google's list in by hand: `-attestation-status-file` (re-read when it changes) |
+- **A site without internet, managed from the cloud:** devices that can't reach the internet
+  directly can reach a cloud server through a proxy at the site.
+  - **Linux, macOS and Windows agents:** set `HTTPS_PROXY` for the agent's service. `NO_PROXY` is
+    honoured too.
+  - **Android:** set a global HTTP proxy, as device owner or through your MDM.
+- **A fully air-gapped site** (nothing leaves the network): run a separate Armada server there. One
+  dashboard across several servers isn't supported yet.
+
+**Devices keep working while offline:**
+- the agent keeps running its health checks;
+- it queues update results;
+- it retries with backoff, up to every 5 minutes;
+- interrupted downloads resume.
+
+When the connection is back, it reports everything, including how long it was cut off.
 
 ## Device lifecycle
 
@@ -1641,6 +1741,8 @@ Add `--json` to any command for machine-readable output.
 | `-trusted-proxies` | `ARMADA_TRUSTED_PROXIES` | none (comma-separated IPs/CIDRs) |
 | `-smtp-host`, `-smtp-port`, `-smtp-username`, `-smtp-from` | `ARMADA_SMTP_HOST`, …, `ARMADA_SMTP_PASSWORD` (environment only) | no relay |
 | `-report-brand` | `ARMADA_REPORT_BRAND` | `Armada` (name on customer reports and their emails) |
+| `-group-labels` | `ARMADA_GROUP_LABELS` | `customer,project` (label keys the dashboard's picker offers) |
+| `-attestation-status-file` | `ARMADA_ATTESTATION_STATUS_FILE` | — (offline copy of Google's attestation revocation list) |
 | `-check-public-cert` | `ARMADA_CHECK_PUBLIC_CERT` | `true`: behind a reverse proxy, check hourly the certificate `-public-url` presents |
 | `-disable-admin-token` | `ARMADA_DISABLE_ADMIN_TOKEN` | `false` |
 | `-rotate-admin-token` | | replace the generated token at startup |
@@ -1781,6 +1883,9 @@ armadactl webhooks list
 | `GET /api/v1/events` | Activity log. Filters: `type` (comma list; `prefix.*`), `actor` (`system` for none), `q`, `since`/`until` (date or RFC 3339; dates use `tz`), `device_id`, `deployment_id`. Paging: `limit` (up to 1000), `before_id`. `format=csv` exports up to 50,000 entries |
 | `GET /api/v1/events/types` | Event types recorded, for filter menus |
 | `GET/POST /api/v1/event-hooks`, `PUT/DELETE /api/v1/event-hooks/{id}`, `POST /api/v1/event-hooks/{id}/test` | Event webhooks |
+| `GET /api/v1/groupings` | Customers and projects (the `-group-labels` keys) among your devices, for the picker |
+| `GET /api/v1/insights?range=7d` | What needs attention among the devices in view: software behind, certificates, disconnections |
+| `GET /api/v1/devices/{id}/outages` | A device's outages, with cause (network or restart) and the agent's last error |
 | `GET /api/v1/openapi.json` | OpenAPI 3.1 document of the admin API |
 | `GET /api/v1/labels?ids=dev_a,dev_b` | Asset label data: name, serial, asset tag, device URL and its QR code as an SVG path |
 | `GET/POST /api/v1/scheduled-actions`, `PUT/DELETE /api/v1/scheduled-actions/{id}`, `POST /api/v1/scheduled-actions/{id}/run` | Scheduled actions |

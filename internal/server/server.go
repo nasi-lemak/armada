@@ -72,6 +72,9 @@ type Config struct {
 	SMTPRelay api.EmailConfig
 	// ReportBrand names the sender of customer reports (your company or product).
 	ReportBrand string
+	// GroupLabels are the label keys the dashboard's picker offers, e.g.
+	// customer and project.
+	GroupLabels []string
 	// ServingCert is the certificate the server serves itself (-tls-cert),
 	// reloaded when its files change. Nil behind a reverse proxy.
 	ServingCert *ServingCert
@@ -122,6 +125,10 @@ type AndroidConfig struct {
 	RequireStrongBox bool
 	// ExtraRootsPEM adds attestation roots (tests or private PKI).
 	ExtraRootsPEM []byte
+	// StatusFile, for servers without internet access, is a downloaded copy
+	// of Google's revocation list; it's re-read when it changes and used
+	// instead of StatusURL.
+	StatusFile string
 	// StatusURL is Google's attestation revocation list; empty disables checking.
 	StatusURL string
 	// DisableDebugging tells agents to turn off USB debugging.
@@ -149,6 +156,7 @@ func DefaultConfig() Config {
 		PasswordLogin:          true,
 		TOTPIssuer:             "Armada",
 		ReportBrand:            "Armada",
+		GroupLabels:            []string{"customer", "project"},
 		SCIMDefaultRole:        api.RoleViewer,
 		PushHold:               50 * time.Second,
 		DefaultStrategy: api.Strategy{
@@ -485,6 +493,9 @@ func (s *Server) Handler() http.Handler {
 	viewer(scopedOK, "GET /api/v1/devices/{id}/timeline", s.handleDeviceTimeline)
 	viewer(scopedOK, "GET /api/v1/registrations", s.handleListRegistrations)
 	viewer(scopedOK, "GET /api/v1/labels", s.handleLabels)
+	viewer(scopedOK, "GET /api/v1/groupings", s.handleGroupings)
+	viewer(scopedOK, "GET /api/v1/insights", s.handleInsights)
+	viewer(scopedOK, "GET /api/v1/devices/{id}/outages", s.handleDeviceOutages)
 	viewer(scopedOK, "GET /api/v1/openapi.json", s.handleOpenAPI)
 	viewer(scopedOK, "GET /api/v1/event-hooks", s.handleListHooks)
 	operator(scopedOK, "POST /api/v1/event-hooks", s.handleCreateHook)
@@ -641,8 +652,23 @@ func (s *Server) Run(ctx context.Context) {
 	defer t.Stop()
 	lastPrune := time.Time{}
 	lastRevocations := time.Time{}
+	var statusFileMod time.Time
 	for {
-		if s.cfg.Android.StatusURL != "" && time.Since(lastRevocations) > 12*time.Hour {
+		if f := s.cfg.Android.StatusFile; f != "" {
+			if fi, err := os.Stat(f); err != nil {
+				if statusFileMod.IsZero() || time.Since(lastRevocations) > 12*time.Hour {
+					lastRevocations = time.Now()
+					s.log.Warn("attestation revocation list file unreadable", "file", f, "err", err)
+				}
+			} else if !fi.ModTime().Equal(statusFileMod) {
+				statusFileMod = fi.ModTime()
+				if err := s.loadRevocationFile(f); err != nil {
+					s.log.Warn("could not load attestation revocation list file", "file", f, "err", err)
+				} else {
+					s.log.Info("attestation revocation list loaded from file", "file", f, "revoked", s.revocations.Len(), "file_time", fi.ModTime())
+				}
+			}
+		} else if s.cfg.Android.StatusURL != "" && time.Since(lastRevocations) > 12*time.Hour {
 			lastRevocations = time.Now()
 			fctx, cancel := context.WithTimeout(ctx, time.Minute)
 			if err := s.revocations.Fetch(fctx, http.DefaultClient, s.cfg.Android.StatusURL); err != nil && ctx.Err() == nil {
@@ -658,6 +684,9 @@ func (s *Server) Run(ctx context.Context) {
 		}
 		if time.Since(lastPrune) > time.Hour {
 			lastPrune = time.Now()
+			if err := s.store.PruneOutages(ctx, s.now().Add(-s.cfg.HistoryRetention)); err != nil && ctx.Err() == nil {
+				s.log.Error("prune outages failed", "err", err)
+			}
 			if err := s.store.PruneEvents(ctx, s.now().Add(-s.cfg.EventRetention)); err != nil && ctx.Err() == nil {
 				s.log.Error("prune events failed", "err", err)
 			}
@@ -712,6 +741,17 @@ func (s *Server) Tick(ctx context.Context) error {
 		return err
 	}
 	return s.historyTick(ctx, now)
+}
+
+// loadRevocationFile replaces the revocation list with a file's contents
+// (the JSON Google publishes, copied in by hand on an offline network).
+func (s *Server) loadRevocationFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return s.revocations.Load(f)
 }
 
 // Migration reports what opening the database did to its schema.

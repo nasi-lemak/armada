@@ -197,7 +197,7 @@ func (s *Server) runBulk(ctx context.Context, p *principal, req *api.BulkRequest
 	}
 	var targets []*api.Device
 	for _, d := range devs {
-		if p.sees(d) && rollout.Matches(req.Selector, d) {
+		if p.inView(d) && rollout.Matches(req.Selector, d) {
 			targets = append(targets, d)
 		}
 	}

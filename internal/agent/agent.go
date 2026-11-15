@@ -32,6 +32,7 @@ const maxSelfUpdateStarts = 3
 
 // Agent is the on-device fleet agent.
 type Agent struct {
+	conn    connTracker // failed attempts to reach the server, for the next heartbeat
 	cfg     *Config
 	log     *slog.Logger
 	state   *stateFile
@@ -281,10 +282,13 @@ func (a *Agent) CheckIn(ctx context.Context) error {
 	if a.gw != nil {
 		req.Peripherals = a.gw.reports()
 	}
+	req.Connectivity = a.conn.report()
 	var resp api.HeartbeatResponse
 	if err := a.client.do(ctx, "POST", "/api/v1/agent/heartbeat", req, &resp); err != nil {
+		a.conn.failed(err)
 		return err
 	}
+	a.conn.reached()
 	if resp.HeartbeatIntervalSeconds > 0 {
 		a.mu.Lock()
 		a.interval = time.Duration(resp.HeartbeatIntervalSeconds) * time.Second
@@ -975,4 +979,48 @@ func describeRun(out string, code int, err error) string {
 		s += ": " + out
 	}
 	return s
+}
+
+// connTracker remembers failed attempts to reach the server, so the next
+// successful heartbeat can say how long the device was cut off and why.
+type connTracker struct {
+	mu       sync.Mutex
+	since    time.Time
+	attempts int
+	lastErr  string
+}
+
+// failed records a heartbeat that didn't reach the server. An HTTP error
+// means the network worked (the server answered), so it doesn't count.
+func (c *connTracker) failed(err error) {
+	var he *HTTPError
+	if errors.As(err, &he) || errors.Is(err, context.Canceled) {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.attempts == 0 {
+		c.since = time.Now()
+	}
+	c.attempts++
+	c.lastErr = err.Error()
+	if len(c.lastErr) > 300 {
+		c.lastErr = c.lastErr[:300]
+	}
+}
+
+func (c *connTracker) report() *api.ConnectivityReport {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.attempts == 0 {
+		return nil
+	}
+	since := c.since
+	return &api.ConnectivityReport{Since: &since, FailedAttempts: c.attempts, LastError: c.lastErr}
+}
+
+func (c *connTracker) reached() {
+	c.mu.Lock()
+	c.attempts, c.lastErr, c.since = 0, "", time.Time{}
+	c.mu.Unlock()
 }

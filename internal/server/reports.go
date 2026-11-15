@@ -159,7 +159,7 @@ func (s *Server) buildReport(ctx context.Context, p *principal, rr reportRequest
 	devs := map[string]*api.Device{}
 	var order []*api.Device
 	for _, d := range all {
-		if !p.sees(d) || !rollout.Matches(rr.scope, d) || !d.EnrolledAt.Before(rr.to) {
+		if !p.inView(d) || !rollout.Matches(rr.scope, d) || !d.EnrolledAt.Before(rr.to) {
 			continue
 		}
 		if d.Lifecycle == api.LifecycleRetired && (d.LifecycleInfo == nil || d.LifecycleInfo.ChangedAt.Before(rr.from)) {

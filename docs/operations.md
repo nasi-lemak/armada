@@ -184,6 +184,23 @@ offline copy.
 - **One site only:** if just one client or location is affected, it's their network, not the server.
   Maintenance windows stop the alerts while it's being fixed.
 
+## Sites without internet access
+
+See [Cloud, on-prem and offline sites](../README.md#cloud-on-prem-and-offline-sites). For an
+on-prem server, the routine differs in a few ways:
+
+- **Android revocation list:** refresh `-attestation-status-file` monthly. Download
+  `https://android.googleapis.com/attestation/status` on a connected machine and copy it over the
+  file. The server reloads it by itself.
+- **Releases:** upload them from a machine on the same network (`armadactl releases upload`).
+- **The server's TLS certificate:** if it comes from an internal CA, every agent needs that CA in
+  `ca_cert`. Renew the server's certificate before it expires; the overview warns 21 days ahead.
+- **Proxied sites:**
+  - when devices reach a cloud server through a proxy, a proxy outage looks like a network
+    disconnection on every device at once;
+  - the *Disconnections* card shows this as many devices dropping out at the same time;
+  - the agents' errors name the proxy.
+
 ## Capacity
 
 - **What one server handles:** one server with SQLite handles thousands of devices at a 30-second

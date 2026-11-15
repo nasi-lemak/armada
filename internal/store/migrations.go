@@ -112,6 +112,19 @@ CREATE TABLE IF NOT EXISTS event_hooks (
 	created_at INTEGER NOT NULL
 );
 `},
+	{Version: 14, Name: "device outages", SQL: `
+CREATE TABLE IF NOT EXISTS outages (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	device_id TEXT NOT NULL,
+	started_at INTEGER NOT NULL,
+	ended_at INTEGER NOT NULL,
+	cause TEXT NOT NULL,
+	detail TEXT NOT NULL DEFAULT '',
+	attempts INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS outages_device ON outages(device_id, started_at);
+CREATE INDEX IF NOT EXISTS outages_time ON outages(ended_at);
+`},
 	// Append new migrations here.
 }
 
