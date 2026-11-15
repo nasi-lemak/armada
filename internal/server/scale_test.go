@@ -69,7 +69,7 @@ func TestScale(t *testing.T) {
 			st = api.HealthWarning
 		}
 		req := api.HeartbeatRequest{Info: api.DeviceInfo{OS: "linux", Arch: "arm64", Serial: fmt.Sprintf("SN%06d", i)},
-			Metrics: api.Metrics{NumCPU: 4, Load1: 0.5, UptimeSeconds: 100000, MemTotalBytes: 4 << 30, MemAvailableBytes: 2 << 30},
+			Metrics:  api.Metrics{NumCPU: 4, Load1: 0.5, UptimeSeconds: 100000, MemTotalBytes: 4 << 30, MemAvailableBytes: 2 << 30},
 			Packages: map[string]string{"kiosk": ver}, Connectivity: conn,
 			Health: []api.CheckResult{
 				{Name: "disk /", Kind: "disk_space", Status: st, Value: v(40), Unit: "%"},
