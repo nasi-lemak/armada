@@ -326,7 +326,8 @@ async function route() {
     if (!m) continue;
     if (!allowed(need)) break;
     if (me.two_factor_setup_required && nav !== 'account') { location.hash = '#/account'; return; }
-    document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('active', a.dataset.route === nav));
+    document.querySelectorAll('#nav a, #nav-more a').forEach(a => a.classList.toggle('active', a.dataset.route === nav));
+    layoutNav();
     const root = $('#view');
     root.replaceChildren();
     root.classList.toggle('fleet-page', need === 'fleet');
@@ -340,6 +341,43 @@ async function route() {
   }
   location.hash = '#/';
 }
+
+// ---------- top menu: links that don't fit go under More ----------
+
+const NAV_LINKS = [...document.querySelectorAll('#nav a')];
+function layoutNav() {
+  const nav = $('#nav'), more = $('#nav-more');
+  if (!nav || !more) return;
+  const menu = more.querySelector('.nav-more-menu'), btn = more.querySelector('.nav-more-btn');
+  nav.append(...NAV_LINKS); // back in their order, then fold what doesn't fit
+  more.classList.add('hidden');
+  if (nav.scrollWidth > nav.clientWidth + 1) {
+    more.classList.remove('hidden');
+    const shown = NAV_LINKS.filter(a => getComputedStyle(a).display !== 'none');
+    for (let i = shown.length - 1; i >= 0 && nav.scrollWidth > nav.clientWidth + 1; i--) menu.prepend(shown[i]);
+  }
+  // On a phone everything folds: then it's the menu.
+  const anyLeft = [...nav.querySelectorAll('a')].some(a => getComputedStyle(a).display !== 'none');
+  btn.textContent = anyLeft ? 'More ▾' : 'Menu ▾';
+  btn.classList.toggle('active', !!menu.querySelector('a.active'));
+}
+(() => {
+  const more = $('#nav-more');
+  const btn = more.querySelector('.nav-more-btn'), menu = more.querySelector('.nav-more-menu');
+  const close = () => { more.classList.remove('open'); btn.setAttribute('aria-expanded', 'false'); };
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    const open = !more.classList.contains('open');
+    more.classList.toggle('open', open);
+    btn.setAttribute('aria-expanded', String(open));
+  });
+  menu.addEventListener('click', close);
+  document.addEventListener('click', e => { if (!more.contains(e.target)) close(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+  let pending = 0;
+  window.addEventListener('resize', () => { cancelAnimationFrame(pending); pending = requestAnimationFrame(layoutNav); });
+  if (document.fonts) document.fonts.ready.then(layoutNav);
+})();
 
 // ---------- customer / project picker ----------
 
@@ -3906,7 +3944,7 @@ function openSearch() {
   let items = [], active = 0, seq = 0, timer;
   const close = () => { backdrop.remove(); document.removeEventListener('keydown', keys, true); };
   const go = it => { close(); if (it) location.hash = it.link; };
-  const pages = () => [...document.querySelectorAll('#nav a')].filter(a => getComputedStyle(a).display !== 'none')
+  const pages = () => [...document.querySelectorAll('#nav a, #nav-more a')].filter(a => getComputedStyle(a).display !== 'none')
     .map(a => ({ kind: 'page', title: a.textContent.trim(), link: a.getAttribute('href') }));
   const draw = () => {
     replace(list, items.length ? items.map((it, i) => h('li', { class: 'palette-item' + (i === active ? ' active' : ''), role: 'option',

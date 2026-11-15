@@ -63,7 +63,7 @@ h2 { font-size: 15px; margin: 0 0 12px; }
 .logo {
   width: 24px; height: 24px; border-radius: 6px; background: var(--accent) url(favicon.svg) center/cover;
 }
-#nav { display: flex; gap: 2px; flex: 1; overflow-x: auto; scrollbar-width: thin; }
+#nav { display: flex; gap: 2px; flex: 1; min-width: 0; overflow: hidden; }
 #nav a {
   color: var(--muted); padding: 6px 8px; border-radius: 8px; white-space: nowrap; font-weight: 500; font-size: 13.5px;
 }
@@ -489,3 +489,13 @@ table.data-table td, table.data-table th { padding: 4px 12px; font-size: 12px; }
 .site-stat .l { font-size: 12px; color: var(--muted); }
 .stat .hint.bad { color: var(--bad); }
 img.shot { display: block; max-width: 100%; max-height: 420px; margin-top: 8px; border: 1px solid var(--border); border-radius: 6px; }
+
+/* Top menu overflow: More */
+.nav-more { position: relative; flex: none; }
+.nav-more-btn { border: 0; background: transparent; color: var(--muted); padding: 6px 8px; border-radius: 8px; font: inherit; font-size: 13.5px; font-weight: 500; cursor: pointer; white-space: nowrap; }
+.nav-more-btn:hover, .nav-more-btn.active, .nav-more.open .nav-more-btn { color: var(--text); background: var(--panel-2); }
+.nav-more-menu { display: none; position: absolute; top: calc(100% + 6px); right: 0; min-width: 180px; padding: 6px; z-index: 20;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 24px rgb(0 0 0 / .12); }
+.nav-more.open .nav-more-menu { display: flex; flex-direction: column; }
+.nav-more-menu a { color: var(--muted); padding: 7px 10px; border-radius: 6px; font-weight: 500; font-size: 13.5px; white-space: nowrap; }
+.nav-more-menu a:hover, .nav-more-menu a.active { color: var(--text); background: var(--panel-2); text-decoration: none; }
