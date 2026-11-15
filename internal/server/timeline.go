@@ -19,6 +19,10 @@ import (
 // that cover it. Alert and update events are left out of the log part
 // because those records say the same thing in more detail.
 
+// maxTimelineSkip bounds the cursor's skip count: entries sharing one
+// millisecond never come close.
+const maxTimelineSkip = 10000
+
 var timelineKinds = []string{"alert", "update", "action", "lifecycle", "connectivity", "cert", "health", "config", "maintenance", "other"}
 
 // eventKindTypes are the event types behind each kind ("other" is the rest).
@@ -73,7 +77,7 @@ func parseTimelineCursor(v string) (timelineCursor, error) {
 	ms, skip, ok := strings.Cut(v, ".")
 	m, err1 := strconv.ParseInt(ms, 10, 64)
 	k, err2 := strconv.Atoi(skip)
-	if !ok || err1 != nil || err2 != nil || k < 0 {
+	if !ok || err1 != nil || err2 != nil || k < 0 || k > maxTimelineSkip {
 		return c, errors.New("bad cursor")
 	}
 	return timelineCursor{at: time.UnixMilli(m), skip: k}, nil
@@ -256,16 +260,22 @@ func (s *Server) deviceTimeline(r *http.Request, d *api.Device, want map[string]
 				continue
 			}
 			annotateMaintenance(m, now)
+			// Windows the caller can't list (the vendor's, seen by a client)
+			// show what the device page shows: name and note, not who made it.
+			see, _ := maintenanceAccess(p, m)
 			det := []string{}
-			if m.Windows != "" {
+			if m.Windows != "" && see {
 				det = append(det, "recurring "+m.Windows+" "+strings.Join(m.Days, ",")+" "+m.TimeZone)
 			}
 			if m.Note != "" {
 				det = append(det, m.Note)
 			}
-			add(api.TimelineEntry{ID: "maintenance:" + m.ID, Time: m.StartsAt, End: m.EndsAt, Kind: "maintenance", Type: m.State,
-				Title: "Maintenance: " + m.Name, Detail: strings.TrimSpace(strings.Join(det, " · ")), Actor: m.CreatedBy,
-				Ongoing: m.State == "active", Link: "#/monitoring"})
+			e := api.TimelineEntry{ID: "maintenance:" + m.ID, Time: m.StartsAt, End: m.EndsAt, Kind: "maintenance", Type: m.State,
+				Title: "Maintenance: " + m.Name, Detail: strings.TrimSpace(strings.Join(det, " · ")), Ongoing: m.State == "active"}
+			if see {
+				e.Actor, e.Link = m.CreatedBy, "#/monitoring"
+			}
+			add(e)
 		}
 	}
 

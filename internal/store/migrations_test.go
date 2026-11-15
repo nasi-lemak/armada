@@ -206,6 +206,7 @@ func TestMigrationsAreFrozen(t *testing.T) {
 		"14 device outages d3a1543f69dd",
 		"15 sites a3de2528e89d",
 		"16 index devices by gateway df483bf0851d",
+		"17 token client scope and site token lookup 4f2226d78a79",
 	}
 	var got []string
 	for i, m := range migrations {

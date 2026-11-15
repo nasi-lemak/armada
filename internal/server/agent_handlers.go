@@ -50,8 +50,8 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 	var claimed *api.Registration
 	err = s.store.Enroll(r.Context(), hashSecret(req.Token), dev, hashSecret(key), hwKey, now, store.EnrollOptions{
-		ApplyRegistration: func(reg *api.Registration, d *api.Device) bool {
-			if applyRegistration(reg, d) {
+		ApplyRegistration: func(reg *api.Registration, d *api.Device, tok *api.EnrollmentToken) bool {
+			if applyRegistration(reg, d, tok) {
 				claimed = reg
 				return true
 			}

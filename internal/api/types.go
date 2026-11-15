@@ -264,6 +264,9 @@ type EnrollmentToken struct {
 	Lifecycle string `json:"lifecycle"`
 	// Token is only populated in the response to a create call.
 	Token string `json:"token,omitempty"`
+	// ClientScope is set when a client account made the token: its devices
+	// are that client's, and vendor pre-registrations don't apply to them.
+	ClientScope Selector `json:"client_scope,omitempty"`
 }
 
 // CreateTokenRequest is the admin request to mint an enrollment token.
@@ -2036,16 +2039,30 @@ type Site struct {
 // SiteSnapshot is what a site reports: its overview and what needs
 // attention, without per-device detail beyond the attention lists.
 type SiteSnapshot struct {
-	GeneratedAt    time.Time    `json:"generated_at"`
-	ServerVersion  string       `json:"server_version,omitempty"`
-	PublicURL      string       `json:"public_url,omitempty"` // its dashboard
-	KeyFingerprint string       `json:"key_fingerprint"`
-	EverySeconds   int          `json:"every_seconds,omitempty"` // how often it reports
-	Summary        FleetSummary `json:"summary"`
-	Insights       Insights     `json:"insights"`
-	Groupings      []Grouping   `json:"groupings,omitempty"`
-	FiringAlerts   []SiteAlert  `json:"firing_alerts,omitempty"`
+	GeneratedAt    time.Time `json:"generated_at"`
+	ServerVersion  string    `json:"server_version,omitempty"`
+	PublicURL      string    `json:"public_url,omitempty"` // its dashboard
+	KeyFingerprint string    `json:"key_fingerprint"`
+	// PublicKey is the site server's Ed25519 key (base64); reports are
+	// signed with it, and the central server pins it on the first report.
+	PublicKey    string       `json:"public_key"`
+	EverySeconds int          `json:"every_seconds,omitempty"` // how often it reports
+	Summary      FleetSummary `json:"summary"`
+	Insights     Insights     `json:"insights"`
+	Groupings    []Grouping   `json:"groupings,omitempty"`
+	FiringAlerts []SiteAlert  `json:"firing_alerts,omitempty"`
 }
+
+// SignedSnapshot is a site snapshot with the site server's signature:
+// the body of a report, and the contents of an exported snapshot file.
+type SignedSnapshot struct {
+	Snapshot  json.RawMessage `json:"snapshot"`
+	Signature string          `json:"signature"` // base64 Ed25519 over SnapshotSigningPrefix + Snapshot
+}
+
+// SnapshotSigningPrefix separates snapshot signatures from anything else
+// the site's key signs.
+const SnapshotSigningPrefix = "armada-site-snapshot-v1\n"
 
 // SiteAlert is a firing alert at a site.
 type SiteAlert struct {

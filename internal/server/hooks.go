@@ -174,6 +174,11 @@ func (s *Server) hookLoop() {
 					return
 				case <-time.After(s.hooks.retryDelay(d.Attempts - 1)):
 				}
+				// Deleted, turned off or pointed elsewhere meanwhile: stop.
+				cur, gerr := s.store.GetEventHook(context.Background(), j.hookID)
+				if gerr != nil || !cur.Enabled || cur.URL != h.URL || cur.Secret != h.Secret {
+					break
+				}
 			}
 			if err = s.deliverHook(h, j.typ, j.body); err == nil {
 				break
@@ -191,11 +196,12 @@ func (s *Server) hookLoop() {
 }
 
 // deliverHook makes one signed POST.
-func (s *Server) deliverHook(h *api.EventHook, typ string, body []byte) error {
+func (s *Server) deliverHook(h *api.EventHook, typ string, body []byte) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if !scopeEmpty(h.ClientScope) {
 		ctx = withClientChannel(ctx)
+		defer func() { err = clientSafe(err) }()
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
 	if err != nil {

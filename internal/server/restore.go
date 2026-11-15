@@ -2,6 +2,8 @@ package server
 
 import (
 	"archive/tar"
+	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/ed25519"
@@ -15,6 +17,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"filippo.io/age"
 
 	"github.com/nasi-lemak/armada/internal/store"
 )
@@ -62,6 +66,29 @@ func RestoreBackup(archive io.Reader, dataDir string) (*RestoreInfo, error) {
 
 // VerifyBackup restores a backup into a temporary directory under tmpParent
 // (the system's temporary directory if empty), checks it, and removes it.
+// MaybeDecrypt returns a reader for a backup that may be age-encrypted
+// (see -backup-encrypt-to): it decrypts with identities (an age identity
+// file's contents) if the archive starts with age's header.
+func MaybeDecrypt(archive io.Reader, identities []byte) (io.Reader, error) {
+	br := bufio.NewReader(archive)
+	head, _ := br.Peek(len("age-encryption.org/"))
+	if string(head) != "age-encryption.org/" {
+		return br, nil
+	}
+	if len(identities) == 0 {
+		return nil, errors.New("this backup is encrypted: give the age identity file with -backup-identity")
+	}
+	ids, err := age.ParseIdentities(bytes.NewReader(identities))
+	if err != nil {
+		return nil, fmt.Errorf("backup identity: %w", err)
+	}
+	r, err := age.Decrypt(br, ids...)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt backup: %w", err)
+	}
+	return r, nil
+}
+
 func VerifyBackup(archive io.Reader, tmpParent string) (*RestoreInfo, error) {
 	dir, err := os.MkdirTemp(tmpParent, "armada-verify-*")
 	if err != nil {

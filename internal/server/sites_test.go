@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -56,15 +58,38 @@ func TestSites(t *testing.T) {
 	}
 
 	// An air-gapped site: export a snapshot file, import it on the central server.
-	var snap api.SiteSnapshot
-	call(t, sts, admin, "GET", "/api/v1/site/snapshot", nil, &snap)
+	var signed api.SignedSnapshot
+	call(t, sts, admin, "GET", "/api/v1/site/snapshot", nil, &signed)
 	var gap api.Site
 	call(t, cts, admin, "POST", "/api/v1/sites", api.Site{Name: "Warehouse (air-gapped)"}, &gap)
-	body, _ := json.Marshal(snap)
-	req, _ = http.NewRequest("POST", cts.URL+"/api/v1/sites/"+gap.ID+"/import", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+admin)
-	if res, _ := http.DefaultClient.Do(req); res.StatusCode != 200 {
-		t.Fatalf("import: %d", res.StatusCode)
+	importSnap := func(sn api.SignedSnapshot) int {
+		body, _ := json.Marshal(sn)
+		req, _ := http.NewRequest("POST", cts.URL+"/api/v1/sites/"+gap.ID+"/import", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+admin)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		return res.StatusCode
+	}
+	// Tampered with: refused.
+	tampered := signed
+	tampered.Snapshot = bytes.Replace(signed.Snapshot, []byte(`"devices":1`), []byte(`"devices":9`), 1)
+	if code := importSnap(tampered); code != 400 {
+		t.Fatalf("tampered snapshot: %d", code)
+	}
+	// Another server's key presented under this server's fingerprint: refused.
+	var forged api.SiteSnapshot
+	json.Unmarshal(signed.Snapshot, &forged)
+	forged.PublicKey = base64.StdEncoding.EncodeToString(other.pubKey)
+	raw, _ := json.Marshal(forged)
+	sig := ed25519.Sign(other.signKey, append([]byte(api.SnapshotSigningPrefix), raw...))
+	if code := importSnap(api.SignedSnapshot{Snapshot: raw, Signature: base64.StdEncoding.EncodeToString(sig)}); code != 400 {
+		t.Fatalf("forged fingerprint: %d", code)
+	}
+	if code := importSnap(signed); code != 200 {
+		t.Fatalf("import: %d", code)
 	}
 
 	// A site that stops reporting raises site_silent; one imported by hand doesn't.
@@ -104,5 +129,13 @@ func TestSites(t *testing.T) {
 	ss.cfg.Central.Token = rot.Token
 	if err := ss.pushSnapshot(t.Context()); err != nil {
 		t.Fatalf("new token: %v", err)
+	}
+	// A report can't bring back a site deleted meanwhile.
+	call(t, cts, admin, "DELETE", "/api/v1/sites/"+site.ID, nil, nil)
+	if err := ss.pushSnapshot(t.Context()); err == nil {
+		t.Fatal("report recreated a deleted site")
+	}
+	if _, err := central.store.GetSite(t.Context(), site.ID); err == nil {
+		t.Fatal("deleted site is back")
 	}
 }

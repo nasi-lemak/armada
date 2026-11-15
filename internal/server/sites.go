@@ -3,14 +3,16 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
-	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -76,7 +78,8 @@ func (s *Server) snapshot(ctx context.Context, publicURL string) (*api.SiteSnaps
 		return nil, err
 	}
 	snap := &api.SiteSnapshot{GeneratedAt: s.now().UTC(), ServerVersion: s.cfg.Version, PublicURL: publicURL,
-		KeyFingerprint: s.keyFingerprint(), Summary: *sum, Insights: *in, EverySeconds: int(s.cfg.Central.every().Seconds())}
+		KeyFingerprint: s.keyFingerprint(), PublicKey: base64.StdEncoding.EncodeToString(s.pubKey),
+		Summary: *sum, Insights: *in, EverySeconds: int(s.cfg.Central.every().Seconds())}
 	// Groupings (customers, projects) with their device counts.
 	devs, err := s.store.ListDevices(ctx)
 	if err != nil {
@@ -105,6 +108,42 @@ func (s *Server) snapshot(ctx context.Context, publicURL string) (*api.SiteSnaps
 			DeviceName: a.DeviceName, StartedAt: a.StartedAt})
 	}
 	return snap, nil
+}
+
+// signedSnapshot is the snapshot signed with this server's key.
+func (s *Server) signedSnapshot(ctx context.Context, publicURL string) (*api.SignedSnapshot, error) {
+	snap, err := s.snapshot(ctx, publicURL)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		return nil, err
+	}
+	sig := ed25519.Sign(s.signKey, append([]byte(api.SnapshotSigningPrefix), raw...))
+	return &api.SignedSnapshot{Snapshot: raw, Signature: base64.StdEncoding.EncodeToString(sig)}, nil
+}
+
+// verifySnapshot checks a signed snapshot against the key it carries
+// (which the central server then pins to the site).
+func verifySnapshot(signed *api.SignedSnapshot) (*api.SiteSnapshot, error) {
+	var snap api.SiteSnapshot
+	if len(signed.Snapshot) == 0 || json.Unmarshal(signed.Snapshot, &snap) != nil {
+		return nil, errors.New("this isn't an Armada site snapshot")
+	}
+	pub, err := base64.StdEncoding.DecodeString(snap.PublicKey)
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return nil, errors.New("the snapshot carries no valid public key (is the site server up to date?)")
+	}
+	sum := sha256.Sum256(pub)
+	if hex.EncodeToString(sum[:8]) != snap.KeyFingerprint {
+		return nil, errors.New("the snapshot's key fingerprint doesn't match its key")
+	}
+	sig, err := base64.StdEncoding.DecodeString(signed.Signature)
+	if err != nil || !ed25519.Verify(ed25519.PublicKey(pub), append([]byte(api.SnapshotSigningPrefix), signed.Snapshot...), sig) {
+		return nil, errors.New("the snapshot's signature doesn't verify")
+	}
+	return &snap, nil
 }
 
 // ---- site side ----
@@ -145,11 +184,11 @@ func (s *Server) centralTick(ctx context.Context, now time.Time) {
 
 func (s *Server) pushSnapshot(ctx context.Context) error {
 	c := s.cfg.Central
-	snap, err := s.snapshot(ctx, strings.TrimRight(s.cfg.Android.PublicURL, "/"))
+	signed, err := s.signedSnapshot(ctx, strings.TrimRight(s.cfg.Android.PublicURL, "/"))
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(snap)
+	body, err := json.Marshal(signed)
 	if err != nil {
 		return err
 	}
@@ -202,12 +241,12 @@ func (s *Server) handleCentralStatus(w http.ResponseWriter, r *http.Request) {
 // handleSiteSnapshot returns this server's snapshot, to carry to a
 // central server by hand (armadactl site export).
 func (s *Server) handleSiteSnapshot(w http.ResponseWriter, r *http.Request) {
-	snap, err := s.snapshot(r.Context(), s.publicURL(r))
+	signed, err := s.signedSnapshot(r.Context(), s.publicURL(r))
 	if err != nil {
 		s.internalError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, snap)
+	writeJSON(w, http.StatusOK, signed)
 }
 
 // ---- central side ----
@@ -308,8 +347,11 @@ func (s *Server) handleRotateSiteToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := newSecret("site")
-	site.TokenHash, site.KeyFingerprint = hashSecret(token), ""
-	if err := s.store.PutSite(r.Context(), site); err != nil {
+	if err := s.store.UpdateSite(r.Context(), site.ID, "", func(x *api.Site) error {
+		x.TokenHash, x.KeyFingerprint = hashSecret(token), ""
+		*site = *x
+		return nil
+	}); err != nil {
 		s.internalError(w, err)
 		return
 	}
@@ -319,62 +361,87 @@ func (s *Server) handleRotateSiteToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// acceptSnapshot checks and stores a snapshot for a site.
-func (s *Server) acceptSnapshot(ctx context.Context, site *api.Site, snap *api.SiteSnapshot, source string) (int, error) {
-	now := s.now()
-	if snap.KeyFingerprint == "" || snap.GeneratedAt.IsZero() {
-		return http.StatusBadRequest, errors.New("this isn't an Armada site snapshot")
-	}
-	if snap.GeneratedAt.After(now.Add(time.Hour)) {
-		return http.StatusBadRequest, errors.New("the snapshot is dated in the future: check the site server's clock")
-	}
-	if site.KeyFingerprint != "" && site.KeyFingerprint != snap.KeyFingerprint {
-		return http.StatusConflict, fmt.Errorf("this site is registered to the server with key %s, not %s; if the site server was rebuilt, make a new token for it",
-			site.KeyFingerprint, snap.KeyFingerprint)
-	}
-	if site.Snapshot != nil && snap.GeneratedAt.Before(site.Snapshot.GeneratedAt) && source == "file" {
-		return http.StatusConflict, errors.New("this snapshot is older than the one already here")
-	}
-	first := site.LastReportAt == nil
-	site.KeyFingerprint, site.Snapshot, site.Source = snap.KeyFingerprint, snap, source
-	site.LastReportAt = &now
-	if err := s.store.PutSite(ctx, site); err != nil {
-		return http.StatusInternalServerError, err
-	}
-	if first {
-		s.logEvent(ctx, "site.connected", "", "", fmt.Sprintf("site %q reported for the first time (server key %s)", site.Name, snap.KeyFingerprint))
-	}
-	return 0, nil
+// siteError carries an HTTP status out of an UpdateSite callback.
+type siteError struct {
+	code int
+	err  error
 }
 
-// handleSiteReport takes a pushed snapshot, authenticated by a site token.
+func (e *siteError) Error() string { return e.err.Error() }
+
+// acceptSnapshot checks a verified snapshot and stores it for a site, in
+// one transaction. With tokenHash set (a push), the site must still have
+// that token: a report racing a token rotation or a deletion loses.
+func (s *Server) acceptSnapshot(ctx context.Context, siteID, tokenHash string, snap *api.SiteSnapshot, source string) (*api.Site, int, error) {
+	now := s.now()
+	if snap.GeneratedAt.IsZero() {
+		return nil, http.StatusBadRequest, errors.New("this isn't an Armada site snapshot")
+	}
+	if snap.GeneratedAt.After(now.Add(time.Hour)) {
+		return nil, http.StatusBadRequest, errors.New("the snapshot is dated in the future: check the site server's clock")
+	}
+	if u, err := url.Parse(snap.PublicURL); snap.PublicURL != "" && (err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "") {
+		snap.PublicURL = "" // only http(s) links to its dashboard
+	}
+	var out api.Site
+	first := false
+	err := s.store.UpdateSite(ctx, siteID, tokenHash, func(site *api.Site) error {
+		if site.KeyFingerprint != "" && site.KeyFingerprint != snap.KeyFingerprint {
+			return &siteError{http.StatusConflict, fmt.Errorf("this site is registered to the server with key %s; if the site server was rebuilt, make a new token for it", site.KeyFingerprint)}
+		}
+		if site.Snapshot != nil && snap.GeneratedAt.Before(site.Snapshot.GeneratedAt) && source == "file" {
+			return &siteError{http.StatusConflict, errors.New("this snapshot is older than the one already here")}
+		}
+		first = site.LastReportAt == nil
+		site.KeyFingerprint, site.Snapshot, site.Source = snap.KeyFingerprint, snap, source
+		site.LastReportAt = &now
+		out = *site
+		return nil
+	})
+	var se *siteError
+	switch {
+	case errors.As(err, &se):
+		return nil, se.code, se.err
+	case errors.Is(err, store.ErrNotFound):
+		if tokenHash != "" {
+			return nil, http.StatusUnauthorized, errors.New("unknown site token")
+		}
+		return nil, http.StatusNotFound, errors.New("site not found")
+	case err != nil:
+		return nil, http.StatusInternalServerError, err
+	}
+	if first {
+		s.logEvent(ctx, "site.connected", "", "", fmt.Sprintf("site %q reported for the first time (server key %s)", out.Name, snap.KeyFingerprint))
+	}
+	return &out, 0, nil
+}
+
+// handleSiteReport takes a pushed, signed snapshot, authenticated by a site token.
 func (s *Server) handleSiteReport(w http.ResponseWriter, r *http.Request) {
 	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || !strings.HasPrefix(tok, "site_") {
 		writeError(w, http.StatusUnauthorized, "a site token is required")
 		return
 	}
-	sites, err := s.store.ListSites(r.Context())
-	if err != nil {
+	h := hashSecret(tok)
+	id, err := s.store.SiteIDByTokenHash(r.Context(), h)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusUnauthorized, "unknown site token")
+		return
+	} else if err != nil {
 		s.internalError(w, err)
 		return
 	}
-	h := hashSecret(tok)
-	var site *api.Site
-	for _, x := range sites {
-		if subtle.ConstantTimeCompare([]byte(x.TokenHash), []byte(h)) == 1 {
-			site = x
-		}
-	}
-	if site == nil {
-		writeError(w, http.StatusUnauthorized, "unknown site token")
+	var signed api.SignedSnapshot
+	if !readJSONLimit(w, r, &signed, maxSnapshotBytes) {
 		return
 	}
-	var snap api.SiteSnapshot
-	if !readJSONLimit(w, r, &snap, maxSnapshotBytes) {
+	snap, err := verifySnapshot(&signed)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if code, err := s.acceptSnapshot(r.Context(), site, &snap, "push"); err != nil {
+	if _, code, err := s.acceptSnapshot(r.Context(), id, h, snap, "push"); err != nil {
 		if code == http.StatusInternalServerError {
 			s.internalError(w, err)
 		} else {
@@ -385,17 +452,24 @@ func (s *Server) handleSiteReport(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleImportSnapshot stores a snapshot file from a site with no route here.
+// handleImportSnapshot stores a snapshot file from a site with no route
+// here (armadactl site export there). Its signature is checked as for a push.
 func (s *Server) handleImportSnapshot(w http.ResponseWriter, r *http.Request) {
 	site, ok := s.loadSite(w, r)
 	if !ok {
 		return
 	}
-	var snap api.SiteSnapshot
-	if !readJSONLimit(w, r, &snap, maxSnapshotBytes) {
+	var signed api.SignedSnapshot
+	if !readJSONLimit(w, r, &signed, maxSnapshotBytes) {
 		return
 	}
-	if code, err := s.acceptSnapshot(r.Context(), site, &snap, "file"); err != nil {
+	snap, err := verifySnapshot(&signed)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	out, code, err := s.acceptSnapshot(r.Context(), site.ID, "", snap, "file")
+	if err != nil {
 		if code == http.StatusInternalServerError {
 			s.internalError(w, err)
 		} else {
@@ -404,7 +478,7 @@ func (s *Server) handleImportSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logEvent(r.Context(), "site.imported", "", "", fmt.Sprintf("snapshot of site %q from %s imported", site.Name, snap.GeneratedAt.UTC().Format(time.RFC3339)))
-	writeJSON(w, http.StatusOK, redactSite(site, s.now()))
+	writeJSON(w, http.StatusOK, redactSite(out, s.now()))
 }
 
 // siteSilentCandidates: sites that stopped reporting (alert condition site_silent).

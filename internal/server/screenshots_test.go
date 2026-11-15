@@ -96,6 +96,9 @@ func TestScreenshots(t *testing.T) {
 	if code := putAttachment(t, upURL, dev.DeviceKey, tinyPNG(t)); code != 200 {
 		t.Fatalf("upload: %d", code)
 	}
+	if code := putAttachment(t, upURL, dev.DeviceKey, tinyPNG(t)); code != 409 {
+		t.Fatalf("second upload: %d", code)
+	}
 	if code, ct, body := getAttachment(t, getURL, admin); code != 200 || ct != "image/png" || !bytes.Equal(body, tinyPNG(t)) {
 		t.Fatalf("view: %d %s", code, ct)
 	}

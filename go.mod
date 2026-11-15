@@ -3,6 +3,7 @@ module github.com/nasi-lemak/armada
 go 1.26.0
 
 require (
+	filippo.io/age v1.2.1
 	github.com/coreos/go-oidc/v3 v3.11.0
 	github.com/fxamacker/cbor/v2 v2.7.0
 	github.com/go-webauthn/webauthn v0.11.2

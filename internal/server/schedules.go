@@ -156,22 +156,36 @@ func (s *Server) scheduleTick(ctx context.Context, now time.Time) error {
 		if !sa.Enabled || sa.NextRunAt == nil || now.Before(*sa.NextRunAt) {
 			continue
 		}
+		var run *api.ScheduledRun
 		if now.Sub(*sa.NextRunAt) > scheduleMissedAfter {
-			sa.LastRun = &api.ScheduledRun{At: *sa.NextRunAt, Missed: true, Error: "missed: the server wasn't running then"}
+			run = &api.ScheduledRun{At: *sa.NextRunAt, Missed: true, Error: "missed: the server wasn't running then"}
 			s.logEvent(ctx, "schedule.missed", "", "", fmt.Sprintf("scheduled action %q missed its %s run", sa.Name, sa.NextRunAt.Format(time.RFC3339)))
 		} else {
-			sa.LastRun = s.runSchedule(ctx, sa, now, false)
+			run = s.runSchedule(ctx, sa, now, false)
 		}
-		if next, err := rollout.NextDailyRun(sa.At, sa.Days, actionLocation(sa), now); err == nil {
-			sa.NextRunAt = &next
-		} else {
-			sa.NextRunAt = nil
-		}
-		if err := s.store.PutScheduledAction(ctx, sa); err != nil {
+		if err := s.recordScheduleRun(ctx, sa.ID, run, now); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// recordScheduleRun stores a run's outcome and the next run time, from the
+// schedule as it is now (it may have been edited, paused or deleted while
+// the run went on).
+func (s *Server) recordScheduleRun(ctx context.Context, id string, run *api.ScheduledRun, now time.Time) error {
+	err := s.store.UpdateScheduledAction(ctx, id, func(cur *api.ScheduledAction) {
+		cur.LastRun, cur.NextRunAt = run, nil
+		if cur.Enabled {
+			if next, err := rollout.NextDailyRun(cur.At, cur.Days, actionLocation(cur), now); err == nil {
+				cur.NextRunAt = &next
+			}
+		}
+	})
+	if errors.Is(err, store.ErrNotFound) {
+		return nil // deleted meanwhile: nothing to record
+	}
+	return err
 }
 
 // countScheduleMatches fills in how many devices each schedule would act on.
@@ -347,8 +361,14 @@ func (s *Server) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	who := principalFrom(ctx).name
 	s.logEvent(ctx, "schedule.run_now", "", "", fmt.Sprintf("scheduled action %q run now by %s", sa.Name, who))
-	sa.LastRun = s.runSchedule(context.WithoutCancel(ctx), sa, s.now(), true)
-	if err := s.store.PutScheduledAction(ctx, sa); err != nil {
+	run := s.runSchedule(context.WithoutCancel(ctx), sa, s.now(), true)
+	if err := s.store.UpdateScheduledAction(ctx, sa.ID, func(cur *api.ScheduledAction) {
+		cur.LastRun = run
+		*sa = *cur
+	}); errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "the scheduled action was deleted while it ran")
+		return
+	} else if err != nil {
 		s.internalError(w, err)
 		return
 	}

@@ -1068,7 +1068,13 @@ func (s *Server) siteOutageCandidates(r *api.AlertRule, devices []*api.Device, h
 			continue
 		}
 		k := r.ID + "/" + key + "=" + v
-		want[k] = candidate{rule: r, key: k, severity: api.HealthCritical, device: g.first,
+		dev := g.first
+		if scopeEmpty(r.ClientScope) {
+			// A vendor rule's groups can span clients: don't hang the alert
+			// (and its counts) off one client's device.
+			dev = nil
+		}
+		want[k] = candidate{rule: r, key: k, severity: api.HealthCritical, device: dev,
 			summary: fmt.Sprintf("%d of %d devices at %s=%s are offline (the first since %s): the site's internet, power or proxy may be down",
 				g.offline, g.total, key, v, g.since.UTC().Format("15:04 MST"))}
 	}

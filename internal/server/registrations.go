@@ -80,9 +80,14 @@ func chooseClientScope(p *principal, client, what string) (api.Selector, error) 
 // applyRegistration fills in an enrolling device from its registration.
 // The token has already set the labels, and those win; the registration's
 // channel, being specific to the device, replaces the token's.
-func applyRegistration(reg *api.Registration, d *api.Device) bool {
+func applyRegistration(reg *api.Registration, d *api.Device, tok *api.EnrollmentToken) bool {
 	if !scopeEmpty(reg.ClientScope) && !rollout.Matches(reg.ClientScope, d) {
 		return false // a client's registration only names its own devices
+	}
+	if scopeEmpty(reg.ClientScope) && tok != nil && !scopeEmpty(tok.ClientScope) {
+		// A vendor registration isn't for devices a client enrolls: anyone
+		// can report any serial number, so a client could otherwise claim it.
+		return false
 	}
 	if reg.Name != "" {
 		d.Name = reg.Name

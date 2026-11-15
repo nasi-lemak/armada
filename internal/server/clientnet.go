@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"syscall"
@@ -21,7 +20,7 @@ var nonPublic = func() []*net.IPNet {
 		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
 		"192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
 		"224.0.0.0/4", "240.0.0.0/4", "255.255.255.255/32",
-		"::/128", "::1/128", "64:ff9b::/96", "100::/64", "2001:db8::/32", "fc00::/7", "fe80::/10", "ff00::/8",
+		"::/96", "::1/128", "64:ff9b::/96", "64:ff9b:1::/48", "100::/64", "2001:db8::/32", "fc00::/7", "fe80::/10", "ff00::/8",
 	} {
 		_, n, _ := net.ParseCIDR(c)
 		out = append(out, n)
@@ -47,6 +46,16 @@ func publicIP(ip net.IP) bool {
 
 var errNonPublic = errors.New("client webhooks can only reach public internet addresses")
 
+// clientSafe hides where a refused client request was going: the dial
+// error names the resolved address, which would let a client map internal
+// hostnames through webhook tests and delivery errors.
+func clientSafe(err error) error {
+	if errors.Is(err, errNonPublic) {
+		return errNonPublic
+	}
+	return err
+}
+
 func (s *Server) newClientNotifyClient() *http.Client {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, Control: func(network, address string, _ syscall.RawConn) error {
 		if s.allowPrivateClientTargets {
@@ -57,7 +66,7 @@ func (s *Server) newClientNotifyClient() *http.Client {
 			return err
 		}
 		if !publicIP(net.ParseIP(host)) {
-			return fmt.Errorf("%w (refused %s)", errNonPublic, host)
+			return errNonPublic
 		}
 		return nil
 	}}

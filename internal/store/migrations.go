@@ -135,6 +135,12 @@ CREATE TABLE IF NOT EXISTS sites (
 	{Version: 16, Name: "index devices by gateway", SQL: `
 CREATE INDEX IF NOT EXISTS devices_parent ON devices(parent_id);
 `},
+	{Version: 17, Name: "token client scope and site token lookup", SQL: `
+ALTER TABLE enrollment_tokens ADD COLUMN client_scope TEXT NOT NULL DEFAULT '';
+ALTER TABLE sites ADD COLUMN token_hash TEXT NOT NULL DEFAULT '';
+UPDATE sites SET token_hash = COALESCE(json_extract(spec, '$.token_hash'), '');
+CREATE INDEX IF NOT EXISTS sites_token ON sites(token_hash);
+`},
 	// Append new migrations here.
 }
 

@@ -64,6 +64,11 @@ func (s *Server) handleActionAttachment(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if _, err := os.Stat(path); err == nil {
+		// Once only: re-uploading would also restart the retention clock.
+		writeError(w, http.StatusConflict, "this screenshot was already uploaded")
+		return
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		s.internalError(w, err)
 		return
@@ -97,6 +102,11 @@ func (s *Server) handleGetAttachment(w http.ResponseWriter, r *http.Request) {
 	path, err := s.attachmentPath(a.ID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if s.now().Sub(a.CreatedAt) > s.screenshotRetention() {
+		os.Remove(path) // past retention, even if the prune hasn't run yet
+		writeError(w, http.StatusGone, "this screenshot was deleted after "+roundDuration(s.screenshotRetention()))
 		return
 	}
 	data, err := os.ReadFile(path)

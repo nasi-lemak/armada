@@ -796,6 +796,9 @@ SN-0001,orchard-till-1,stable,site=sg; role=till,ACME-00417,"Orchard store, till
   named `label:site`.
 - **Preview first:** a dry run (`--dry-run`) shows what each row would do. If any row has an error,
   nothing is changed.
+- **Vendor pre-registrations (made by fleet-wide accounts):** they only apply to devices enrolled with
+  fleet-wide accounts' tokens. Any device can report any serial number, so a client's device can't
+  claim one.
 - **The enrollment token still decides the client:**
   - its labels win over a registration's, so a registration can't move a device to another customer;
   - a registration's channel replaces the token's.
@@ -1010,9 +1013,11 @@ Its server may be down, or cut off.
 
 **Security:**
 - the token only lets a server send reports, and nothing else;
-- the central server records the reporting server's key fingerprint, so another machine can't take
-  over a site with a copied token;
-- after rebuilding a site server, make a **New token**.
+- each report (and each exported snapshot) is signed with the site server's own private key;
+- the central server pins that key on the first report, so a copied token alone can't impersonate
+  the site;
+- after rebuilding a site server, make a **New token**;
+- `-central-url` must be https, because the token travels with every report.
 
 **Air-gapped sites:**
 1. On the site, run `armadactl site export -o snapshot.json`.
@@ -1890,6 +1895,7 @@ Add `--json` to any command for machine-readable output.
 | | `ARMADA_CENTRAL_TOKEN` | (environment only) the site token from the central server |
 | `-backup-dir` | `ARMADA_BACKUP_DIR` | — (automatic backups into this folder; ideally another disk) |
 | `-backup-every`, `-backup-keep` | `ARMADA_BACKUP_EVERY` | `24h`, `14` (how often, and how many to keep in each place) |
+| `-backup-encrypt-to` | `ARMADA_BACKUP_ENCRYPT_TO` | — (age recipients; required with `-backup-s3-url`); restore with `-backup-identity` |
 | `-backup-s3-url`, `-backup-s3-region` | `ARMADA_BACKUP_S3_URL`, `ARMADA_BACKUP_S3_REGION` | — (also upload to S3-compatible storage: `https://host/bucket/prefix/`), `us-east-1` |
 | | `ARMADA_BACKUP_S3_ACCESS_KEY`, `ARMADA_BACKUP_S3_SECRET_KEY` | (environment only) |
 
@@ -1901,8 +1907,22 @@ armada-server ... -backup-dir /mnt/backups/armada
 ```
 
 ```bash
-ARMADA_BACKUP_S3_ACCESS_KEY=... ARMADA_BACKUP_S3_SECRET_KEY=... armada-server ... -backup-s3-url https://s3.eu-west-1.amazonaws.com/my-bucket/armada/
+age-keygen -o armada-backup.key     # keep this file off the server, somewhere safe
 ```
+
+```bash
+ARMADA_BACKUP_S3_ACCESS_KEY=... ARMADA_BACKUP_S3_SECRET_KEY=... armada-server ... \
+  -backup-s3-url https://s3.eu-west-1.amazonaws.com/my-bucket/armada/ -backup-encrypt-to age1...
+```
+
+- **Encryption:** a backup holds the server's private keys.
+  - `-backup-encrypt-to` (one or more [age](https://age-encryption.org) public keys, or a file of
+    them) encrypts each backup before it's written: `armada-backup-….tar.gz.age`.
+  - Uploads to S3 require it, and the S3 URL must be https (http only to localhost).
+  - Folder backups can use it too.
+  - To restore, give the private key:
+    `armada-server -restore armada-backup-….tar.gz.age -backup-identity armada-backup.key`. The same
+    flag works with `-verify-backup`, and `age -d` decrypts it too.
 
 - **What it does:**
   - makes a backup every day (`-backup-every`);

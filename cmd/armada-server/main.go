@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"time"
 
+	"filippo.io/age"
+
 	"github.com/nasi-lemak/armada/internal/server"
 	"github.com/nasi-lemak/armada/internal/store"
 )
@@ -116,6 +118,8 @@ func run() error {
 	flag.DurationVar(&cfg.Backup.Every, "backup-every", envDur("ARMADA_BACKUP_EVERY", 24*time.Hour), "how often to make automatic backups")
 	flag.IntVar(&cfg.Backup.Keep, "backup-keep", 14, "how many automatic backups to keep in each place")
 	flag.StringVar(&cfg.Backup.S3URL, "backup-s3-url", env("ARMADA_BACKUP_S3_URL", ""), "also upload automatic backups to S3-compatible storage: https://host/bucket/prefix/ (keys in ARMADA_BACKUP_S3_ACCESS_KEY and ARMADA_BACKUP_S3_SECRET_KEY)")
+	encryptTo := flag.String("backup-encrypt-to", env("ARMADA_BACKUP_ENCRYPT_TO", ""), "encrypt automatic backups for these age recipients (age1..., comma-separated, or a file of them); required with -backup-s3-url")
+	backupIdentity := flag.String("backup-identity", env("ARMADA_BACKUP_IDENTITY", ""), "with -restore or -verify-backup: the age identity file that decrypts an encrypted backup")
 	flag.StringVar(&cfg.Backup.S3Region, "backup-s3-region", env("ARMADA_BACKUP_S3_REGION", "us-east-1"), "region for -backup-s3-url")
 	flag.StringVar(&cfg.Central.URL, "central-url", env("ARMADA_CENTRAL_URL", ""), "report this server's overview to a central Armada server (its URL); the site token goes in ARMADA_CENTRAL_TOKEN")
 	flag.DurationVar(&cfg.Central.Every, "central-every", envDur("ARMADA_CENTRAL_EVERY", 5*time.Minute), "how often to report to the central server")
@@ -151,6 +155,32 @@ func run() error {
 	cfg.Central.Token = os.Getenv("ARMADA_CENTRAL_TOKEN") // environment only, never argv
 	if cfg.Central.URL != "" && cfg.Central.Token == "" {
 		return errors.New("-central-url needs the site token in ARMADA_CENTRAL_TOKEN (add the site on the central server's Sites page)")
+	}
+	if *encryptTo != "" {
+		src := *encryptTo
+		if !strings.HasPrefix(strings.TrimSpace(src), "age1") {
+			b, err := os.ReadFile(src)
+			if err != nil {
+				return fmt.Errorf("-backup-encrypt-to: %w", err)
+			}
+			src = string(b)
+		}
+		rs, err := age.ParseRecipients(strings.NewReader(strings.ReplaceAll(src, ",", "\n")))
+		if err != nil {
+			return fmt.Errorf("-backup-encrypt-to: %w", err)
+		}
+		cfg.Backup.EncryptTo = rs
+	}
+	if cfg.Backup.S3URL != "" {
+		if len(cfg.Backup.EncryptTo) == 0 {
+			return errors.New("-backup-s3-url needs -backup-encrypt-to: backups hold the server's private keys, so they leave this machine encrypted (make a key with age-keygen)")
+		}
+		if !server.SecureURL(cfg.Backup.S3URL) {
+			return errors.New("-backup-s3-url must be https (http only to localhost)")
+		}
+	}
+	if cfg.Central.URL != "" && !server.SecureURL(cfg.Central.URL) {
+		return errors.New("-central-url must be https (http only to localhost): the site token travels with every report")
 	}
 	cfg.Backup.S3AccessKey = os.Getenv("ARMADA_BACKUP_S3_ACCESS_KEY") // environment only, never argv
 	cfg.Backup.S3SecretKey = os.Getenv("ARMADA_BACKUP_S3_SECRET_KEY")
@@ -196,7 +226,7 @@ func run() error {
 	cfg.Android.DisableDebugging = !*allowADB
 
 	if *restoreFrom != "" || *verifyFile != "" {
-		return restoreOrVerify(*restoreFrom, *verifyFile, cfg.DataDir)
+		return restoreOrVerify(*restoreFrom, *verifyFile, cfg.DataDir, *backupIdentity)
 	}
 
 	if *migStatus {
@@ -363,7 +393,7 @@ func resolveAdminToken(flagVal, dataDir string, log *slog.Logger) (string, error
 }
 
 // restoreOrVerify handles -restore and -verify-backup.
-func restoreOrVerify(restoreFrom, verifyFile, dataDir string) error {
+func restoreOrVerify(restoreFrom, verifyFile, dataDir, identityFile string) error {
 	if restoreFrom != "" && verifyFile != "" {
 		return errors.New("use -restore or -verify-backup, not both")
 	}
@@ -376,6 +406,18 @@ func restoreOrVerify(restoreFrom, verifyFile, dataDir string) error {
 		}
 		defer f.Close()
 		in = f
+	}
+	var ids []byte
+	if identityFile != "" {
+		b, err := os.ReadFile(identityFile)
+		if err != nil {
+			return err
+		}
+		ids = b
+	}
+	in, err := server.MaybeDecrypt(in, ids)
+	if err != nil {
+		return err
 	}
 	if verifyFile != "" {
 		info, err := server.VerifyBackup(in, "")

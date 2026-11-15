@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"filippo.io/age"
 
 	"github.com/nasi-lemak/armada/internal/api"
 )
@@ -71,8 +74,13 @@ func TestAutomaticBackups(t *testing.T) {
 	s3srv := httptest.NewServer(fs)
 	defer s3srv.Close()
 	dir := filepath.Join(t.TempDir(), "backups")
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
 	s, ts := setupWith(t, func(c *Config) {
-		c.Backup = BackupConfig{Dir: dir, Keep: 2, S3URL: s3srv.URL + "/backups/armada/", S3AccessKey: "AKID", S3SecretKey: "secret"}
+		c.Backup = BackupConfig{Dir: dir, Keep: 2, S3URL: s3srv.URL + "/backups/armada/", S3AccessKey: "AKID", S3SecretKey: "secret",
+			EncryptTo: []age.Recipient{id.Recipient()}}
 	})
 	clock := time.Date(2026, 11, 10, 3, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return clock }
@@ -85,18 +93,30 @@ func TestAutomaticBackups(t *testing.T) {
 		clock = clock.Add(24 * time.Hour)
 	}
 	// Two kept in each place, the newest.
-	files, _ := filepath.Glob(filepath.Join(dir, "armada-backup-*.tar.gz"))
+	files, _ := filepath.Glob(filepath.Join(dir, "armada-backup-*.tar.gz.age"))
 	if len(files) != 2 || !strings.Contains(files[0], "20261111-030000") || !strings.Contains(files[1], "20261112-030000") {
 		t.Fatalf("dir: %v", files)
 	}
-	if len(fs.objects) != 2 || fs.objects["/backups/armada/armada-backup-20261112-030000.tar.gz"] == nil {
+	up := fs.objects["/backups/armada/armada-backup-20261112-030000.tar.gz.age"]
+	if len(fs.objects) != 2 || !bytes.HasPrefix(up, []byte("age-encryption.org/v1")) {
 		t.Fatalf("s3: %v", keysOf(fs.objects))
 	}
-	// What was uploaded restores.
+	// Encrypted: no key, no restore; with it, it verifies.
+	if _, err := MaybeDecrypt(bytes.NewReader(up), nil); err == nil || !strings.Contains(err.Error(), "-backup-identity") {
+		t.Fatalf("no identity: %v", err)
+	}
+	r, err := MaybeDecrypt(bytes.NewReader(up), []byte(id.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyBackup(r, t.TempDir()); err != nil {
+		t.Fatalf("backup doesn't verify: %v", err)
+	}
+	// The folder copy is encrypted too.
 	f, _ := os.Open(files[1])
 	defer f.Close()
-	if _, err := VerifyBackup(f, t.TempDir()); err != nil {
-		t.Fatalf("backup doesn't verify: %v", err)
+	if _, err := MaybeDecrypt(f, nil); err == nil {
+		t.Fatal("encrypted file opened without a key")
 	}
 
 	// S3 refusing: the folder copy is still made, and the failure shows.
@@ -144,4 +164,15 @@ func keysOf(m map[string][]byte) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+func TestSecureURL(t *testing.T) {
+	for u, want := range map[string]bool{
+		"https://s3.example.com/b/": true, "http://localhost:9000/b/": true, "http://127.0.0.1:9000/b/": true, "http://[::1]/b": true,
+		"http://minio.lan:9000/b/": false, "http://10.0.0.5/b": false, "ftp://x/b": false, "not a url": false,
+	} {
+		if got := SecureURL(u); got != want {
+			t.Errorf("%s: %v", u, got)
+		}
+	}
 }

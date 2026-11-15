@@ -616,6 +616,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	// Without a fleet-wide operator grant, people can only enroll devices
 	// where they are operators. With several such grants (e.g. two
 	// customers), the labels must pick one.
+	var clientScope api.Selector // set when a client account makes the token
 	if p := principalFrom(r.Context()); api.RoleRank(p.fleetRole()) < api.RoleRank(api.RoleOperator) {
 		var cands []api.Selector
 		for _, g := range p.grants {
@@ -657,6 +658,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		if sc.Channel != "" {
 			req.Channel = sc.Channel
 		}
+		clientScope = sc
 	}
 	if err := validLabels(req.Labels); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -676,6 +678,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:   now,
 		Lifecycle:   req.Lifecycle,
 		Token:       newSecret("et"),
+		ClientScope: clientScope,
 	}
 	if req.TTLSeconds > 0 {
 		exp := now.Add(time.Duration(req.TTLSeconds) * time.Second)

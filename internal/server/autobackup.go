@@ -8,12 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"filippo.io/age"
 
 	"github.com/nasi-lemak/armada/internal/api"
 	"github.com/nasi-lemak/armada/internal/s3"
@@ -27,6 +31,9 @@ type BackupConfig struct {
 	// S3-compatible storage: a path-style URL (https://host/bucket/prefix/),
 	// its region and keys.
 	S3URL, S3Region, S3AccessKey, S3SecretKey string
+	// EncryptTo, if set, encrypts backups for these age recipients (the
+	// archive holds the server's private keys). Required for S3.
+	EncryptTo []age.Recipient
 }
 
 func (c BackupConfig) enabled() bool { return c.Dir != "" || c.S3URL != "" }
@@ -92,6 +99,9 @@ func (s *Server) runAutoBackup(ctx context.Context) backupState {
 	st := s.loadBackupState(ctx)
 	st.LastAt = now
 	name := backupName(now)
+	if len(s.cfg.Backup.EncryptTo) > 0 {
+		name += ".age"
+	}
 	err := s.makeBackupFile(ctx, name, &st)
 	if err != nil {
 		st.Error = err.Error()
@@ -123,9 +133,24 @@ func (s *Server) makeBackupFile(ctx context.Context, name string, st *backupStat
 	}
 	defer os.Remove(tmp.Name())
 	h := sha256.New()
-	if _, err := s.writeBackup(ctx, io.MultiWriter(tmp, h)); err != nil {
+	var w io.Writer = io.MultiWriter(tmp, h)
+	var enc io.WriteCloser
+	if len(c.EncryptTo) > 0 {
+		if enc, err = age.Encrypt(w, c.EncryptTo...); err != nil {
+			tmp.Close()
+			return err
+		}
+		w = enc
+	}
+	if _, err := s.writeBackup(ctx, w); err != nil {
 		tmp.Close()
 		return err
+	}
+	if enc != nil {
+		if err := enc.Close(); err != nil {
+			tmp.Close()
+			return err
+		}
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
@@ -187,7 +212,22 @@ func (s *Server) uploadBackup(ctx context.Context, f *os.File, name string, size
 }
 
 func isBackupName(n string) bool {
-	return strings.HasPrefix(n, "armada-backup-") && strings.HasSuffix(n, ".tar.gz") && !strings.Contains(n, "/")
+	return strings.HasPrefix(n, "armada-backup-") && (strings.HasSuffix(n, ".tar.gz") || strings.HasSuffix(n, ".tar.gz.age")) && !strings.Contains(n, "/")
+}
+
+// SecureURL reports whether a URL that will carry secrets (a site token,
+// S3 keys, backups) is https, or http only to this machine.
+func SecureURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if u.Scheme == "https" {
+		return true
+	}
+	h := u.Hostname()
+	ip := net.ParseIP(h)
+	return u.Scheme == "http" && (h == "localhost" || (ip != nil && ip.IsLoopback()))
 }
 
 // pruneBackupDir keeps the newest keep backups in dir (only files we name).

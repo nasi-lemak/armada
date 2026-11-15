@@ -61,8 +61,11 @@ func (s *Server) enqueueNotification(ch *api.NotificationChannel, n api.AlertNot
 	}
 }
 
-func (s *Server) sendNotification(ctx context.Context, ch *api.NotificationChannel, n api.AlertNotification) error {
+func (s *Server) sendNotification(ctx context.Context, ch *api.NotificationChannel, n api.AlertNotification) (err error) {
 	client := !scopeEmpty(ch.ClientScope)
+	if client {
+		defer func() { err = clientSafe(err) }()
+	}
 	if client {
 		ctx = withClientChannel(ctx)
 	}

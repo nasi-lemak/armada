@@ -436,7 +436,7 @@ func expectOne(res sql.Result) error {
 
 // ---- enrollment tokens ----
 
-const tokenCols = `id, description, channel, labels, max_uses, uses, expires_at, revoked, created_at, lifecycle`
+const tokenCols = `id, description, channel, labels, max_uses, uses, expires_at, revoked, created_at, lifecycle, client_scope`
 
 func scanToken(sc scanner) (*api.EnrollmentToken, error) {
 	var t api.EnrollmentToken
@@ -444,13 +444,17 @@ func scanToken(sc scanner) (*api.EnrollmentToken, error) {
 	var expires sql.NullInt64
 	var revoked int
 	var created int64
-	if err := sc.Scan(&t.ID, &t.Description, &t.Channel, &labels, &t.MaxUses, &t.Uses, &expires, &revoked, &created, &t.Lifecycle); err != nil {
+	var clientScope string
+	if err := sc.Scan(&t.ID, &t.Description, &t.Channel, &labels, &t.MaxUses, &t.Uses, &expires, &revoked, &created, &t.Lifecycle, &clientScope); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(labels), &t.Labels)
+	if clientScope != "" {
+		_ = json.Unmarshal([]byte(clientScope), &t.ClientScope)
+	}
 	if expires.Valid {
 		e := fromTS(expires.Int64)
 		t.ExpiresAt = &e
@@ -469,8 +473,12 @@ func (s *Store) CreateToken(ctx context.Context, t *api.EnrollmentToken, tokenHa
 	if t.Lifecycle == "" {
 		t.Lifecycle = api.LifecycleActive
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO enrollment_tokens (`+tokenCols+`, token_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		t.ID, t.Description, t.Channel, mustJSON(t.Labels), t.MaxUses, t.Uses, expires, boolInt(t.Revoked), ts(t.CreatedAt), t.Lifecycle, tokenHash)
+	clientScope := ""
+	if t.ClientScope.Channel != "" || len(t.ClientScope.Labels) > 0 {
+		clientScope = mustJSON(t.ClientScope)
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO enrollment_tokens (`+tokenCols+`, token_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		t.ID, t.Description, t.Channel, mustJSON(t.Labels), t.MaxUses, t.Uses, expires, boolInt(t.Revoked), ts(t.CreatedAt), t.Lifecycle, clientScope, tokenHash)
 	return err
 }
 
@@ -521,6 +529,33 @@ func (s *Store) GetScheduledAction(ctx context.Context, id string) (*api.Schedul
 	return &a, nil
 }
 
+// UpdateScheduledAction changes a scheduled action in one transaction, from
+// its current state: a run that took a while doesn't undo an edit, pause
+// or deletion made meanwhile. ErrNotFound if it's gone.
+func (s *Store) UpdateScheduledAction(ctx context.Context, id string, fn func(*api.ScheduledAction)) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var spec string
+	err = tx.QueryRowContext(ctx, `SELECT spec FROM scheduled_actions WHERE id = ?`, id).Scan(&spec)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	var a api.ScheduledAction
+	if err := json.Unmarshal([]byte(spec), &a); err != nil {
+		return err
+	}
+	fn(&a)
+	if _, err := tx.ExecContext(ctx, `UPDATE scheduled_actions SET spec = ? WHERE id = ?`, mustJSON(&a), id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // ListScheduledActions returns every scheduled action, oldest first.
 func (s *Store) ListScheduledActions(ctx context.Context) ([]*api.ScheduledAction, error) {
 	return listDocs[api.ScheduledAction](ctx, s, "scheduled_actions")
@@ -564,7 +599,7 @@ type EnrollOptions struct {
 	// matching the device's serial (after the token's channel and labels
 	// are applied). If it returns true the registration is claimed, in the
 	// same transaction, so each is used once.
-	ApplyRegistration func(*api.Registration, *api.Device) bool
+	ApplyRegistration func(*api.Registration, *api.Device, *api.EnrollmentToken) bool
 }
 
 func (s *Store) Enroll(ctx context.Context, tokenHash string, d *api.Device, keyHash, hwKey string, now time.Time, opts ...EnrollOptions) error {
@@ -623,7 +658,7 @@ func (s *Store) Enroll(ctx context.Context, tokenHash string, d *api.Device, key
 		if err := json.Unmarshal([]byte(spec), &reg); err != nil {
 			return err
 		}
-		if reg.ClaimedBy != "" || !o.ApplyRegistration(&reg, d) {
+		if reg.ClaimedBy != "" || !o.ApplyRegistration(&reg, d, t) {
 			continue
 		}
 		reg.ClaimedBy, reg.ClaimedAt = d.ID, &now
@@ -1142,7 +1177,50 @@ func (s *Store) RecordEvent(ctx context.Context, e *api.Event) error {
 
 // PutSite creates or replaces a site (another server reporting here).
 func (s *Store) PutSite(ctx context.Context, site *api.Site) error {
-	return s.putDoc(ctx, "sites", site.ID, site.CreatedAt, site)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO sites (id, spec, created_at, token_hash) VALUES (?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET spec=excluded.spec, token_hash=excluded.token_hash`,
+		site.ID, mustJSON(site), ts(site.CreatedAt), site.TokenHash)
+	return err
+}
+
+// SiteIDByTokenHash finds which site a token belongs to, without loading
+// any site's snapshot.
+func (s *Store) SiteIDByTokenHash(ctx context.Context, tokenHash string) (string, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM sites WHERE token_hash = ? AND token_hash <> ''`, tokenHash).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return id, err
+}
+
+// UpdateSite changes a site in one transaction: fn sees its current state
+// (so a slow report can't undo a token rotation or bring back a deleted
+// site). With tokenHash set, the site must still have that token.
+func (s *Store) UpdateSite(ctx context.Context, id, tokenHash string, fn func(*api.Site) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var spec, cur string
+	err = tx.QueryRowContext(ctx, `SELECT spec, token_hash FROM sites WHERE id = ?`, id).Scan(&spec, &cur)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && tokenHash != "" && cur != tokenHash) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	var site api.Site
+	if err := json.Unmarshal([]byte(spec), &site); err != nil {
+		return err
+	}
+	if err := fn(&site); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sites SET spec = ?, token_hash = ? WHERE id = ?`, mustJSON(&site), site.TokenHash, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // GetSite loads a site.
