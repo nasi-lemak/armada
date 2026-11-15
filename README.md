@@ -1959,6 +1959,11 @@ Trying it out on real devices? Start with the [pilot checklist](docs/pilot.md).
 See the [operations runbook](docs/operations.md) for backups from cron, restoring with systemd or
 Docker, upgrades, access and incidents.
 
+**Monitoring the server.** `GET /metrics` serves Prometheus metrics: devices by status, check-ins,
+request latency by route, engine passes, queues, database size, backups and certificate expiry. Give
+Prometheus a `-metrics-token` (it reads only the metrics). Scrape config, the metric list and
+suggested alert rules are in the [operations runbook](docs/operations.md#prometheus).
+
 **Upgrading.** Replace the binary and restart. On start, the server brings the database schema up to
 date:
 - It first copies the database next to itself as `armada.db.before-v<N>-<time>`. If anything goes

@@ -93,6 +93,7 @@ func run() error {
 	flag.Float64Var(&cfg.DefaultStrategy.MaxFailureRate, "default-max-failure-rate", cfg.DefaultStrategy.MaxFailureRate, "default failure rate (0-1) that auto-pauses a rollout")
 	flag.StringVar(&cfg.Android.AgentPackage, "android-agent-package", env("ARMADA_ANDROID_AGENT_PACKAGE", cfg.Android.AgentPackage), "application ID of the Android agent")
 	flag.StringVar(&cfg.Android.AdminReceiver, "android-admin-receiver", cfg.Android.AdminReceiver, "Android agent DeviceAdminReceiver class (for provisioning QR codes)")
+	flag.StringVar(&cfg.MetricsToken, "metrics-token", os.Getenv("ARMADA_METRICS_TOKEN"), "token a Prometheus scraper sends (Authorization: Bearer) to read /metrics; signed-in fleet viewers can always read it (ARMADA_METRICS_TOKEN)")
 	flag.StringVar(&cfg.Android.PublicURL, "public-url", os.Getenv("ARMADA_PUBLIC_URL"), "URL devices use to reach this server, e.g. https://fleet.example.com (ARMADA_PUBLIC_URL)")
 	allowUnverified := flag.Bool("android-allow-unverified-boot", false, "accept Android devices with an unlocked bootloader or custom OS (development only)")
 	allowNoAttest := flag.Bool("android-allow-unattested", false, "accept Android enrollments without hardware key attestation (development only; such devices cannot get licenses)")
@@ -288,6 +289,9 @@ func run() error {
 	}
 	if cfg.Android.PublicURL == "" && (cfg.OIDC.Issuer != "" || cfg.PasswordLogin) {
 		log.Warn("-public-url is not set: single sign-on and passkeys stay off until it is")
+	}
+	if t := cfg.MetricsToken; t != "" && len(t) < 20 {
+		return errors.New("-metrics-token must be at least 20 characters (e.g. openssl rand -hex 16)")
 	}
 	if !cfg.AdminTokenDisabled {
 		tok, err := resolveAdminToken(*adminToken, cfg.DataDir, log)

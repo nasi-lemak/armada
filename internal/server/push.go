@@ -81,6 +81,13 @@ func (h *pushHub) connected(id string) bool {
 	return h.waiters[id] != nil
 }
 
+// connections counts agents holding a long poll open.
+func (h *pushHub) connections() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.waiters)
+}
+
 func (h *pushHub) close() {
 	h.mu.Lock()
 	defer h.mu.Unlock()

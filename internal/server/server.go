@@ -81,6 +81,9 @@ type Config struct {
 	ScreenshotRetention time.Duration
 	// Version is this server's version, reported to a central server.
 	Version string
+	// MetricsToken, if set, lets a Prometheus scraper read /metrics without
+	// signing in as a user.
+	MetricsToken string
 	// Central, if set, is a central Armada server this one reports to as a site.
 	Central CentralConfig
 	// GroupLabels are the label keys the dashboard's picker offers, e.g.
@@ -241,6 +244,8 @@ type Server struct {
 	backupMu sync.Mutex
 	// central is how pushes to the central server (-central-url) are doing.
 	central centralState
+	// metrics counts requests, check-ins and engine passes for /metrics.
+	metrics *metrics
 }
 
 // New opens the data directory (creating the database and signing key if
@@ -334,6 +339,7 @@ func New(cfg Config) (*Server, error) {
 		revocations: revocations,
 		challenges:  newChallengeStore(),
 		push:        newPushHub(),
+		metrics:     newMetrics(),
 		secrets:     secrets,
 	}
 	if cfg.OIDC.Issuer != "" {
@@ -432,6 +438,7 @@ func (s *Server) Handler() http.Handler {
 	operator := func(scoped bool, pattern string, h http.HandlerFunc) { route(api.RoleOperator, scoped, pattern, h) }
 	admin := func(pattern string, h http.HandlerFunc) { route(api.RoleAdmin, fleetOnly, pattern, h) }
 
+	mux.Handle("GET /metrics", s.metricsAuth(s.guard(api.RoleViewer, fleetOnly, s.handleMetrics)))
 	mux.HandleFunc("POST /api/v1/sites/report", s.handleSiteReport) // site servers, with a site token
 	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/v1/auth/2fa", s.handleTwoFactorLogin)
@@ -612,7 +619,7 @@ func (s *Server) Handler() http.Handler {
 	static, _ := fs.Sub(web.FS, "static")
 	mux.Handle("GET /", securityHeaders(http.FileServerFS(static)))
 
-	return logRequests(s.log, mux)
+	return logRequests(s.log, s.metrics, mux)
 }
 
 // ---- auth ----
@@ -706,7 +713,10 @@ func (s *Server) Run(ctx context.Context) {
 			}
 			cancel()
 		}
-		if err := s.Tick(ctx); err != nil && ctx.Err() == nil {
+		tickStart := time.Now()
+		err := s.Tick(ctx)
+		s.metrics.observeTick(time.Since(tickStart), err)
+		if err != nil && ctx.Err() == nil {
 			s.log.Error("rollout engine tick failed", "err", err)
 		}
 		if time.Since(lastPrune) > time.Hour {

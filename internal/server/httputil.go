@@ -106,11 +106,12 @@ func (r *statusRecorder) WriteHeader(code int) {
 
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
-func logRequests(log *slog.Logger, next http.Handler) http.Handler {
+func logRequests(log *slog.Logger, m *metrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(rec, r)
+		next.ServeHTTP(rec, r) // the mux sets r.Pattern
+		m.observeHTTP(r, rec.status, time.Since(start))
 		// Heartbeats are high-volume; only log them when they fail.
 		if r.URL.Path == "/api/v1/agent/heartbeat" && rec.status < 400 {
 			return

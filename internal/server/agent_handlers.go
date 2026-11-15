@@ -80,6 +80,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		msg += ", set up from the pre-registration of serial " + claimed.Serial
 	}
 	s.event(r.Context(), "device.enrolled", dev.ID, "", msg)
+	s.metrics.enrolls.Add(1)
 	writeJSON(w, http.StatusOK, api.EnrollResponse{
 		DeviceID:                 dev.ID,
 		DeviceKey:                key,
@@ -167,6 +168,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, dev *ap
 		resp.ManagedPackages = s.managedPackages(r)
 		resp.Policy = &api.DevicePolicy{DisableDebugging: s.cfg.Android.DisableDebugging, BlockUninstall: true}
 	}
+	s.metrics.heartbeats.Add(1)
 	writeJSON(w, http.StatusOK, resp)
 }
 

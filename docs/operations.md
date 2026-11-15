@@ -39,6 +39,62 @@ password. `signing.key` is the one file you can't recover from: keep an extra co
   - `device_offline` and `health`: for devices.
   - `cert_expiry`: certificates on devices.
 
+### Prometheus
+
+`GET /metrics` serves metrics in the Prometheus text format. Prometheus reads it with
+`-metrics-token` (or `ARMADA_METRICS_TOKEN`, at least 20 characters) as a bearer token. That token
+reads metrics and nothing else. Anyone signed in with fleet-wide viewer access can read them too;
+client accounts can't.
+
+```yaml
+scrape_configs:
+  - job_name: armada
+    scheme: https
+    authorization: { credentials_file: /etc/prometheus/armada-metrics-token }
+    static_configs: [{ targets: [fleet.example.com] }]
+```
+
+| Metric | What it is |
+|---|---|
+| `armada_devices{status,lifecycle}` | Devices online/offline, by lifecycle (active, spare, repair, retired) |
+| `armada_devices_health{health}` | Devices by their worst health check |
+| `armada_alerts_firing{severity}` | Alerts firing now |
+| `armada_deployments{status}` | Rollouts by status |
+| `armada_heartbeats_total`, `armada_enrollments_total` | Check-ins and enrollments accepted |
+| `armada_push_connections` | Agents holding a connection open for instant actions |
+| `armada_http_requests_total{method,route,code}` | Requests, by route pattern (`/api/v1/devices/{id}`, never an ID) |
+| `armada_http_request_duration_seconds{method,route}` | Response time histogram (agent long polls left out) |
+| `armada_engine_tick_duration_seconds`, `armada_engine_last_tick_time_seconds`, `armada_engine_tick_errors_total` | The rollout and alert engine |
+| `armada_notification_queue_length`, `armada_webhook_queue_length` | Alert notifications and event webhooks waiting to be sent |
+| `armada_database_size_bytes` | The database with its write-ahead log |
+| `armada_backup_enabled`, `armada_backup_last_success_time_seconds`, `armada_backup_last_failed` | Automatic backups |
+| `armada_tls_cert_expiry_time_seconds` | The `-tls-cert` certificate's expiry |
+| `armada_site_last_report_time_seconds{site}` | When each site last reported (central server) |
+| `armada_build_info{version}`, `go_*` | Version and Go runtime |
+
+Suggested alert rules:
+
+```yaml
+groups:
+  - name: armada
+    rules:
+      - alert: ArmadaDown
+        expr: up{job="armada"} == 0
+        for: 5m
+      - alert: ArmadaEngineStuck # rollouts and alerts stop being evaluated
+        expr: time() - armada_engine_last_tick_time_seconds > 600
+      - alert: ArmadaBackupOverdue
+        expr: armada_backup_enabled == 1 and (armada_backup_last_failed == 1 or time() - armada_backup_last_success_time_seconds > 2 * 86400)
+      - alert: ArmadaCheckinsStopped # devices exist but none are checking in
+        expr: sum(armada_devices{lifecycle="active"}) > 0 and rate(armada_heartbeats_total[15m]) == 0
+        for: 15m
+      - alert: ArmadaSlowAPI
+        expr: histogram_quantile(0.99, sum by (le) (rate(armada_http_request_duration_seconds_bucket{route!~"/api/v1/(backup|events)"}[10m]))) > 2
+        for: 15m
+      - alert: ArmadaTLSCertExpiring
+        expr: armada_tls_cert_expiry_time_seconds - time() < 14 * 86400
+```
+
 ## Backups
 
 Take one nightly, keep several, keep a copy off the server, and **check that each one restores**.
