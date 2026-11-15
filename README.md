@@ -1934,6 +1934,8 @@ keys and every artifact. It holds private keys, so store it like a password.
 - **`signing.key`:** every agent remembers this key from enrollment, so losing it means every device
   rejects new releases until it's enrolled again. Keep an extra copy offline.
 
+Trying it out on real devices? Start with the [pilot checklist](docs/pilot.md).
+
 See the [operations runbook](docs/operations.md) for backups from cron, restoring with systemd or
 Docker, upgrades, access and incidents.
 
