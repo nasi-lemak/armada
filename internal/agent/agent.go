@@ -98,6 +98,7 @@ func New(cfg *Config, log *slog.Logger) (*Agent, error) {
 			exe = real
 		}
 		a.ExePath = exe
+		cleanupOldExes(exe)
 	}
 	return a, nil
 }
@@ -804,7 +805,7 @@ func (a *Agent) checkSelfUpdateOnStart() error {
 	if err := copyFile(p.BackupPath, a.ExePath+".rollback", 0o755); err != nil {
 		return fmt.Errorf("rollback: %w", err)
 	}
-	if err := os.Rename(a.ExePath+".rollback", a.ExePath); err != nil {
+	if err := replaceExe(a.ExePath+".rollback", a.ExePath); err != nil {
 		return fmt.Errorf("rollback: %w", err)
 	}
 	msg := fmt.Sprintf("agent %s did not complete a heartbeat after %d starts; rolled back to %s", Version, maxSelfUpdateStarts, p.FromVersion)

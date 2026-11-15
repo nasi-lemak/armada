@@ -106,7 +106,8 @@ It has three parts, all in Go with no external services:
   Two-factor sign-in can be required. SCIM provisioning lets your directory create and deactivate
   accounts automatically.
 - **Web dashboard** built into the server binary (no build step, strict CSP).
-- **One-line onboarding** with `curl …/install.sh | sh`.
+- **One-line onboarding** on Linux and macOS (`curl …/install.sh | sh`) and Windows
+  (`irm …/install.ps1 | iex`), installing the agent as a service.
 - **Android devices you provide to customers** (see [below](#android-devices)):
   - Updates to your app go out silently, without Google Play.
   - Your app only runs on devices you enrolled. A copied APK won't work anywhere else, because your
@@ -164,15 +165,39 @@ Start an agent (here on the same machine, with local state):
    ./bin/armadactl releases upload --package armada-agent --version 1.0.0 --os linux --arch amd64 dist/armada-agent_1.0.0_linux_amd64
    ```
 
-2. On the device, as root:
+2. On the device. Linux or macOS:
 
    ```bash
    curl -fsSL https://fleet.example.com/install.sh | sudo ARMADA_SERVER_URL=https://fleet.example.com ARMADA_ENROLLMENT_TOKEN=et_... sh
    ```
 
-The script downloads the newest agent for the device's architecture, verifies its
-checksum, writes `/etc/armada/agent.json` and installs a systemd service. The
-dashboard's **Enrollment** page shows this command, filled in, when you create a token.
+   Windows, in PowerShell run as Administrator:
+
+   ```powershell
+   $env:ARMADA_SERVER_URL='https://fleet.example.com'; $env:ARMADA_ENROLLMENT_TOKEN='et_...'; irm https://fleet.example.com/install.ps1 | iex
+   ```
+
+The script downloads the newest agent for the device's system and architecture (upload a release for
+each: `--os darwin`, `--os windows`), verifies its checksum, writes the config and starts the agent
+as a service that runs at boot and is restarted if it stops. The dashboard's **Enrollment** page shows
+these commands, filled in, when you create a token. Running the script again updates the agent and
+keeps the config.
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Service | systemd `armada-agent` | launchd `com.armada.agent` | service `armada-agent` |
+| Binary | `/usr/local/bin/armada-agent` | `/usr/local/bin/armada-agent` | `C:\Program Files\Armada\armada-agent.exe` |
+| Config | `/etc/armada/agent.json` | `/etc/armada/agent.json` | `C:\ProgramData\Armada\agent.json` |
+| State | `/var/lib/armada` | `/var/lib/armada` | `C:\ProgramData\Armada\state` |
+| Logs | `journalctl -u armada-agent` | `/var/log/armada-agent.log` | `C:\ProgramData\Armada\agent.log` |
+| Reboot action | `systemctl reboot` | `shutdown -r now` | `shutdown /r /t 0` |
+
+On macOS and Windows the agent's log is also available from the dashboard (device → Logs, file
+`agent`). The config and state directories are readable only by root (SYSTEM and Administrators on
+Windows), since the device key is kept there. On Windows, `armada-agent.exe -install-service -config
+<file>` installs or updates the service and `-uninstall-service` removes it; self-updates and the
+restart action exit and rely on the service's restart-on-failure setting, which `-install-service`
+sets.
 
 ### Ship an update
 
@@ -2087,7 +2112,7 @@ armadactl webhooks list
 | `GET /api/v1/devices/{id}/timeline` | A device's timeline. `kinds` (alert, update, action, lifecycle, cert, health, config, maintenance, other), `limit` (up to 200), `cursor` (the previous page's `next`) |
 | `GET /api/v1/signing-key` | Release-signing public key |
 | `POST /api/v1/agent/enroll`, `/heartbeat`, `/updates`, `/actions/{id}/result`, `GET /api/v1/agent/releases/{id}/artifact`, `GET /api/v1/agent/wait`, `GET /api/v1/agent/releases/{id}/chunks` | Agent protocol (`wait` is the push long-poll; `chunks` the delta-update index) |
-| `GET /install.sh`, `GET /api/v1/agent/download?os=&arch=&package=` | Public bootstrap (agent binaries and APK only) |
+| `GET /install.sh`, `GET /install.ps1`, `GET /api/v1/agent/download?os=&arch=&package=` | Public bootstrap (agent binaries and APK only) |
 | `GET/PUT/DELETE /api/v1/apps[/{package}]` | Android apps: signing certificates and licensing |
 | `POST /api/v1/android/provisioning` | Android setup QR code for an enrollment token |
 | `POST /api/v1/agent/challenge`, `POST /api/v1/agent/license` | Attestation and license protocol |
@@ -2274,7 +2299,7 @@ internal/attestation Android key attestation verifier (Google roots, revocation 
 pkg/license         license issuing and verification (import this in your backend)
 android/agent       Android Device Owner agent (Kotlin)
 android/client      Android client library for your app
-web/                embedded dashboard and install.sh
+web/                embedded dashboard and the install scripts (install.sh, install.ps1)
 deploy/, examples/  service units, compose file, sample agent config and hooks
 ```
 

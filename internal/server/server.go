@@ -410,6 +410,10 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 		_, _ = w.Write(web.InstallScript)
 	})
+	mux.HandleFunc("GET /install.ps1", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write(web.InstallPowerShell)
+	})
 	mux.HandleFunc("GET /api/v1/agent/download", s.handleAgentDownload)
 	mux.HandleFunc("POST /api/v1/agent/challenge", s.handleChallenge)
 	mux.HandleFunc("GET /api/v1/license/jwks", s.handleJWKS)

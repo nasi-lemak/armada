@@ -147,3 +147,21 @@ func TestMetricsLabelEscaping(t *testing.T) {
 	}
 	checkExposition(t, b.String())
 }
+
+func TestInstallScriptsServed(t *testing.T) {
+	_, ts := setup(t)
+	for path, want := range map[string]string{"/install.sh": "launchctl bootstrap", "/install.ps1": "-install-service"} {
+		res, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != 200 || !strings.Contains(string(b), want) {
+			t.Errorf("%s: %d, %d bytes", path, res.StatusCode, len(b))
+		}
+		if strings.HasPrefix(res.Header.Get("Content-Type"), "text/html") {
+			t.Errorf("%s served as HTML", path)
+		}
+	}
+}

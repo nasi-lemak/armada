@@ -113,7 +113,8 @@ type Config struct {
 	// DisablePush turns off the long-poll connection that lets the server
 	// reach this device instantly. Actions then wait for the next heartbeat.
 	DisablePush bool `json:"disable_push,omitempty"`
-	// RebootCommand is run for the reboot action (default ["systemctl", "reboot"]).
+	// RebootCommand is run for the reboot action (default ["systemctl",
+	// "reboot"]; macOS ["shutdown", "-r", "now"]; Windows ["shutdown", "/r", "/t", "0"]).
 	RebootCommand []string `json:"reboot_command,omitempty"`
 	// CommandTimeout bounds install, health, rollback and exec commands (default 10m).
 	CommandTimeout Duration `json:"command_timeout,omitempty"`
@@ -178,7 +179,7 @@ func (c *Config) Validate() error {
 		return errors.New("server_url must start with http:// or https://")
 	}
 	if c.StateDir == "" {
-		c.StateDir = "/var/lib/armada"
+		c.StateDir = DefaultStateDir()
 	}
 	if c.AutoUpdate == nil {
 		t := true
@@ -210,7 +211,7 @@ func (c *Config) Validate() error {
 		}
 	}
 	if len(c.RebootCommand) == 0 {
-		c.RebootCommand = []string{"systemctl", "reboot"}
+		c.RebootCommand = defaultRebootCommand()
 	}
 	if c.CommandTimeout.Duration <= 0 {
 		c.CommandTimeout.Duration = 10 * time.Minute

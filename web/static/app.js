@@ -1866,8 +1866,10 @@ async function viewEnroll(root) {
           h('div', {}, h('strong', {}, 'Copy this token now'), ' — it will not be shown again.'),
           t.lifecycle === 'spare' ? h('div', {}, 'Devices enrolled with it join as ', h('strong', {}, 'spares'), ': they get updates but no alerts until you put them in service or use them as a replacement.') : null,
           h('div', { class: 'secret' }, t.token),
-          h('div', {}, 'Run on a device (Linux, as root):'),
+          h('div', {}, 'Run on a device — Linux or macOS, in a terminal:'),
           h('div', { class: 'secret' }, `curl -fsSL ${origin}/install.sh | sudo ARMADA_SERVER_URL=${origin} ARMADA_ENROLLMENT_TOKEN=${t.token} sh`),
+          h('div', {}, 'Windows, in PowerShell run as Administrator:'),
+          h('div', { class: 'secret' }, `$env:ARMADA_SERVER_URL='${origin}'; $env:ARMADA_ENROLLMENT_TOKEN='${t.token}'; irm ${origin}/install.ps1 | iex`),
           h('div', { class: 'muted' }, 'or run the agent directly:'),
           h('div', { class: 'secret' }, `armada-agent --server ${origin} --token ${t.token}`),
           androidQR(t.token)));
