@@ -705,7 +705,7 @@ function progressText(p) {
 
 // ---------- scheduled actions ----------
 
-const SCHEDULE_OPS = [['reboot', 'Reboot'], ['restart-agent', 'Restart the agent'], ['lock', 'Lock (Android)'], ['wake', 'Check in now'], ['exec', 'Run a command']];
+const SCHEDULE_OPS = [['reboot', 'Reboot'], ['restart-agent', 'Restart the agent'], ['lock', 'Lock (Android)'], ['wake', 'Check in now'], ['netcheck', 'Network check'], ['exec', 'Run a command']];
 const WEEKDAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 function scheduleWhen(sa) {
   const days = !sa.days || !sa.days.length || sa.days.length === 7 ? 'every day' : sa.days.map(d => d[0].toUpperCase() + d.slice(1)).join(', ');
@@ -889,7 +889,7 @@ async function viewLabels(root, query) {
 function bulkBar(selected, done) {
   const fleetOp = !!me && (ROLE_RANK[me.fleet_role] || 0) >= ROLE_RANK.operator;
   const ops = [
-    ['reboot', 'Reboot'], ['restart-agent', 'Restart agent'], ['wake', 'Check in now'], ['lock', 'Lock screen (Android)'],
+    ['reboot', 'Reboot'], ['restart-agent', 'Restart agent'], ['wake', 'Check in now'], ['netcheck', 'Network check'], ['lock', 'Lock screen (Android)'],
     fleetOp && ['exec', 'Run command…'], ['set_labels', 'Add labels…'], ['remove_labels', 'Remove labels…'], ['set_channel', 'Set channel…'],
     ['maintenance', 'Start maintenance…'], ['labels', 'Print QR labels'],
     fleetOp && ['lifecycle:spare', 'Mark as spare'], fleetOp && ['lifecycle:repair', 'Send for repair'],
@@ -1215,7 +1215,8 @@ async function viewDevice(root, id) {
         if (r.connected) setTimeout(() => guard(refresh), 1500);
       } }, 'Check in now'),
       h('button', { class: 'btn', onclick: () => confirm('Reboot this device?') && queue('reboot') }, 'Reboot'),
-      h('button', { class: 'btn', onclick: () => queue('restart-agent') }, 'Restart agent')),
+      h('button', { class: 'btn', onclick: () => queue('restart-agent') }, 'Restart agent'),
+      h('button', { class: 'btn', title: 'Test the route from the device to the server: DNS, connection, TLS, HTTPS, gateway. The report shows under Actions.', onclick: () => queue('netcheck') }, 'Network check')),
     execBox, androidBox,
     h('hr', { class: 'sep' }),
     maintBox,

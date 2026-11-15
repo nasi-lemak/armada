@@ -202,6 +202,10 @@ class Agent private constructor(private val context: Context) {
                 result("succeeded", "factory reset starting")
                 if (Build.VERSION.SDK_INT >= 34) dpm.wipeDevice(0) else dpm.wipeData(0)
             }
+            "netcheck" -> {
+                val (report, ok) = NetCheck.run(context, prefs.serverUrl ?: "")
+                result(if (ok) "succeeded" else "failed", report, if (ok) 0 else 1)
+            }
             else -> result("rejected", "action ${a.getString("type")} is not supported on Android", -1)
         }
     }

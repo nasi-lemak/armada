@@ -875,6 +875,39 @@ and ended, and why.
   - in the overview.
 - **Retention:** outages are kept as long as health history (90 days by default).
 
+### Network check
+
+**Network check** on a device's page tests the route from the device to the server, step by step. It's
+also available for many devices from the device list, as a scheduled action, or with
+`armadactl devices netcheck <id>`, which waits and prints the report.
+
+- **What it checks:**
+  - interfaces and default gateway (pinged on Linux);
+  - proxy;
+  - DNS;
+  - TCP to the server or proxy;
+  - the TLS handshake, with the certificate, its expiry and whether the device trusts it;
+  - three HTTPS round trips to `/healthz`.
+- **Android** also reports the network type (Wi-Fi, mobile, ethernet) and whether Android sees
+  internet access there.
+- **The result:** a readable report under **Actions**. It stops at the first step that fails and says
+  what that usually means, e.g. *the device doesn't trust the server's certificate; with a private
+  CA, set `ca_cert`*.
+- **Who can run it:** client operators too, since it changes nothing on the device.
+
+```
+Server      https://fleet.example.com
+Interfaces  eth0 192.168.1.20/24
+Gateway     192.168.1.1 · ping: 3 packets transmitted, 3 received, 0% packet loss
+Proxy       none: connecting directly
+DNS         fleet.example.com → 203.0.113.10 (12 ms)
+TCP         server fleet.example.com:443 connected in 35 ms
+TLS         handshake 80 ms · TLS 1.3 · fleet.example.com · expires 2027-01-01 (47 days) · trusted
+HTTPS       /healthz 200 in 95 ms (3 of 3 tries: 88 ms, 95 ms, 102 ms)
+
+Result: OK. The server is reachable.
+```
+
 ## Cloud, on-prem and offline sites
 
 A device only ever makes outbound HTTPS requests to the Armada server's URL. Updates, certificates,
@@ -992,7 +1025,7 @@ an operation and choose **Apply…**. The same operations are in the CLI (`armad
 
 | Operation | Who |
 |---|---|
-| `reboot`, `restart-agent`, `wake` (check in now), `lock` (Android) | operators on the devices |
+| `reboot`, `restart-agent`, `wake` (check in now), `netcheck`, `lock` (Android) | operators on the devices |
 | `set_labels`, `remove_labels`, `set_channel` | operators on the devices |
 | Start maintenance (dashboard; or `armadactl maintenance start` with several `--device`) | operators on the devices |
 | `exec` (run a command) | fleet-wide operators |
@@ -1709,7 +1742,7 @@ armadactl deployments list|get|approve|pause|resume|advance|retry|complete|abort
 armadactl events [--device ID] [--deployment ID] [--type T,prefix.*] [--actor WHO|system]
                  [--search TEXT] [--since 2026-11-01] [--until 2026-11-30] [--limit N] [--csv]
 armadactl alerts [--firing] | alerts ack <id> [--note N] | alerts unack <id>
-armadactl bulk reboot|restart-agent|wake|lock|exec|label|unlabel|set-channel|lifecycle <devices> [--yes]
+armadactl bulk reboot|restart-agent|wake|netcheck|lock|exec|label|unlabel|set-channel|lifecycle <devices> [--yes]
 armadactl bulk list | bulk get <id>
 armadactl report [--label K=V]... [--period last-month] [--from D --to D] [--tz TZ] [--format csv|html -o FILE]
 armadactl report schedules list|create|send|delete
@@ -1882,7 +1915,7 @@ armadactl webhooks list
 | `GET /api/v1/summary` | Fleet counts and version distribution |
 | `GET /api/v1/devices` (`?channel=&label=k=v&status=&lifecycle=`) | List devices (retired ones only with `lifecycle=retired` or `all`) |
 | `GET/PATCH/DELETE /api/v1/devices/{id}` | Device detail (with updates, actions, events), edit name/channel/labels/inventory, remove |
-| `GET/POST /api/v1/devices/{id}/actions` | List or queue `reboot`, `restart-agent`, `exec`, `logs`; on Android `lock`, `wipe` |
+| `GET/POST /api/v1/devices/{id}/actions` | List or queue `reboot`, `restart-agent`, `netcheck`, `exec`, `logs`; on Android `lock`, `wipe` |
 | `POST /api/v1/devices/{id}/wake` | Ask a device to check in now |
 | `POST /api/v1/bulk` (`operation`, `selector` or `all`, `dry_run`, `expect`) | Bulk operation: preview, then apply with the previewed count |
 | `GET /api/v1/bulk`, `GET /api/v1/bulk/{id}` | Recent bulk operations; per-device progress |

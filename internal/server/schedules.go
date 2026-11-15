@@ -26,7 +26,7 @@ const (
 	maxScheduledActions = 200
 )
 
-var scheduleOperations = []string{api.ActionReboot, api.ActionRestartAgent, api.ActionLock, api.BulkWake, api.ActionExec}
+var scheduleOperations = []string{api.ActionReboot, api.ActionRestartAgent, api.ActionLock, api.BulkWake, api.ActionNetCheck, api.ActionExec}
 
 // actionPrincipal is who a scheduled action acts as: an operator on exactly its
 // client's devices, or on the whole fleet for the vendor's.

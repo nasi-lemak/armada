@@ -428,7 +428,7 @@ func (s *Server) handleCreateAction(w http.ResponseWriter, r *http.Request) {
 func checkAction(p *principal, d *api.Device, req *api.CreateActionRequest) (int, error) {
 	bad := func(msg string) (int, error) { return http.StatusBadRequest, errors.New(msg) }
 	switch req.Type {
-	case api.ActionReboot, api.ActionRestartAgent:
+	case api.ActionReboot, api.ActionRestartAgent, api.ActionNetCheck:
 		req.Args = nil
 	case api.ActionExec:
 		if len(req.Args) == 0 {
@@ -448,7 +448,7 @@ func checkAction(p *principal, d *api.Device, req *api.CreateActionRequest) (int
 			return bad("wipe erases the device: confirm with args [\"confirm=" + d.ID + "\"]")
 		}
 	default:
-		return bad("unknown action type; use reboot, restart-agent, exec, logs, lock or wipe")
+		return bad("unknown action type; use reboot, restart-agent, netcheck, exec, logs, lock or wipe")
 	}
 	if d.ParentID != "" {
 		return bad("peripherals run no agent; send actions to their gateway")
@@ -484,6 +484,8 @@ func describeAction(a *api.Action) string {
 		return "logs (" + truncate(strings.Join(a.Args, " "), 80) + ")"
 	case api.ActionWipe:
 		return "factory reset (wipe)"
+	case api.ActionNetCheck:
+		return "network check"
 	case api.ActionCertCSR, api.ActionCertInstall:
 		var ref struct {
 			Target string `json:"target"`

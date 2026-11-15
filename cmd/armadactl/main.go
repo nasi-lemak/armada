@@ -39,6 +39,7 @@ Commands:
   status                                     fleet overview
   devices list [--channel C] [--label K=V] [--status online|offline] [--lifecycle active|spare|repair|retired|all] [--csv]
   devices get <id>                           details, update history, actions
+  devices netcheck <id>                      test the device's route to the server and print the report
   devices timeline <id> [--kinds alert,update,...] [--limit N]   history: activity, alerts, updates, maintenance
   devices set <id> [--name N] [--channel C] [--label K=V]... [--unlabel K]...
                  [--asset-tag T] [--location L] [--contact C] [--notes N]
@@ -100,7 +101,7 @@ Monitoring and alerts:
 
 Bulk operations (pick devices with --device ID... | --label K=V... | --channel C | --all;
 without --yes they only preview what would happen):
-  bulk reboot|restart-agent|wake|lock <devices> [--yes]
+  bulk reboot|restart-agent|wake|lock|netcheck <devices> [--yes]
   bulk exec <devices> [--yes] -- <command> [args...]
   bulk label K=V... <devices> [--yes]        add or change labels
   bulk unlabel KEY... <devices> [--yes]
@@ -839,6 +840,38 @@ func (c *cli) devices(verb string, args []string) error {
 		}
 		fmt.Fprintf(c.out, "queued %s (%s); a connected device runs it within seconds, others at their next check-in\n", a.ID, a.Type)
 		return nil
+	case "netcheck":
+		// Queue a network check and wait for its report.
+		if err := need(args, 1, "device id"); err != nil {
+			return err
+		}
+		id := url.PathEscape(args[0])
+		var a api.Action
+		if err := c.do("POST", "/api/v1/devices/"+id+"/actions", api.CreateActionRequest{Type: api.ActionNetCheck}, &a); err != nil {
+			return err
+		}
+		c.do("POST", "/api/v1/devices/"+id+"/wake", nil, nil)
+		fmt.Fprintln(os.Stderr, "waiting for the device to run the network check…")
+		for deadline := time.Now().Add(3 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Second) {
+			var acts []api.Action
+			if err := c.do("GET", "/api/v1/devices/"+id+"/actions", nil, &acts); err != nil {
+				return err
+			}
+			for _, x := range acts {
+				if x.ID != a.ID {
+					continue
+				}
+				switch x.Status {
+				case api.ActionSucceeded:
+					fmt.Fprint(c.out, x.Output)
+					return nil
+				case api.ActionFailed, api.ActionRejected:
+					fmt.Fprint(c.out, x.Output)
+					return errors.New("network check: " + x.Status)
+				}
+			}
+		}
+		return fmt.Errorf("no result yet: the device runs %s at its next check-in; see devices get %s", a.ID, args[0])
 	case "logs", "log":
 		return c.deviceLogs(args)
 	case "wake":

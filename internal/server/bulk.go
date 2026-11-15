@@ -64,7 +64,7 @@ func (s *Server) bulkOperation(p *principal, req *api.BulkRequest) (*bulkOp, int
 	}
 
 	switch req.Operation {
-	case api.ActionReboot, api.ActionRestartAgent, api.ActionLock, api.ActionExec:
+	case api.ActionReboot, api.ActionRestartAgent, api.ActionLock, api.ActionExec, api.ActionNetCheck:
 		if req.Operation == api.ActionExec {
 			if len(req.Args) == 0 {
 				return bad("exec needs args: the command and its arguments")
@@ -146,7 +146,7 @@ func (s *Server) bulkOperation(p *principal, req *api.BulkRequest) (*bulkOp, int
 				return "", s.changeLifecycle(ctx, d, req.State, req.Note)
 			}}, 0, nil
 	}
-	return bad("unknown operation; use reboot, restart-agent, lock, exec, wake, set_labels, remove_labels, set_channel or lifecycle")
+	return bad("unknown operation; use reboot, restart-agent, netcheck, lock, exec, wake, set_labels, remove_labels, set_channel or lifecycle")
 }
 
 func fmtSelectorLabels(m map[string]string) string {

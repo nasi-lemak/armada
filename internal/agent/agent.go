@@ -909,6 +909,15 @@ func (a *Agent) runAction(ctx context.Context, act api.Action) {
 			status = api.ActionFailed
 		}
 		result(status, code, out)
+	case api.ActionNetCheck:
+		cctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+		defer cancel()
+		report, ok := a.netCheck(cctx)
+		if ok {
+			result(api.ActionSucceeded, 0, report)
+		} else {
+			result(api.ActionFailed, 1, report)
+		}
 	case api.ActionCertCSR, api.ActionCertInstall:
 		cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()

@@ -540,6 +540,10 @@ const (
 	// ["confirm=<device ID>"]. The device leaves the fleet until it is
 	// provisioned again.
 	ActionWipe = "wipe"
+	// ActionNetCheck tests the device's route to the server: proxy, DNS,
+	// TCP, TLS and HTTPS, plus its gateway and interfaces. The report comes
+	// back as the output; it fails at the first step that doesn't work.
+	ActionNetCheck = "netcheck"
 )
 
 // WaitResponse answers an agent's long-poll.

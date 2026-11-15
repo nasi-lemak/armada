@@ -69,7 +69,7 @@ func (c *cli) bulk(verb string, args []string) error {
 		return err
 	}
 	switch verb {
-	case "reboot", "restart-agent", "lock", "wake":
+	case "reboot", "restart-agent", "lock", "wake", "netcheck":
 		req.Operation = verb
 	case "exec":
 		req.Operation, req.Args = api.ActionExec, pos
