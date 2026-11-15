@@ -890,6 +890,34 @@ load, memory and disk.
 - **What isn't filled in:** the `online` series. Availability still shows the device as unreachable,
   because it was.
 
+### Remote screenshots
+
+Take a screenshot of a kiosk or signage screen from its device page (**Screenshot**). It's useful when
+a customer says "the screen looks wrong".
+
+**Privacy controls.** Every one of these must allow it:
+- **The server:** it's started with `-screenshots` (off by default).
+- **The device:** its agent config has `allow_screenshots: true` (off by default), so whoever runs
+  the device has agreed to it.
+- **The person asking:** taking or viewing one needs the operator role on that device. The activity
+  log records each request and who made it.
+- **Retention:** images are deleted after `-screenshot-retention` (7 days by default). They aren't
+  included in backups.
+
+**How the agent captures the screen:**
+- **Linux:** `grim` (Wayland), ImageMagick `import` or `scrot` (X11, `DISPLAY=:0` by default), or
+  `gnome-screenshot`.
+- **macOS:** `screencapture`. The agent needs the Screen Recording permission.
+- **Windows:** PowerShell. A service running in session 0 can't see the desktop, so run the agent in
+  the user's session, or use `screenshot_command`.
+- **Kiosks that run as another user:** set `screenshot_command`, e.g.
+  `["sudo","-u","kiosk","env","DISPLAY=:0","import","-window","root","png:-"]`.
+- **Android:** not supported. It only allows screen capture after someone accepts a prompt on the
+  device.
+
+The image appears under the device's **Actions**: choose **Show screenshot**, and click the image to
+download it.
+
 ### Network check
 
 **Network check** on a device's page tests the route from the device to the server, step by step. It's
@@ -1728,6 +1756,8 @@ the browser exchanges a one-time ticket, valid for a minute, for it.
 | `auto_update` | `true` | When `false`, the agent only reports that updates are available |
 | `maintenance_window` | any time | Local-time windows such as `02:00-05:00,13:00-14:00`; windows may cross midnight |
 | `allow_reboot` / `allow_exec` | `true` / `false` | Which remote actions this device accepts |
+| `allow_screenshots` | `false` | Accept remote screenshots (the server needs `-screenshots` too) |
+| `screenshot_command` | auto | A command that writes a PNG of the screen to stdout, for setups the agent can't capture by itself |
 | `allow_logs` | `true` | Whether the server may read the systemd journal and the files in `log_files` |
 | `log_files` | none | Log files the server may ask for, by name: `{"myapp": "/var/log/myapp/app.log"}`. No other files can be read. |
 | `disable_push` | `false` | Turn off the long-poll connection; actions then wait for the next heartbeat |
@@ -1843,6 +1873,7 @@ Add `--json` to any command for machine-readable output.
 | `-trusted-proxies` | `ARMADA_TRUSTED_PROXIES` | none (comma-separated IPs/CIDRs) |
 | `-smtp-host`, `-smtp-port`, `-smtp-username`, `-smtp-from` | `ARMADA_SMTP_HOST`, …, `ARMADA_SMTP_PASSWORD` (environment only) | no relay |
 | `-report-brand` | `ARMADA_REPORT_BRAND` | `Armada` (name on customer reports and their emails) |
+| `-screenshots`, `-screenshot-retention` | `ARMADA_SCREENSHOTS`, `ARMADA_SCREENSHOT_RETENTION` | off, `168h` (remote screenshots; devices must also allow them) |
 | `-group-labels` | `ARMADA_GROUP_LABELS` | `customer,project` (label keys the dashboard's picker offers) |
 | `-attestation-status-file` | `ARMADA_ATTESTATION_STATUS_FILE` | — (offline copy of Google's attestation revocation list) |
 | `-check-public-cert` | `ARMADA_CHECK_PUBLIC_CERT` | `true`: behind a reverse proxy, check hourly the certificate `-public-url` presents |
@@ -2000,7 +2031,8 @@ armadactl webhooks list
 | `GET /api/v1/summary` | Fleet counts and version distribution |
 | `GET /api/v1/devices` (`?channel=&label=k=v&status=&lifecycle=`) | List devices (retired ones only with `lifecycle=retired` or `all`) |
 | `GET/PATCH/DELETE /api/v1/devices/{id}` | Device detail (with updates, actions, events), edit name/channel/labels/inventory, remove |
-| `GET/POST /api/v1/devices/{id}/actions` | List or queue `reboot`, `restart-agent`, `netcheck`, `exec`, `logs`; on Android `lock`, `wipe` |
+| `GET/POST /api/v1/devices/{id}/actions` | List or queue `reboot`, `restart-agent`, `netcheck`, `screenshot`, `exec`, `logs`; on Android `lock`, `wipe` |
+| `GET /api/v1/actions/{id}/attachment` | A screenshot action's image (operators on the device) |
 | `POST /api/v1/devices/{id}/wake` | Ask a device to check in now |
 | `POST /api/v1/bulk` (`operation`, `selector` or `all`, `dry_run`, `expect`) | Bulk operation: preview, then apply with the previewed count |
 | `GET /api/v1/bulk`, `GET /api/v1/bulk/{id}` | Recent bulk operations; per-device progress |

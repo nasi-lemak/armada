@@ -488,3 +488,4 @@ table.data-table td, table.data-table th { padding: 4px 12px; font-size: 12px; }
 .site-stat .v.bad { color: var(--bad); }
 .site-stat .l { font-size: 12px; color: var(--muted); }
 .stat .hint.bad { color: var(--bad); }
+img.shot { display: block; max-width: 100%; max-height: 420px; margin-top: 8px; border: 1px solid var(--border); border-radius: 6px; }

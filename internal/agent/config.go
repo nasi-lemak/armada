@@ -93,6 +93,14 @@ type Config struct {
 	AllowReboot *bool `json:"allow_reboot,omitempty"`
 	// AllowExec permits the "exec" action, which runs arbitrary commands (default false).
 	AllowExec bool `json:"allow_exec,omitempty"`
+	// AllowScreenshots permits the "screenshot" action (default false):
+	// whoever runs this device agrees to remote screenshots by setting it.
+	AllowScreenshots bool `json:"allow_screenshots,omitempty"`
+	// ScreenshotCommand, if set, captures the screen and writes a PNG to
+	// stdout, e.g. ["sudo","-u","kiosk","env","DISPLAY=:0","import","-window","root","png:-"].
+	// Without it the agent tries grim, import, scrot (Linux), screencapture
+	// (macOS) or PowerShell (Windows).
+	ScreenshotCommand []string `json:"screenshot_command,omitempty"`
 	// AllowLogs permits the "logs" action: reading the systemd journal and
 	// the files listed in LogFiles (default true).
 	AllowLogs *bool `json:"allow_logs,omitempty"`

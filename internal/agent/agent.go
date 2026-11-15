@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -919,6 +920,23 @@ func (a *Agent) runAction(ctx context.Context, act api.Action) {
 			status = api.ActionFailed
 		}
 		result(status, code, out)
+	case api.ActionScreenshot:
+		if !a.cfg.AllowScreenshots {
+			result(api.ActionRejected, -1, "screenshots are disabled on this device (allow_screenshots=false in the agent's config)")
+			return
+		}
+		cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		img, how, err := captureScreen(cctx, a.cfg.ScreenshotCommand)
+		if err != nil {
+			result(api.ActionFailed, 1, "could not capture the screen: "+err.Error())
+			return
+		}
+		if err := a.client.put(cctx, "/api/v1/agent/actions/"+act.ID+"/attachment", http.DetectContentType(img), img); err != nil {
+			result(api.ActionFailed, 1, "captured the screen but the upload failed: "+err.Error())
+			return
+		}
+		result(api.ActionSucceeded, 0, fmt.Sprintf("screenshot captured with %s (%d KiB)", how, len(img)/1024))
 	case api.ActionNetCheck:
 		cctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 		defer cancel()

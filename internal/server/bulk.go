@@ -77,14 +77,14 @@ func (s *Server) bulkOperation(p *principal, req *api.BulkRequest) (*bulkOp, int
 		return &bulkOp{summary: summary, wake: true,
 			check: func(d *api.Device) string {
 				ar := api.CreateActionRequest{Type: req.Operation, Args: append([]string(nil), req.Args...)}
-				if _, err := checkAction(p, d, &ar); err != nil {
+				if _, err := s.checkAction(p, d, &ar); err != nil {
 					return err.Error()
 				}
 				return ""
 			},
 			apply: func(ctx context.Context, d *api.Device, batch string) (string, error) {
 				ar := api.CreateActionRequest{Type: req.Operation, Args: append([]string(nil), req.Args...)}
-				if _, err := checkAction(p, d, &ar); err != nil {
+				if _, err := s.checkAction(p, d, &ar); err != nil {
 					return "", err
 				}
 				a, err := s.queueAction(ctx, d, ar, batch)

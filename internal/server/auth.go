@@ -340,7 +340,8 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	p := principalFrom(r.Context())
 	me := api.Me{User: p.user, Name: p.name, Role: p.role, Scopes: p.scopes(), Scoped: p.scoped(),
-		Grants: p.grants, FleetRole: p.fleetRole(), SignInMethod: p.method, TwoFactorSetupRequired: p.setupRequired}
+		Grants: p.grants, FleetRole: p.fleetRole(), SignInMethod: p.method, TwoFactorSetupRequired: p.setupRequired,
+		Features: api.ServerFeatures{Screenshots: s.cfg.Screenshots}}
 	if sc := p.scopes(); len(sc) > 0 {
 		me.Scope = sc[0]
 	}

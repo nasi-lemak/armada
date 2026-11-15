@@ -75,6 +75,10 @@ type Config struct {
 	// Backups: automatic backups go to BackupDir and/or S3-compatible
 	// storage every BackupEvery, keeping the newest BackupKeep.
 	Backup BackupConfig
+	// Screenshots allows the screenshot action (devices must allow it too);
+	// images are kept for ScreenshotRetention.
+	Screenshots         bool
+	ScreenshotRetention time.Duration
 	// Version is this server's version, reported to a central server.
 	Version string
 	// Central, if set, is a central Armada server this one reports to as a site.
@@ -413,6 +417,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/agent/wait", s.deviceAuth(s.handleAgentWait))
 	mux.Handle("GET /api/v1/agent/releases/{id}/chunks", s.deviceAuth(s.handleAgentChunks))
 	mux.Handle("POST /api/v1/agent/license", s.deviceAuth(s.handleLicense))
+	mux.Handle("PUT /api/v1/agent/actions/{id}/attachment", s.deviceAuth(s.handleActionAttachment))
 
 	// Admin API.
 	// Admin API. Each route states the least role it needs and whether users
@@ -475,6 +480,7 @@ func (s *Server) Handler() http.Handler {
 	viewer(scopedOK, "GET /api/v1/devices/{id}", s.handleGetDevice)
 	viewer(scopedOK, "GET /api/v1/devices/{id}/history", s.handleDeviceHistory)
 	viewer(scopedOK, "GET /api/v1/devices/{id}/actions", s.handleListActions)
+	operator(scopedOK, "GET /api/v1/actions/{id}/attachment", s.handleGetAttachment)
 	operator(scopedOK, "PATCH /api/v1/devices/{id}", s.handlePatchDevice)
 	operator(scopedOK, "POST /api/v1/devices/{id}/actions", s.handleCreateAction)
 	operator(scopedOK, "POST /api/v1/devices/{id}/wake", s.handleWakeDevice)
@@ -705,6 +711,7 @@ func (s *Server) Run(ctx context.Context) {
 		}
 		if time.Since(lastPrune) > time.Hour {
 			lastPrune = time.Now()
+			s.pruneAttachments()
 			if err := s.store.PruneOutages(ctx, s.now().Add(-s.cfg.HistoryRetention)); err != nil && ctx.Err() == nil {
 				s.log.Error("prune outages failed", "err", err)
 			}

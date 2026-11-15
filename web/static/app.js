@@ -1062,6 +1062,11 @@ function timelineCard(id) {
 
 async function viewDevice(root, id) {
   const head = h('div', {});
+  // Screenshots (when the server allows them): loaded images are kept here
+  // so the 10-second refresh doesn't drop them.
+  const shots = {};
+  const shotBtn = h('button', { class: 'btn hidden', title: 'Capture the screen (the device must allow it: allow_screenshots). Recorded in the activity log.',
+    onclick: () => queue('screenshot') }, 'Screenshot');
   const info = h('div', { class: 'card' });
   const meta = h('div', { class: 'card need-operator' });
   const actions = h('div', { class: 'card need-operator' });
@@ -1227,7 +1232,8 @@ async function viewDevice(root, id) {
       } }, 'Check in now'),
       h('button', { class: 'btn', onclick: () => confirm('Reboot this device?') && queue('reboot') }, 'Reboot'),
       h('button', { class: 'btn', onclick: () => queue('restart-agent') }, 'Restart agent'),
-      h('button', { class: 'btn', title: 'Test the route from the device to the server: DNS, connection, TLS, HTTPS, gateway. The report shows under Actions.', onclick: () => queue('netcheck') }, 'Network check')),
+      h('button', { class: 'btn', title: 'Test the route from the device to the server: DNS, connection, TLS, HTTPS, gateway. The report shows under Actions.', onclick: () => queue('netcheck') }, 'Network check'),
+      shotBtn),
     execBox, androidBox,
     h('hr', { class: 'sep' }),
     maintBox,
@@ -1377,9 +1383,22 @@ async function viewDevice(root, id) {
         h('td', { class: 'mono' }, a.type, a.args && a.args.length ? ' ' + a.args.join(' ') : ''),
         h('td', {}, badge(a.status)),
         h('td', { class: 'nowrap' }, ago(a.updated_at)),
-        h('td', {}, a.output ? h('pre', { class: 'out' }, a.output) : h('span', { class: 'muted' }, a.status === 'queued' || a.status === 'sent' ? 'waiting for device' : '—')))),
+        h('td', {}, a.output ? h('pre', { class: 'out' }, a.output) : h('span', { class: 'muted' }, a.status === 'queued' || a.status === 'sent' ? 'waiting for device' : '—'),
+          a.type === 'screenshot' && a.status === 'succeeded' ? screenshotCell(a) : null))),
       'No actions yet.'));
     await timeline.refresh();
+    shotBtn.classList.toggle('hidden', !(me.features && me.features.screenshots) || (dev.info.os || '').toLowerCase() === 'android');
+  }
+  // A screenshot: fetched with the token (an <img> can't send it), shown as a data: URL.
+  function screenshotCell(a) {
+    if (shots[a.id]) return h('a', { href: shots[a.id], download: `screenshot-${a.id}.png`, title: 'Download' }, h('img', { class: 'shot', src: shots[a.id], alt: 'Screenshot' }));
+    return h('button', { class: 'btn small', onclick: async e => {
+      const res = await fetch(`/api/v1/actions/${a.id}/attachment`, { headers: authHeaders() });
+      if (!res.ok) { let m = 'HTTP ' + res.status; try { m = (await res.json()).error || m; } catch { /* not JSON */ } return toast(m, true); }
+      const blob = await res.blob();
+      shots[a.id] = await new Promise(ok => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.readAsDataURL(blob); });
+      e.target.replaceWith(screenshotCell(a));
+    } }, 'Show screenshot');
   }
   if (await guard(refresh) === undefined && !dev) replace(root, h('div', { class: 'empty' }, 'Device not found. ', h('a', { href: '#/devices' }, 'Back to devices')));
   return refresh;

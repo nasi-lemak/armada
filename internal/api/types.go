@@ -544,6 +544,10 @@ const (
 	// TCP, TLS and HTTPS, plus its gateway and interfaces. The report comes
 	// back as the output; it fails at the first step that doesn't work.
 	ActionNetCheck = "netcheck"
+	// ActionScreenshot captures the device's screen. It needs -screenshots
+	// on the server and allow_screenshots in the agent's config; the image
+	// is uploaded separately and kept for a limited time.
+	ActionScreenshot = "screenshot"
 )
 
 // WaitResponse answers an agent's long-poll.
@@ -1333,6 +1337,13 @@ type Me struct {
 	// TwoFactorSetupRequired means the server requires two-factor sign-in
 	// and this user must set it up before doing anything else.
 	TwoFactorSetupRequired bool `json:"two_factor_setup_required,omitempty"`
+	// Features the server has turned on that the dashboard should offer.
+	Features ServerFeatures `json:"features"`
+}
+
+// ServerFeatures are optional server features.
+type ServerFeatures struct {
+	Screenshots bool `json:"screenshots"`
 }
 
 // APIToken is a personal token for scripts and the CLI.

@@ -49,6 +49,16 @@ func envDur(key string, def time.Duration) time.Duration {
 	return def
 }
 
+func envBool(key string, def bool) bool {
+	switch strings.ToLower(os.Getenv(key)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	return def
+}
+
 func run() error {
 	cfg := server.DefaultConfig()
 	cfg.Version = version
@@ -109,6 +119,8 @@ func run() error {
 	flag.StringVar(&cfg.Backup.S3Region, "backup-s3-region", env("ARMADA_BACKUP_S3_REGION", "us-east-1"), "region for -backup-s3-url")
 	flag.StringVar(&cfg.Central.URL, "central-url", env("ARMADA_CENTRAL_URL", ""), "report this server's overview to a central Armada server (its URL); the site token goes in ARMADA_CENTRAL_TOKEN")
 	flag.DurationVar(&cfg.Central.Every, "central-every", envDur("ARMADA_CENTRAL_EVERY", 5*time.Minute), "how often to report to the central server")
+	flag.BoolVar(&cfg.Screenshots, "screenshots", envBool("ARMADA_SCREENSHOTS", false), "allow remote screenshots (devices must also set allow_screenshots in their agent config)")
+	flag.DurationVar(&cfg.ScreenshotRetention, "screenshot-retention", envDur("ARMADA_SCREENSHOT_RETENTION", 7*24*time.Hour), "delete screenshots after this long")
 	groupLabels := flag.String("group-labels", env("ARMADA_GROUP_LABELS", "customer,project"), "label keys the dashboard's customer/project picker offers, comma-separated")
 	flag.StringVar(&cfg.OIDC.Issuer, "oidc-issuer", os.Getenv("ARMADA_OIDC_ISSUER"), "OpenID Connect issuer URL for single sign-on, e.g. https://accounts.google.com (ARMADA_OIDC_ISSUER)")
 	flag.StringVar(&cfg.OIDC.ClientID, "oidc-client-id", os.Getenv("ARMADA_OIDC_CLIENT_ID"), "OIDC client ID (ARMADA_OIDC_CLIENT_ID)")

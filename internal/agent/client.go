@@ -97,6 +97,28 @@ func (c *client) do(ctx context.Context, method, path string, in, out any) error
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+// put sends a raw body (e.g. an image) to path.
+func (c *client) put(ctx context.Context, path, contentType string, body []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.base+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", contentType)
+	if k := c.key(); k != "" {
+		req.Header.Set("Authorization", "Bearer "+k)
+	}
+	req.Header.Set("User-Agent", "armada-agent/"+Version)
+	resp, err := c.download.Do(req) // no fixed timeout: bounded by ctx
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return readHTTPError(resp)
+	}
+	return nil
+}
+
 func readHTTPError(resp *http.Response) error {
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	var er api.ErrorResponse
