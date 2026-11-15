@@ -432,6 +432,41 @@ func (s *Server) buildReport(ctx context.Context, p *principal, rr reportRequest
 	}
 	sort.Slice(rep.Certificates, func(i, j int) bool { return rep.Certificates[i].NotAfter.Before(rep.Certificates[j].NotAfter) })
 
+	// Software (as of now) and disconnections (in the period), for the
+	// devices still in the fleet.
+	current := map[string]*api.Device{}
+	for id, d := range devs {
+		if d.Lifecycle != api.LifecycleRetired {
+			current[id] = d
+		}
+	}
+	if rep.Software, err = s.softwareInsights(ctx, current); err != nil {
+		return nil, err
+	}
+	if rep.Connectivity, err = s.connectivityInsights(ctx, current, rr.from, rr.to); err != nil {
+		return nil, err
+	}
+	outs, err := s.store.ListOutages(ctx, rr.from, rr.to, "")
+	if err != nil {
+		return nil, err
+	}
+	drops := map[string]*api.ReportDevice{}
+	for i := range rep.Devices {
+		drops[rep.Devices[i].ID] = &rep.Devices[i]
+	}
+	for _, o := range outs {
+		if rd := drops[o.DeviceID]; rd != nil {
+			rd.Disconnections++
+			switch o.Cause {
+			case api.OutageNetwork:
+				rd.NetworkDrops++
+			case api.OutageRestart:
+				rd.Restarts++
+			}
+		}
+	}
+	rep.Notes = append(rep.Notes, "Software shows what each device ran when this report was made, against the newest release for its channel and platform.")
+
 	// Least available first: that's what a reader looks for.
 	sort.SliceStable(rep.Devices, func(i, j int) bool {
 		a, b := rep.Devices[i].Availability, rep.Devices[j].Availability
@@ -524,7 +559,7 @@ func reportCSV(rep *api.Report) []byte {
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
 	w.Write([]string{"device_id", "name", "serial", "asset_tag", "lifecycle", "platform", "availability_percent", "downtime_minutes", "maintenance_minutes", "alerts",
-		"updates_succeeded", "updates_failed", "health_now", "last_seen", "packages"})
+		"updates_succeeded", "updates_failed", "health_now", "last_seen", "packages", "disconnections", "network_drops", "restarts"})
 	for _, d := range rep.Devices {
 		avail, down, maint := "", "", "0"
 		if d.Availability != nil {
@@ -544,7 +579,8 @@ func reportCSV(rep *api.Report) []byte {
 			seen = d.LastSeenAt.UTC().Format(time.RFC3339)
 		}
 		w.Write([]string{d.ID, csvSafe(d.Name), csvSafe(d.Serial), csvSafe(d.AssetTag), d.Lifecycle, d.Platform, avail, down, maint, strconv.Itoa(d.Alerts),
-			strconv.Itoa(d.UpdatesSucceeded), strconv.Itoa(d.UpdatesFailed), d.Health, seen, csvSafe(strings.Join(pk, " "))})
+			strconv.Itoa(d.UpdatesSucceeded), strconv.Itoa(d.UpdatesFailed), d.Health, seen, csvSafe(strings.Join(pk, " ")),
+			strconv.Itoa(d.Disconnections), strconv.Itoa(d.NetworkDrops), strconv.Itoa(d.Restarts)})
 	}
 	w.Flush()
 	return buf.Bytes()
@@ -573,6 +609,12 @@ func (s *Server) reportFilename(rep *api.Report, ext string) string {
 }
 
 var reportFuncs = template.FuncMap{
+	"dursec": func(sec int64) string {
+		if sec < 60 {
+			return "under a minute"
+		}
+		return humanMinutes(int(sec / 60))
+	},
 	"date": func(t time.Time, tz string) string {
 		loc, err := time.LoadLocation(tz)
 		if err != nil {
@@ -653,14 +695,15 @@ footer { margin-top: 32px; color: #667085; font-size: 12px; }
 <div class="tile"><div class="l">Availability</div><div class="v">{{pct .Summary.Availability}}</div><div class="muted">{{if .Summary.BelowTarget}}{{.Summary.BelowTarget}} below {{.Summary.AvailabilityGoal}}%{{else}}target {{.Summary.AvailabilityGoal}}%{{end}}</div></div>
 <div class="tile"><div class="l">Alerts</div><div class="v">{{.Summary.AlertsCritical}} / {{.Summary.AlertsWarning}}</div><div class="muted">critical / warning · resolved in {{mins .Summary.MeanTimeToResolveMinutes}} on average</div></div>
 <div class="tile"><div class="l">Updates installed</div><div class="v">{{.Summary.UpdatesSucceeded}}</div><div class="muted">{{.Summary.UpdatesFailed}} failed or rolled back</div></div>
+<div class="tile"><div class="l">Disconnections</div><div class="v">{{.Connectivity.Outages}}</div><div class="muted">{{if .Connectivity.Outages}}on {{.Connectivity.DevicesHit}} devices · {{.Connectivity.Network}} network · {{.Connectivity.Restart}} restart{{else}}none{{end}}</div></div>
 <div class="tile"><div class="l">Replacements</div><div class="v">{{.Summary.Replacements}}</div><div class="muted">{{.Summary.MaintenanceWindows}} maintenance windows</div></div>
 </div>
 
 <h2>Devices</h2>
-{{if .Devices}}<table><thead><tr><th>Device</th><th>State</th><th class="num">Availability</th><th class="num">Downtime</th><th class="num">Maintenance</th><th class="num">Alerts</th><th class="num">Updates</th><th>Health now</th></tr></thead><tbody>
+{{if .Devices}}<table><thead><tr><th>Device</th><th>State</th><th class="num">Availability</th><th class="num">Downtime</th><th class="num">Maintenance</th><th class="num">Alerts</th><th class="num">Drops</th><th class="num">Updates</th><th>Health now</th></tr></thead><tbody>
 {{range .Devices}}<tr><td>{{.Name}}<div class="muted mono">{{.ID}}</div></td><td>{{lifecycle .Lifecycle}}</td>
 <td class="num{{if below .Availability $.Summary.AvailabilityGoal}} bad{{end}}">{{pct .Availability}}</td><td class="num">{{if .DowntimeMinutes}}{{dur .DowntimeMinutes}}{{else}}—{{end}}</td><td class="num">{{if .MaintenanceMinutes}}{{dur .MaintenanceMinutes}}{{else}}—{{end}}</td>
-<td class="num">{{.Alerts}}</td><td class="num">{{.UpdatesSucceeded}}{{if .UpdatesFailed}} <span class="bad">({{.UpdatesFailed}} failed)</span>{{end}}</td><td>{{.Health}}</td></tr>
+<td class="num">{{.Alerts}}</td><td class="num">{{if .Disconnections}}{{.Disconnections}}{{if .Restarts}}<div class="muted">{{.Restarts}} restart</div>{{end}}{{else}}—{{end}}</td><td class="num">{{.UpdatesSucceeded}}{{if .UpdatesFailed}} <span class="bad">({{.UpdatesFailed}} failed)</span>{{end}}</td><td>{{.Health}}</td></tr>
 {{end}}</tbody></table>{{else}}<p class="muted">No devices.</p>{{end}}
 
 <h2>Alerts</h2>
@@ -671,6 +714,17 @@ footer { margin-top: 32px; color: #667085; font-size: 12px; }
 {{if .Updates}}<h2>Updates</h2>
 <table><thead><tr><th>Release</th><th class="num">Installed</th><th class="num">Failed or rolled back</th></tr></thead><tbody>
 {{range .Updates}}<tr><td class="mono">{{.Name}}</td><td class="num">{{.Count}}</td><td class="num">{{.Failed}}</td></tr>
+{{end}}</tbody></table>{{end}}
+
+{{if .Software}}<h2>Software</h2>
+<table><thead><tr><th>Package</th><th>Newest</th><th class="num">Up to date</th><th>Not yet updated</th></tr></thead><tbody>
+{{range .Software}}<tr><td class="mono">{{.Package}}</td><td class="mono">{{.Latest}}</td><td class="num">{{.UpToDate}}</td><td>{{if .Behind}}{{range $i, $b := .Behind}}{{if $i}}, {{end}}{{$b.Name}} <span class="muted mono">{{$b.Installed}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td></tr>
+{{end}}</tbody></table>{{end}}
+
+{{if .Connectivity.Worst}}<h2>Disconnections</h2>
+<p class="muted">{{.Connectivity.Outages}} in the period, {{dursec .Connectivity.OfflineSeconds}} offline in all. Network: the device stayed up but couldn't reach the server. Restart: it rebooted or lost power.</p>
+<table><thead><tr><th>Device</th><th class="num">Drops</th><th class="num">Network</th><th class="num">Restart</th><th class="num">Offline</th><th>Last</th></tr></thead><tbody>
+{{range .Connectivity.Worst}}<tr><td>{{.Name}}</td><td class="num">{{.Outages}}</td><td class="num">{{.Network}}</td><td class="num">{{.Restart}}</td><td class="num">{{dursec .OfflineSeconds}}</td><td>{{datetime .LastAt $.TimeZone}}{{if .LastDetail}}<div class="muted mono">{{.LastDetail}}</div>{{end}}</td></tr>
 {{end}}</tbody></table>{{end}}
 
 {{if .Changes}}<h2>Replacements and changes</h2>

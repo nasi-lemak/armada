@@ -1342,6 +1342,11 @@ type Report struct {
 	Maintenance []ReportMaintWindow `json:"maintenance"`
 	// Certificates are the devices' managed certificates, soonest to expire first.
 	Certificates []ReportCert `json:"certificates"`
+	// Software is, per package, which devices run the newest release for
+	// them (as of when the report was made).
+	Software []SoftwareStatus `json:"software"`
+	// Connectivity summarizes the disconnections in the period.
+	Connectivity ConnectivityInsight `json:"connectivity"`
 	// Notes explain what the numbers do and don't include.
 	Notes []string `json:"notes"`
 }
@@ -1387,6 +1392,10 @@ type ReportDevice struct {
 	Health             string            `json:"health"`
 	Packages           map[string]string `json:"packages"`
 	LastSeenAt         time.Time         `json:"last_seen_at"`
+	// Disconnections in the period, split by cause.
+	Disconnections int `json:"disconnections"`
+	NetworkDrops   int `json:"network_drops"`
+	Restarts       int `json:"restarts"`
 }
 
 // ReportAlert is an alert that started in the period.

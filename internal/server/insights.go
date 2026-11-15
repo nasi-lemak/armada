@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"sort"
 	"time"
@@ -53,15 +54,15 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(in.OfflineNow, func(i, j int) bool { return in.OfflineNow[i].Since.Before(*in.OfflineNow[j].Since) })
 
-	if in.Software, err = s.softwareInsights(r, byID); err != nil {
+	if in.Software, err = s.softwareInsights(ctx, byID); err != nil {
 		s.internalError(w, err)
 		return
 	}
-	if in.Certificates, err = s.certInsights(r, byID); err != nil {
+	if in.Certificates, err = s.certInsights(ctx, byID); err != nil {
 		s.internalError(w, err)
 		return
 	}
-	if in.Connectivity, err = s.connectivityInsights(r, byID, now.Add(-rng), now); err != nil {
+	if in.Connectivity, err = s.connectivityInsights(ctx, byID, now.Add(-rng), now); err != nil {
 		s.internalError(w, err)
 		return
 	}
@@ -70,8 +71,7 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 
 // softwareInsights compares each device's installed packages with the
 // newest release for its channel and platform.
-func (s *Server) softwareInsights(r *http.Request, devs map[string]*api.Device) ([]api.SoftwareStatus, error) {
-	ctx := r.Context()
+func (s *Server) softwareInsights(ctx context.Context, devs map[string]*api.Device) ([]api.SoftwareStatus, error) {
 	rels, err := s.store.ListReleases(ctx, "")
 	if err != nil {
 		return nil, err
@@ -142,9 +142,9 @@ func (s *Server) softwareInsights(r *http.Request, devs map[string]*api.Device) 
 
 // certInsights counts certificates that are expired, expiring soon, or
 // stuck in renewal.
-func (s *Server) certInsights(r *http.Request, devs map[string]*api.Device) (api.CertificateInsights, error) {
+func (s *Server) certInsights(ctx context.Context, devs map[string]*api.Device) (api.CertificateInsights, error) {
 	ci := api.CertificateInsights{Items: []*api.DeviceCert{}}
-	all, err := s.store.ListDeviceCerts(r.Context(), "")
+	all, err := s.store.ListDeviceCerts(ctx, "")
 	if err != nil {
 		return ci, err
 	}
@@ -195,9 +195,9 @@ func (s *Server) certInsights(r *http.Request, devs map[string]*api.Device) (api
 }
 
 // connectivityInsights summarizes outages that ended in [from, to).
-func (s *Server) connectivityInsights(r *http.Request, devs map[string]*api.Device, from, to time.Time) (api.ConnectivityInsight, error) {
+func (s *Server) connectivityInsights(ctx context.Context, devs map[string]*api.Device, from, to time.Time) (api.ConnectivityInsight, error) {
 	ci := api.ConnectivityInsight{From: from, To: to, Worst: []api.DeviceOutageStat{}}
-	outs, err := s.store.ListOutages(r.Context(), from, to, "")
+	outs, err := s.store.ListOutages(ctx, from, to, "")
 	if err != nil {
 		return ci, err
 	}

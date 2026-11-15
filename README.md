@@ -1234,11 +1234,17 @@ to the customer:
 - **Summary:** devices in service, spare and in repair; average availability, and how many devices
   are below the 99% target; alerts by severity and the mean time to resolve them; updates installed
   and failed; replacements; maintenance windows.
-- **Per device:** availability, downtime, time in maintenance, alerts, updates installed and failed,
-  and health now. Devices are sorted least available first.
+- **Per device:** availability, downtime, time in maintenance, alerts, disconnections, updates
+  installed and failed, and health now. Devices are sorted least available first.
 - **Alerts** that started in the period, with how long each lasted.
 - **Updates** by release, **replacements and lifecycle changes**, and **maintenance windows** that
   covered the devices.
+- **Software:** per package, how many devices run the newest release for their channel and platform,
+  and which don't (as of when the report is made).
+- **Disconnections** in the period: how many, network drops versus restarts, the devices that drop
+  out most with their last error, and a per-device count. The CSV gains `disconnections`,
+  `network_drops` and `restarts` columns.
+- **Certificates:** each device's managed certificates, soonest to expire first.
 
 **How the numbers are measured:**
 - **Availability** is the share of time a device was checking in, **outside planned maintenance**.
