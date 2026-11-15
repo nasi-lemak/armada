@@ -93,6 +93,31 @@ deploy/, examples/  service units, compose file, sample agent config and hooks
 docs/               documentation (go test ./docs checks every link)
 ```
 
+
+## Fuzz testing
+
+Everything a device sends, and everything the server accepts before sign-in, has a fuzz test: Go's
+fuzzer feeds it millions of generated inputs looking for crashes and internal errors.
+
+| Target | Input |
+|---|---|
+| `FuzzHeartbeat` | Check-ins posted by an enrolled device, through the real handler; the device's pages must still load after each |
+| `FuzzPublicEndpoints` | Bodies sent to enrollment, sign-in, two-factor, passkey, single sign-on, site report and Android provisioning endpoints |
+| `FuzzParseKeyDescription` | The Android attestation record in a device's certificate |
+| `FuzzCompare` | Versions devices report: the order must stay consistent |
+| `FuzzParse` (certs) | Certificates, requests and keys, uploaded or reported |
+| `FuzzParseImport`, `FuzzParseLabelList` | CSV imports and label lists |
+| `FuzzParseTimelineCursor`, `FuzzParseEventTime` | Query parameters |
+| `FuzzVerifySnapshot` | Site reports |
+| `FuzzParseSmart`, `FuzzParseReports` (agent) | smartctl output and Bluetooth discovery output |
+| `FuzzSplit` | Delta-update chunking: chunks must add up to the input exactly |
+| `FuzzVerify` (license) | License tokens your backend receives from apps |
+| `FuzzParseWindows` | Maintenance windows |
+
+`go test ./...` runs each target's seed inputs. `make fuzz` (or `FUZZTIME=5m scripts/fuzz.sh
+FuzzHeartbeat`) fuzzes for real. An input that fails is saved under the package's `testdata/fuzz/`;
+commit it with the fix.
+
 ---
 
 [← Armada documentation](../README.md#documentation)

@@ -6,7 +6,7 @@ export CGO_ENABLED = 0
 # Platforms the agent is cross-compiled for by `make agents`.
 AGENT_PLATFORMS := linux/amd64 linux/arm64 linux/arm linux/386 linux/riscv64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
-.PHONY: all build test test-race vet agents android clean run ci upgrade-test
+.PHONY: all build test test-race vet agents android clean run ci upgrade-test fuzz
 
 all: vet test build
 
@@ -31,6 +31,10 @@ ci:
 # opens it (scripts/upgrade-test.sh; also part of make ci).
 upgrade-test:
 	@scripts/upgrade-test.sh
+
+# Run every fuzz target for FUZZTIME (default 30s) each (scripts/fuzz.sh).
+fuzz:
+	@scripts/fuzz.sh
 
 # Cross-compile agent binaries into dist/ (upload these as armada-agent releases).
 agents:

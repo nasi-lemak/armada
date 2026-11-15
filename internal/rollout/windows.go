@@ -30,6 +30,9 @@ func ParseWindows(s string) ([]Window, error) {
 		if err != nil {
 			return nil, err
 		}
+		if start == 24*60 {
+			return nil, fmt.Errorf("window %q: 24:00 can only end a window (start it at 00:00)", part)
+		}
 		end, err := parseClock(b)
 		if err != nil {
 			return nil, err
