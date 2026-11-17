@@ -1,9 +1,11 @@
 package server
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -35,10 +37,23 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 func readJSONLimit(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
+	var body io.Reader = http.MaxBytesReader(w, r.Body, limit)
+	if strings.EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
+		// Agents compress their check-ins (see agentGzipHeader). The limit
+		// applies to the compressed and the uncompressed size, so a small
+		// body can't expand into a huge one.
+		gz, err := gzip.NewReader(body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid gzip body")
+			return false
+		}
+		defer gz.Close()
+		body = &capReader{r: gz, left: limit}
+	}
+	dec := json.NewDecoder(body)
 	if err := dec.Decode(v); err != nil {
 		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
+		if errors.As(err, &mbe) || errors.Is(err, errBodyTooLarge) {
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 		} else {
 			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -140,4 +155,35 @@ func nonNil[T any](s []T) []T {
 		return []T{}
 	}
 	return s
+}
+
+// agentGzipHeader tells agents this server accepts gzip-compressed request
+// bodies; agents compress only after seeing it, so older servers keep
+// getting plain JSON.
+const agentGzipHeader = "X-Armada-Accept-Encoding"
+
+var errBodyTooLarge = errors.New("request body too large")
+
+// capReader fails once more than left bytes have been read.
+type capReader struct {
+	r    io.Reader
+	left int64
+}
+
+func (c *capReader) Read(p []byte) (int, error) {
+	if c.left <= 0 {
+		// Anything more is over the limit.
+		var one [1]byte
+		n, err := c.r.Read(one[:])
+		if n > 0 {
+			return 0, errBodyTooLarge
+		}
+		return 0, err
+	}
+	if int64(len(p)) > c.left {
+		p = p[:c.left]
+	}
+	n, err := c.r.Read(p)
+	c.left -= int64(n)
+	return n, err
 }

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nasi-lemak/armada/internal/api"
@@ -36,7 +38,14 @@ type client struct {
 	key      func() string
 	api      *http.Client
 	download *http.Client
+	// gzipBodies: the server said it accepts compressed request bodies.
+	// Check-ins are mostly health results that compress to well under
+	// half, which matters on metered links.
+	gzipBodies atomic.Bool
 }
+
+// gzipMinBody is the smallest body worth compressing.
+const gzipMinBody = 512
 
 func newClient(cfg *Config, key func() string) (*client, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
@@ -63,30 +72,31 @@ func newClient(cfg *Config, key func() string) (*client, error) {
 }
 
 func (c *client) do(ctx context.Context, method, path string, in, out any) error {
-	var body io.Reader
+	var raw []byte
 	if in != nil {
-		b, err := json.Marshal(in)
-		if err != nil {
+		var err error
+		if raw, err = json.Marshal(in); err != nil {
 			return err
 		}
-		body = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	compress := c.gzipBodies.Load() && len(raw) >= gzipMinBody
+	resp, err := c.send(ctx, method, path, raw, in != nil, compress)
 	if err != nil {
 		return err
 	}
-	if in != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if k := c.key(); k != "" {
-		req.Header.Set("Authorization", "Bearer "+k)
-	}
-	req.Header.Set("User-Agent", "armada-agent/"+Version)
-	resp, err := c.api.Do(req)
-	if err != nil {
-		return err
+	if compress && (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnsupportedMediaType) {
+		// The server took that back (e.g. an older version was restored):
+		// send it plain, and keep sending plain until it says otherwise.
+		resp.Body.Close()
+		c.gzipBodies.Store(false)
+		if resp, err = c.send(ctx, method, path, raw, true, false); err != nil {
+			return err
+		}
 	}
 	defer resp.Body.Close()
+	if strings.Contains(resp.Header.Get("X-Armada-Accept-Encoding"), "gzip") {
+		c.gzipBodies.Store(true)
+	}
 	if resp.StatusCode >= 300 {
 		return readHTTPError(resp)
 	}
@@ -95,6 +105,36 @@ func (c *client) do(ctx context.Context, method, path string, in, out any) error
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *client) send(ctx context.Context, method, path string, raw []byte, isJSON, compress bool) (*http.Response, error) {
+	var body io.Reader
+	if isJSON {
+		if compress {
+			var buf bytes.Buffer
+			zw := gzip.NewWriter(&buf)
+			zw.Write(raw)
+			zw.Close()
+			body = &buf
+		} else {
+			body = bytes.NewReader(raw)
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if isJSON {
+		req.Header.Set("Content-Type", "application/json")
+		if compress {
+			req.Header.Set("Content-Encoding", "gzip")
+		}
+	}
+	if k := c.key(); k != "" {
+		req.Header.Set("Authorization", "Bearer "+k)
+	}
+	req.Header.Set("User-Agent", "armada-agent/"+Version)
+	return c.api.Do(req)
 }
 
 // put sends a raw body (e.g. an image) to path.

@@ -421,7 +421,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/license/jwks", s.handleJWKS)
 
 	// Agent protocol.
-	mux.HandleFunc("POST /api/v1/agent/enroll", s.handleEnroll)
+	mux.HandleFunc("POST /api/v1/agent/enroll", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(agentGzipHeader, "gzip")
+		s.handleEnroll(w, r)
+	})
 	mux.Handle("POST /api/v1/agent/heartbeat", s.deviceAuth(s.handleHeartbeat))
 	mux.Handle("POST /api/v1/agent/updates", s.deviceAuth(s.handleUpdateReport))
 	mux.Handle("GET /api/v1/agent/releases/{id}/artifact", s.deviceAuth(s.handleAgentArtifact))
@@ -648,6 +651,7 @@ func bearer(r *http.Request) string {
 
 func (s *Server) deviceAuth(next func(http.ResponseWriter, *http.Request, *api.Device)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(agentGzipHeader, "gzip")
 		tok := bearer(r)
 		if tok == "" {
 			writeError(w, http.StatusUnauthorized, "device key required")
