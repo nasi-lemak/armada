@@ -162,6 +162,15 @@ func nonNil[T any](s []T) []T {
 // getting plain JSON.
 const agentGzipHeader = "X-Armada-Accept-Encoding"
 
+// offerGzip tells an agent that sent a plain body that it may compress.
+// Agents that already compress, and requests without a body, don't need
+// telling: on a metered link every response byte counts.
+func offerGzip(w http.ResponseWriter, r *http.Request) {
+	if r.ContentLength != 0 && r.Body != nil && r.Body != http.NoBody && !strings.EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
+		w.Header().Set(agentGzipHeader, "gzip")
+	}
+}
+
 var errBodyTooLarge = errors.New("request body too large")
 
 // capReader fails once more than left bytes have been read.

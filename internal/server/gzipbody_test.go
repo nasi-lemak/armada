@@ -49,16 +49,16 @@ func TestGzipCheckIns(t *testing.T) {
 		return res
 	}
 	hb, _ := json.Marshal(api.HeartbeatRequest{Info: api.DeviceInfo{OS: "linux", Hostname: "compressed-host"}, Packages: map[string]string{"kiosk": "2.0"}})
-	if res := post(gz(hb), "gzip"); res.StatusCode != 200 || res.Header.Get(agentGzipHeader) != "gzip" {
-		t.Fatalf("gzip check-in: %d", res.StatusCode)
+	if res := post(gz(hb), "gzip"); res.StatusCode != 200 || res.Header.Get(agentGzipHeader) != "" {
+		t.Fatalf("gzip check-in: %d %v (the offer is only for plain bodies)", res.StatusCode, res.Header)
 	}
 	var d struct{ Device api.Device }
 	call(t, ts, admin, "GET", "/api/v1/devices/"+er.DeviceID, nil, &d)
 	if d.Device.Info.Hostname != "compressed-host" || d.Device.Packages["kiosk"] != "2.0" {
 		t.Errorf("compressed check-in not stored: %+v", d.Device)
 	}
-	if res := post(hb, ""); res.StatusCode != 200 {
-		t.Errorf("plain check-in: %d", res.StatusCode)
+	if res := post(hb, ""); res.StatusCode != 200 || res.Header.Get(agentGzipHeader) != "gzip" {
+		t.Errorf("plain check-in: %d %v", res.StatusCode, res.Header)
 	}
 	if res := post([]byte("not gzip"), "gzip"); res.StatusCode != 400 {
 		t.Errorf("garbage gzip: %d", res.StatusCode)
