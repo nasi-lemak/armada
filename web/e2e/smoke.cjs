@@ -5,6 +5,7 @@
 // of the one in node_modules (e.g. a system-wide install with its browser).
 'use strict';
 const { chromium } = require(process.env.ARMADA_PLAYWRIGHT || 'playwright');
+const a11y = require('./a11y.cjs');
 
 const base = (process.argv[2] || 'http://localhost:8080').replace(/\/$/, '');
 const adminToken = process.argv[3] || process.env.ARMADA_ADMIN_TOKEN;
@@ -63,8 +64,9 @@ async function seed() {
 async function visit(page, who, hash, expectHeading) {
   await page.goto(base + '/' + hash);
   await page.waitForTimeout(700);
-  const h1 = await page.textContent('h1').catch(() => '');
+  const h1 = await page.textContent('#view h1').catch(() => '');
   if (expectHeading && !h1.includes(expectHeading)) fail(`${who} ${hash}: heading "${h1}", expected "${expectHeading}"`);
+  for (const p of await a11y.check(page, `${who} ${hash}`)) fail('accessibility: ' + p);
   return h1;
 }
 
@@ -81,6 +83,8 @@ async function visit(page, who, hash, expectHeading) {
   const admin = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   watch(admin, 'admin');
   await admin.goto(base + '/');
+  await admin.waitForSelector('#login-form');
+  for (const p of await a11y.check(admin, 'sign-in page')) fail('accessibility: ' + p);
   await admin.click('#login-switch');
   await admin.fill('#login-token', adminToken);
   await admin.click('#login-form button[type=submit]');
@@ -150,7 +154,7 @@ async function visit(page, who, hash, expectHeading) {
   await admin.waitForSelector('.palette-item.active:has-text("globex-kiosk")', { timeout: 5000 }).catch(() => fail('search found nothing'));
   await admin.keyboard.press('Enter');
   await admin.waitForTimeout(700);
-  if (!(await admin.textContent('h1')).includes('globex-kiosk')) fail('search result did not open the device');
+  if (!(await admin.textContent('#view h1')).includes('globex-kiosk')) fail('search result did not open the device');
 
   // Inventory: the admin records an asset tag on the device page.
   await visit(admin, 'admin', '#/devices/' + ids.acme, 'acme-kiosk');
@@ -258,7 +262,7 @@ async function visit(page, who, hash, expectHeading) {
   await admin.click('#view form button.primary:has-text("Replace")');
   await admin.waitForFunction(id => location.hash === '#/devices/' + id, ids.stock, { timeout: 5000 }).catch(() => fail('replace did not open the replacement'));
   await admin.waitForTimeout(700);
-  if (!(await admin.textContent('h1')).includes('acme-kiosk')) fail('replacement did not take over the name');
+  if (!(await admin.textContent('#view h1')).includes('acme-kiosk')) fail('replacement did not take over the name');
   await visit(client, 'client', '#/devices', 'Devices');
   const after = await client.$$eval('#view table tbody tr', r => r.map(x => x.textContent));
   if (after.length !== 1 || !after[0].includes(ids.stock)) fail(`client devices after the swap: ${JSON.stringify(after)}`);
@@ -279,7 +283,7 @@ async function visit(page, who, hash, expectHeading) {
   await admin.click('.bulk-bar button:has-text("Apply")');
   await admin.waitForFunction(() => location.hash.startsWith('#/bulk/'), null, { timeout: 5000 }).catch(() => fail('bulk run did not open its progress page'));
   await admin.waitForTimeout(800);
-  if (!(await admin.textContent('h1')).includes('restart-agent')) fail('bulk progress page heading');
+  if (!(await admin.textContent('#view h1')).includes('restart-agent')) fail('bulk progress page heading');
   const rows = (await admin.$$('#view table tbody tr')).length;
   if (rows !== fleet.length) fail(`bulk progress page lists ${rows} devices, expected ${fleet.length}`);
 

@@ -122,6 +122,21 @@ docs/               documentation (go test ./docs checks every link)
 ```
 
 
+## Accessibility
+
+The dashboard smoke test runs accessibility checks (`web/e2e/a11y.cjs`) on the sign-in page and
+every page it opens, as an admin and as a client account, in light and dark mode. It fails on:
+
+- a form field, button or link without a name a screen reader can announce, or an image without
+  `alt`;
+- a page without exactly one `h1`, or a skipped heading level;
+- text below 4.5:1 contrast against its background (3:1 for large text);
+- Tab not moving focus, or a focused element without a visible focus ring;
+- no `lang` on the page.
+
+Status colors have separate shades for text (`--ok-text`, `--warn-text`, `--bad-text`): the bright
+ones are for dots and charts and are too light to read as text on a light background.
+
 ## Testing on Windows, macOS and Linux
 
 `internal/platformtest` installs the agent the way a customer would and checks that it enrolls,
