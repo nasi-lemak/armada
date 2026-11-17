@@ -207,6 +207,7 @@ func TestMigrationsAreFrozen(t *testing.T) {
 		"15 sites a3de2528e89d",
 		"16 index devices by gateway df483bf0851d",
 		"17 token client scope and site token lookup 4f2226d78a79",
+		"18 activity log hash chain d8caa18b6a0e",
 	}
 	var got []string
 	for i, m := range migrations {

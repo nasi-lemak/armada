@@ -174,7 +174,7 @@ async function viewActivity(root, query) {
     h('button', { class: 'btn', onclick: exportCSV, title: 'Everything matching these filters, as a spreadsheet (up to 50,000 entries)' }, 'Export CSV')),
     h('div', { class: 'toolbar mb' }, search, typeSel, actor, h('label', { class: 'date-range muted' }, 'From', since), h('label', { class: 'date-range muted' }, 'to', until),
       h('button', { class: 'btn ghost', onclick: () => { for (const [el] of fields) el.value = ''; changed(); } }, 'Clear')),
-    feed, h('div', { class: 'btn-row mt' }, more));
+    integrityLine(), feed, h('div', { class: 'btn-row mt' }, more));
 
   let events = [], names = {}, exhausted = false, seq = 0;
   const render = () => {
@@ -218,4 +218,24 @@ async function viewActivity(root, query) {
   const refresh = () => load(Math.min(1000, Math.max(PAGE, events.length)));
   await guard(refresh);
   return refresh;
+}
+
+// integrityLine shows admins the last check of the activity log's hash
+// chain: whether events were changed outside Armada.
+function integrityLine() {
+  if (!fleetWide() || !atLeast('admin')) return null;
+  const line = h('div', { class: 'muted mb integrity' });
+  const show = st => {
+    const check = h('button', { class: 'btn ghost small', onclick: async () => {
+      const r = await guard(() => api('POST', '/api/v1/events/integrity'));
+      if (r) show(r);
+    } }, 'Check now');
+    const head = st.head_id ? ` Newest: #${st.head_id}, ${st.head_hash.slice(0, 12)}.` : '';
+    replace(line, st.intact
+      ? h('span', {}, h('span', { class: 'badge ok' }, '✓ Tamper check passed'),
+        ` ${st.checked.toLocaleString()} events checked ${ago(st.checked_at)}.${head} `, check)
+      : h('div', { class: 'callout bad-callout' }, h('strong', {}, 'The activity log was changed outside Armada. '), st.problem, ' ', check));
+  };
+  guard(() => api('GET', '/api/v1/events/integrity')).then(st => { if (st) show(st); });
+  return line;
 }

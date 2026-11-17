@@ -20,6 +20,7 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/nasi-lemak/armada/internal/api"
 	"github.com/nasi-lemak/armada/internal/store"
 )
 
@@ -38,6 +39,8 @@ type RestoreInfo struct {
 	// SigningKey identifies the release-signing key (SHA-256 of the public
 	// key): devices that pinned a key need this same one.
 	SigningKey string
+	// ActivityLog is the activity log's hash chain as restored.
+	ActivityLog *api.EventChainStatus
 }
 
 var artifactName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -202,6 +205,9 @@ func checkDataDir(dir string, artifacts map[string]bool) (*RestoreInfo, error) {
 			return nil, err
 		}
 	}
+	if info.ActivityLog, err = st.VerifyEvents(ctx); err != nil {
+		return nil, err
+	}
 	rows, err := db.QueryContext(ctx, `SELECT id FROM releases`)
 	if err != nil {
 		return nil, err
@@ -225,6 +231,14 @@ func checkDataDir(dir string, artifacts map[string]bool) (*RestoreInfo, error) {
 
 // String summarises a restore for people.
 func (i *RestoreInfo) String() string {
-	return fmt.Sprintf("schema version %d · %d devices · %d releases (%d artifacts) · %d users · signing key %s",
+	s := fmt.Sprintf("schema version %d · %d devices · %d releases (%d artifacts) · %d users · signing key %s",
 		i.SchemaVersion, i.Devices, i.Releases, i.Artifacts, i.Users, i.SigningKey)
+	if c := i.ActivityLog; c != nil {
+		if c.Intact {
+			s += fmt.Sprintf(" · activity log intact (%d events, head %d %s)", c.Checked, c.HeadID, shortHash(c.HeadHash))
+		} else {
+			s += " · ACTIVITY LOG CHAIN BROKEN: " + c.Problem
+		}
+	}
+	return s
 }

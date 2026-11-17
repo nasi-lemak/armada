@@ -74,6 +74,9 @@ func TestRestoreAndVerifyBackup(t *testing.T) {
 	if info.Devices != 1 || info.Releases != 1 || info.Artifacts != 1 || info.Users != 1 || info.SchemaVersion < 9 || len(info.SigningKey) != 16 {
 		t.Fatalf("verify: %+v", info)
 	}
+	if c := info.ActivityLog; c == nil || !c.Intact || c.Checked == 0 || !strings.Contains(info.String(), "activity log intact") {
+		t.Errorf("backup's activity log: %+v (%s)", c, info)
+	}
 
 	// Never over existing data.
 	busy := t.TempDir()

@@ -75,6 +75,7 @@ armadactl webhooks list
 | `POST /api/v1/deployments/{id}/{approve,pause,resume,advance,retry,complete,abort}` | Control a rollout (`approve`: someone other than its creator) |
 | `GET /api/v1/events` | Activity log. Filters: `type` (comma list; `prefix.*`), `actor` (`system` for none), `q`, `since`/`until` (date or RFC 3339; dates use `tz`), `device_id`, `deployment_id`. Paging: `limit` (up to 1000), `before_id`. `format=csv` exports up to 50,000 entries |
 | `GET /api/v1/events/types` | Event types recorded, for filter menus |
+| `GET /api/v1/events/integrity`, `POST` to check now | The activity log's hash chain: intact or where it breaks, and the newest event's hash (admin) |
 | `GET/POST /api/v1/event-hooks`, `PUT/DELETE /api/v1/event-hooks/{id}`, `POST /api/v1/event-hooks/{id}/test` | Event webhooks |
 | `GET /api/v1/backup`, `GET /api/v1/backup/status`, `POST /api/v1/backup/run` | Download a backup; automatic backups' status; make one now (admins) |
 | `GET/POST /api/v1/sites`, `DELETE /api/v1/sites/{id}`, `POST /api/v1/sites/{id}/token`, `POST /api/v1/sites/{id}/import` | Sites reporting to this central server (admins) |

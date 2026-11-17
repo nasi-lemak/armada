@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nasi-lemak/armada/internal/api"
@@ -25,6 +26,7 @@ type Store struct {
 	db        *sql.DB
 	migration MigrationInfo
 	devs      deviceCache
+	eventMu   sync.Mutex // appends to the activity log's hash chain one at a time
 }
 
 const schema = `
@@ -1183,20 +1185,6 @@ func (s *Store) AddEvent(ctx context.Context, e api.Event) error {
 	return s.RecordEvent(ctx, &e)
 }
 
-// RecordEvent adds an activity-log entry and sets its ID (and time, if unset).
-func (s *Store) RecordEvent(ctx context.Context, e *api.Event) error {
-	if e.Time.IsZero() {
-		e.Time = time.Now()
-	}
-	res, err := s.db.ExecContext(ctx, `INSERT INTO events (time, type, device_id, deployment_id, message, actor) VALUES (?,?,?,?,?,?)`,
-		ts(e.Time), e.Type, e.DeviceID, e.DeploymentID, e.Message, e.Actor)
-	if err != nil {
-		return err
-	}
-	e.ID, err = res.LastInsertId()
-	return err
-}
-
 // PutSite creates or replaces a site (another server reporting here).
 func (s *Store) PutSite(ctx context.Context, site *api.Site) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO sites (id, spec, created_at, token_hash) VALUES (?,?,?,?)
@@ -1322,7 +1310,7 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter, limit int) ([]*a
 	if f.DeviceIDs != nil && len(f.DeviceIDs) == 0 {
 		return nil, nil
 	}
-	q := `SELECT id, time, type, device_id, deployment_id, message, actor FROM events WHERE 1=1`
+	q := `SELECT id, time, type, device_id, deployment_id, message, actor, hash FROM events WHERE 1=1`
 	var args []any
 	if f.DeviceID != "" {
 		q += ` AND device_id=?`
@@ -1397,7 +1385,7 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter, limit int) ([]*a
 	for rows.Next() {
 		var e api.Event
 		var t int64
-		if err := rows.Scan(&e.ID, &t, &e.Type, &e.DeviceID, &e.DeploymentID, &e.Message, &e.Actor); err != nil {
+		if err := rows.Scan(&e.ID, &t, &e.Type, &e.DeviceID, &e.DeploymentID, &e.Message, &e.Actor, &e.Hash); err != nil {
 			return nil, err
 		}
 		e.Time = fromTS(t)
@@ -1422,12 +1410,6 @@ func (s *Store) EventTypes(ctx context.Context) ([]string, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
-}
-
-// PruneEvents keeps the activity log bounded.
-func (s *Store) PruneEvents(ctx context.Context, before time.Time) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM events WHERE time < ?`, ts(before))
-	return err
 }
 
 // ---- apps ----

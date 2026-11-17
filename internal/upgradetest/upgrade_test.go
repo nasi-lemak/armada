@@ -490,6 +490,12 @@ func useNewFeatures(t *testing.T, srv *server, s *seeded) {
 	site := srv.json(t, adminToken, "POST", "/api/v1/sites", obj{"name": "plant 2"}, 201)
 	srv.do(t, adminToken, "DELETE", "/api/v1/sites/"+str(site, "id"), nil, 0)
 
+	// The activity log's hash chain starts after the old release's events.
+	chain := srv.json(t, adminToken, "POST", "/api/v1/events/integrity", nil, 200)
+	if chain["intact"] != true || chain["unchained"] == nil || chain["checked"] == nil {
+		t.Errorf("activity log chain after the upgrade: %v", chain)
+	}
+
 	// A backup of the upgraded database.
 	b := srv.do(t, adminToken, "GET", "/api/v1/backup", nil, 200)
 	if len(b) < 1000 {

@@ -246,6 +246,8 @@ type Server struct {
 	central centralState
 	// metrics counts requests, check-ins and engine passes for /metrics.
 	metrics *metrics
+	// eventChain is the last check of the activity log's hash chain.
+	eventChain eventChainState
 }
 
 // New opens the data directory (creating the database and signing key if
@@ -519,6 +521,8 @@ func (s *Server) Handler() http.Handler {
 	viewer(scopedOK, "GET /api/v1/bulk/{id}", s.handleGetBulk)
 	viewer(scopedOK, "GET /api/v1/events", s.handleListEvents)
 	viewer(scopedOK, "GET /api/v1/events/types", s.handleEventTypes)
+	admin("GET /api/v1/events/integrity", s.handleEventIntegrity)
+	admin("POST /api/v1/events/integrity", s.handleCheckEventIntegrity)
 	viewer(scopedOK, "GET /api/v1/devices/{id}/timeline", s.handleDeviceTimeline)
 	viewer(scopedOK, "GET /api/v1/registrations", s.handleListRegistrations)
 	viewer(scopedOK, "GET /api/v1/labels", s.handleLabels)
@@ -732,6 +736,7 @@ func (s *Server) Run(ctx context.Context) {
 			if err := s.store.PruneEvents(ctx, s.now().Add(-s.cfg.EventRetention)); err != nil && ctx.Err() == nil {
 				s.log.Error("prune events failed", "err", err)
 			}
+			s.eventChainTick(ctx) // daily, and on start
 		}
 		select {
 		case <-ctx.Done():

@@ -282,6 +282,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The activity log's hash chain, as last checked.
+	if c := s.lastEventChain(); c != nil {
+		intact := 0.0
+		if c.Intact {
+			intact = 1
+		}
+		e.gauge("armada_activity_log_intact", "1 if the activity log's hash chain was intact at the last check (daily).", intact)
+		e.gauge("armada_activity_log_checked_time_seconds", "When the activity log's hash chain was last checked (Unix time).", float64(c.CheckedAt.Unix()))
+	}
+
 	// Sites reporting to this server.
 	if sites, err := s.store.ListSites(ctx); err == nil && len(sites) > 0 {
 		e.gauge("armada_sites", "Sites (other Armada servers) reporting here.", float64(len(sites)))

@@ -77,6 +77,8 @@ Commands:
   deployments pause|resume|advance|retry|complete|abort <id>
   events [--device ID] [--deployment ID] [--type T[,T2|prefix.*]] [--actor WHO|system]
          [--search TEXT] [--since DATE] [--until DATE] [--limit N] [--csv]
+  events verify                              check the activity log's hash chain now (admin); prints the
+                                             newest event's hash: keep a copy of it outside the server
 
 Monitoring and alerts:
   monitors list
@@ -1299,6 +1301,24 @@ func (c *cli) deployments(verb string, args []string) error {
 func (c *cli) events(args []string) error {
 	if len(args) > 0 && args[0] == "" {
 		args = args[1:]
+	}
+	if len(args) > 0 && args[0] == "verify" {
+		var st api.EventChainStatus
+		if err := c.do("POST", "/api/v1/events/integrity", nil, &st); err != nil {
+			return err
+		}
+		if c.json {
+			return c.printJSON(st)
+		}
+		if !st.Intact {
+			fmt.Fprintf(c.out, "BROKEN: %s\n", st.Problem)
+			return errors.New("the activity log's hash chain is broken")
+		}
+		fmt.Fprintf(c.out, "intact: %d events checked (the chain starts after event %d)\nnewest: event %d %s\n", st.Checked, st.StartsAfterID, st.HeadID, st.HeadHash)
+		if st.Unchained > 0 {
+			fmt.Fprintf(c.out, "%d older events were recorded before the chain existed\n", st.Unchained)
+		}
+		return nil
 	}
 	fs := flag.NewFlagSet("events", flag.ContinueOnError)
 	device := fs.String("device", "", "")

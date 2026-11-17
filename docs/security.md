@@ -60,6 +60,33 @@ How it works:
 - The dashboard sends a strict Content-Security-Policy and renders all device-supplied
   text as text.
 
+
+## Activity log integrity
+
+The activity log is a hash chain. Each event's hash covers its contents and the hash of the event
+before it, so changing, adding or removing an event outside Armada breaks the chain from that point
+on. Armada can't prevent edits to its own database file by someone with access to the server, but
+this makes them visible.
+
+- **Checked** when the server starts, once a day, and on request. Admins see the result at the top
+  of the **Activity** page, with a **Check now** button. Run `armadactl events verify`,
+  `POST /api/v1/events/integrity`, or watch `armada_activity_log_intact` in Prometheus.
+- **A broken chain** is logged as an error and recorded as an `activity_log.broken` event, which
+  event webhooks pass on. The check names the first event that doesn't match.
+- **Retention** removes the oldest events and moves the chain's start past them, so it isn't a
+  break. Events recorded before upgrading to a version with the chain come before its start.
+- **Every event carries its hash** (`hash` in the API, CSV export and event webhooks), so a SIEM
+  that receives events as they happen can follow the chain itself.
+- **Restoring or checking a backup** (`-restore`, `-verify-backup`) reports whether its chain is
+  intact.
+
+**What it can't catch on its own:** someone who removes the newest events, or who recomputes the
+whole chain after editing it. Against that, keep the newest event's hash somewhere the server can't
+change: `armadactl events verify` prints it, so a daily job can append it to a log on another
+system or a ticket. If a later chain doesn't contain a hash recorded earlier, events were removed or
+rewritten. Sending events off the server as they happen (event webhooks to a SIEM) protects the
+record itself.
+
 ---
 
 [← Armada documentation](../README.md#documentation)

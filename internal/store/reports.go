@@ -100,7 +100,7 @@ func (s *Store) ListDeviceAlerts(ctx context.Context, deviceID string, until tim
 
 // ListEventsBetween returns events of the given types in [from, to), oldest first.
 func (s *Store) ListEventsBetween(ctx context.Context, from, to time.Time, types []string, limit int) ([]*api.Event, error) {
-	q := `SELECT id, time, type, device_id, deployment_id, message, actor FROM events WHERE time >= ? AND time < ?`
+	q := `SELECT id, time, type, device_id, deployment_id, message, actor, hash FROM events WHERE time >= ? AND time < ?`
 	args := []any{ts(from), ts(to)}
 	if len(types) > 0 {
 		q += ` AND type IN (?` + strings.Repeat(",?", len(types)-1) + `)`
@@ -118,7 +118,7 @@ func (s *Store) ListEventsBetween(ctx context.Context, from, to time.Time, types
 	for rows.Next() {
 		var e api.Event
 		var t int64
-		if err := rows.Scan(&e.ID, &t, &e.Type, &e.DeviceID, &e.DeploymentID, &e.Message, &e.Actor); err != nil {
+		if err := rows.Scan(&e.ID, &t, &e.Type, &e.DeviceID, &e.DeploymentID, &e.Message, &e.Actor, &e.Hash); err != nil {
 			return nil, err
 		}
 		e.Time = fromTS(t)

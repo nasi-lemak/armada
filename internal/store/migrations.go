@@ -141,6 +141,18 @@ ALTER TABLE sites ADD COLUMN token_hash TEXT NOT NULL DEFAULT '';
 UPDATE sites SET token_hash = COALESCE(json_extract(spec, '$.token_hash'), '');
 CREATE INDEX IF NOT EXISTS sites_token ON sites(token_hash);
 `},
+	{Version: 18, Name: "activity log hash chain", SQL: `
+ALTER TABLE events ADD COLUMN hash TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS event_chain (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	after_id INTEGER NOT NULL,
+	hash TEXT NOT NULL,
+	reason TEXT NOT NULL,
+	at INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO event_chain (id, after_id, hash, reason, at)
+	SELECT 1, COALESCE(MAX(id), 0), '', 'started', CAST(strftime('%s', 'now') AS INTEGER) * 1000 FROM events;
+`},
 	// Append new migrations here.
 }
 

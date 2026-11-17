@@ -596,6 +596,32 @@ type Event struct {
 	Message      string    `json:"message"`
 	// Actor is who caused the event: a user's email, "admin token", or empty for the system.
 	Actor string `json:"actor,omitempty"`
+	// Hash chains the event to the one before it (see EventChainStatus).
+	// Empty for events recorded before the chain began.
+	Hash string `json:"hash,omitempty"`
+}
+
+// EventChainStatus is the result of checking the activity log's hash chain:
+// each event's hash covers its contents and the previous event's hash, so
+// changing, adding or removing an event outside Armada breaks the chain.
+type EventChainStatus struct {
+	Intact    bool      `json:"intact"`
+	CheckedAt time.Time `json:"checked_at"`
+	// Checked is how many events were checked.
+	Checked int `json:"checked"`
+	// StartsAfterID: the chain begins after this event; earlier ones were
+	// removed by retention, or recorded before the chain existed.
+	StartsAfterID int64 `json:"starts_after_id"`
+	// Unchained events were recorded by a version without the chain.
+	Unchained int `json:"unchained,omitempty"`
+	// HeadID and HeadHash identify the newest event. Keep a copy of them
+	// outside the server: if events are later removed from the end, or the
+	// whole chain is rewritten, the head won't match.
+	HeadID   int64  `json:"head_id,omitempty"`
+	HeadHash string `json:"head_hash"`
+	// BrokenAtID is the first event that doesn't match, if any.
+	BrokenAtID int64  `json:"broken_at_id,omitempty"`
+	Problem    string `json:"problem,omitempty"`
 }
 
 // ---- Agent protocol ----

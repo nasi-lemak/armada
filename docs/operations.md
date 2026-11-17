@@ -93,6 +93,8 @@ groups:
         for: 15m
       - alert: ArmadaTLSCertExpiring
         expr: armada_tls_cert_expiry_time_seconds - time() < 14 * 86400
+      - alert: ArmadaActivityLogChanged # events were edited or removed outside Armada
+        expr: armada_activity_log_intact == 0
 ```
 
 ## Backups
