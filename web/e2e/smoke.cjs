@@ -94,6 +94,12 @@ async function visit(page, who, hash, expectHeading) {
     if (hash === '#/users') {
       const users = await admin.$$eval('#view table tbody tr', r => r.map(x => x.textContent)).catch(() => []);
       if (!users.some(u => u.includes('it@acme.example'))) fail('admin: users page does not list the client account');
+      // Offboarding preview lists the customer's devices and changes nothing.
+      await admin.fill('input[aria-label="Customer labels"]', 'customer=acme');
+      await admin.click('button:has-text("Preview")');
+      await admin.waitForTimeout(500);
+      const plan = await admin.textContent('.card:has(h2:has-text("Customer offboarding"))').catch(() => '');
+      if (!plan.includes('acme-kiosk') || !plan.includes('Offboard customer=acme')) fail(`offboarding preview: ${plan.slice(0, 300)}`);
     }
     if (hash === '#/devices') {
       const rows = await admin.$$eval('#view table tbody tr', r => r.map(x => x.textContent)).catch(() => []);

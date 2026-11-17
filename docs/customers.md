@@ -136,6 +136,35 @@ HTTPS       /healthz 200 in 95 ms (3 of 3 tries: 88 ms, 95 ms, 102 ms)
 Result: OK. The server is reachable.
 ```
 
+
+## Offboarding a customer
+
+When a customer leaves, **Users → Customer offboarding** (or `armadactl offboard`) exports what
+Armada holds about them and then removes it in one step. A customer is its labels, e.g.
+`customer=acme`; anything whose scope includes all of them belongs to the customer.
+
+1. **Preview** (`armadactl offboard plan --label customer=acme`) lists what would go:
+   - devices with those labels;
+   - accounts limited to that customer (deleted), and accounts that also have access to other
+     customers (they lose only this one);
+   - group mappings, enrollment tokens, alert rules, notification channels, event webhooks,
+     pre-registrations, scheduled actions, maintenance windows, report schedules and certificate
+     policies made for the customer.
+2. **Export** (`armadactl offboard export --label customer=acme`) downloads a zip:
+   - `devices/`: one file per device with its inventory, updates, alerts, disconnections,
+     certificates and hourly health history (as far back as history is kept);
+   - `activity.csv`: activity about the customer's devices or by its accounts, with each event's
+     hash;
+   - `accounts.json`, `settings.json` and `manifest.json`.
+
+   Passwords, device keys, tokens and webhook secrets are never included.
+3. **Offboard** (`armadactl offboard run --label customer=acme --confirm customer=acme`): you type
+   the labels to confirm. Devices are deleted, or kept as retired records with `--retire` (the
+   checkbox). Either way their keys stop working.
+
+Only fleet admins can do this. The export and the offboarding are recorded in the activity log
+(`customer.exported`, `customer.offboarded`, and each device removed).
+
 ---
 
 [← Armada documentation](../README.md#documentation)

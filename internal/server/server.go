@@ -522,6 +522,8 @@ func (s *Server) Handler() http.Handler {
 	viewer(scopedOK, "GET /api/v1/events", s.handleListEvents)
 	viewer(scopedOK, "GET /api/v1/events/types", s.handleEventTypes)
 	admin("GET /api/v1/events/integrity", s.handleEventIntegrity)
+	admin("POST /api/v1/offboarding", s.handleOffboard)
+	admin("GET /api/v1/offboarding/export", s.handleOffboardExport)
 	admin("POST /api/v1/events/integrity", s.handleCheckEventIntegrity)
 	viewer(scopedOK, "GET /api/v1/devices/{id}/timeline", s.handleDeviceTimeline)
 	viewer(scopedOK, "GET /api/v1/registrations", s.handleListRegistrations)

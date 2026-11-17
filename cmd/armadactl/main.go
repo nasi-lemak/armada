@@ -163,6 +163,11 @@ Maintenance (alerts held and updates paused for the covered devices):
   history <device-id> [--range 24h|7d|30d|90d] [--check NAME] [--csv]
   backup [-o FILE]                           download a full server backup (database, keys, artifacts)
   backup status | backup run                 automatic backups: how they're doing, or make one now
+  offboard plan --label K=V [--retire]       what offboarding a customer removes (admin)
+  offboard export --label K=V [-o FILE]      everything about the customer, as a zip
+  offboard run --label K=V --confirm K=V [--retire]
+                                             remove the customer's devices (or --retire them), accounts
+                                             and settings
   history checks                             check names with history, and how many devices have each
   history compare --check NAME [--range 7d] [--label K=V]... [--channel C] [--csv]
 
@@ -254,6 +259,8 @@ func (c *cli) run(args []string) error {
 		return c.status()
 	case "events":
 		return c.events(append([]string{verb}, rest...))
+	case "offboard":
+		return c.offboard(verb, rest)
 	case "devices", "device":
 		return c.devices(verb, rest)
 	case "tokens", "token":

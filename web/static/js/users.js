@@ -84,7 +84,8 @@ async function viewUsers(root) {
         h('label', {}, 'Only devices with labels (client accounts)', scopeIn), h('label', {}, 'Initial password (10+ characters)', passIn)),
       h('p', { class: 'muted' }, 'A scoped user sees only matching devices, their alerts, history and activity. They never see releases, deployments, other customers or fleet-wide settings, and devices they enroll get the scope labels.'),
       h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Add user')))),
-    h('div', { class: 'spacer' }), list, h('div', { class: 'spacer' }), mapBox, h('div', { class: 'spacer' }), scimBox);
+    h('div', { class: 'spacer' }), list, h('div', { class: 'spacer' }), mapBox, h('div', { class: 'spacer' }), scimBox,
+    h('div', { class: 'spacer' }), offboardCard());
   syncRole();
   guard(() => refreshSCIM());
   guard(refreshMappings);
@@ -139,4 +140,44 @@ async function viewUsers(root) {
   }
   await guard(refresh);
   return async () => { if (!root.contains(document.activeElement) || document.activeElement === document.body) await refresh(); };
+}
+
+// offboardCard: when a customer leaves, export what Armada holds about them,
+// then remove their devices, accounts and settings in one step.
+const OFFBOARD_SECTIONS = [['devices', 'Devices'], ['users', 'Accounts deleted'], ['users_narrowed', 'Accounts that lose only this customer'],
+  ['group_mappings', 'Group mappings'], ['tokens', 'Enrollment tokens revoked'], ['alert_rules', 'Alert rules'], ['channels', 'Notification channels'],
+  ['event_hooks', 'Event webhooks'], ['registrations', 'Pre-registrations'], ['scheduled_actions', 'Scheduled actions'],
+  ['maintenance', 'Maintenance windows'], ['report_schedules', 'Report schedules'], ['cert_policies', 'Certificate policies']];
+
+function offboardCard() {
+  const labelsIn = h('input', { placeholder: 'customer=acme', 'aria-label': 'Customer labels' });
+  const retireIn = h('input', { type: 'checkbox' });
+  const result = h('div', { class: 'mt' });
+  const body = () => {
+    const labels = parseLabels(labelsIn.value);
+    if (!Object.keys(labels).length) throw new Error('Enter the customer\'s labels, e.g. customer=acme');
+    return { labels, device_action: retireIn.checked ? 'retire' : 'delete' };
+  };
+  const show = (plan) => {
+    const rows = OFFBOARD_SECTIONS.filter(([k]) => (plan[k] || []).length)
+      .map(([k, title]) => h('tr', {}, h('td', { class: 'nowrap' }, title), h('td', {}, String(plan[k].length)),
+        h('td', {}, plan[k].map(it => it.name || it.id).join(', '))));
+    const runBtn = h('button', { class: 'btn danger', onclick: async () => {
+      const typed = prompt(`This ${plan.device_action === 'retire' ? 'retires' : 'deletes'} ${(plan.devices || []).length} devices and removes the accounts and settings listed. Their keys stop working.\n\nType ${plan.confirm} to confirm.`);
+      if (typed === null) return;
+      const done = await guard(() => api('POST', '/api/v1/offboarding', { ...body(), confirm: typed.trim() }), `Customer ${plan.confirm} offboarded`);
+      if (done) show(done);
+    } }, `Offboard ${plan.confirm}…`);
+    replace(result, h('div', { class: 'stack' },
+      h('div', {}, plan.done ? h('strong', {}, `Offboarded ${plan.confirm}. `) : h('strong', {}, `Offboarding ${plan.confirm} would remove:`)),
+      rows.length ? table(['', 'How many', 'Which'], rows) : h('p', { class: 'muted' }, 'Nothing belongs to these labels.'),
+      plan.done || !rows.length ? null : h('div', { class: 'btn-row' }, runBtn)));
+  };
+  return h('div', { class: 'card' }, h('h2', {}, 'Customer offboarding'),
+    h('p', { class: 'muted' }, 'When a customer leaves: export everything Armada holds about them (devices with their history, alerts, disconnections and certificates; activity; accounts; settings, without secrets), then remove their devices, accounts and settings in one step. Accounts with access to other customers keep it.'),
+    h('div', { class: 'toolbar' }, h('label', {}, 'Customer labels ', labelsIn),
+      h('label', { class: 'check' }, retireIn, 'Keep devices as retired records instead of deleting them'),
+      h('button', { class: 'btn', onclick: () => guard(async () => show(await api('POST', '/api/v1/offboarding', body()))) }, 'Preview'),
+      h('button', { class: 'btn', onclick: () => guard(() => downloadFile('/api/v1/offboarding/export?labels=' + encodeURIComponent(Object.entries(body().labels).map(([k, v]) => k + '=' + v).join(',')), 'armada-export.zip')) }, 'Export')),
+    result);
 }

@@ -307,7 +307,7 @@ Each topic has its own page. Start with [Quick start](#quick-start) and [Concept
 | [Configuration profiles](docs/configuration.md) | Configuration profiles: files and app settings pushed to devices, OS updates |
 | [Alerts](docs/alerts.md) | Alert rules, channels (webhook, Slack, email), acknowledging, maintenance, alerts for client accounts |
 | [Device inventory](docs/inventory.md) | Serials, asset tags, locations, pre-registration, CSV import and export, QR labels |
-| [Customers and projects](docs/customers.md) | The customer/project picker, Needs attention, disconnections, remote screenshots, network checks |
+| [Customers and projects](docs/customers.md) | The customer/project picker, Needs attention, disconnections, remote screenshots, network checks, offboarding a customer |
 | [Cloud, on-prem and offline sites](docs/sites.md) | Cloud, on-prem and offline sites; one view of several servers |
 | [Device lifecycle](docs/lifecycle.md) | Spares, repair, RMA replacement, retirement |
 | [Bulk operations](docs/bulk-operations.md) | Actions on many devices at once, and scheduled actions |
