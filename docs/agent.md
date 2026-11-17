@@ -49,6 +49,27 @@
 | `reboot_command` | `["systemctl","reboot"]` | |
 | `command_timeout` | `10m` | Applies to hooks and exec actions |
 
+## Resource use
+
+Measured on Linux (amd64) with the default settings: a 30-second check-in and push enabled.
+
+| | |
+|---|---|
+| Binary | about 8 MB |
+| Memory, idle | about 13 MB resident |
+| Memory, installing a 300 MB update | peaks at about 12 MB (full download) and 16 MB (delta update): downloads stream to disk |
+| CPU, idle | about 0.3 seconds an hour |
+| Disk | the binary, a small state file, and update downloads while they install |
+| Data, idle | about 140 KB an hour, roughly 100 MB a month, before TLS and TCP/IP overhead |
+
+Most of the data is check-ins, which carry health results. The agent compresses them once the server
+says it accepts compressed bodies (servers from this version on; older servers get them plain),
+which halves the upload. To use less on metered links:
+
+- **Check in less often:** `-heartbeat-interval` on the server (for example `2m` quarters the data).
+  Actions still arrive at once over the push connection.
+- **Delta updates** (on by default) download only the parts of a release that changed.
+
 ## Package hooks
 
 Hooks are argv arrays run **without a shell**. They receive:
